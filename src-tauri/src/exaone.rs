@@ -18,6 +18,27 @@ pub const MAX_TOOL_ROUNDS: usize = 10;
 pub const MAX_TOOL_OUTPUT_CHARS: usize = 40_000;
 
 pub const STREAM_EVENT: &str = "exaone-stream";
+
+/// API 키가 실려 나가는 주소이므로 https만 허용한다. 내 PC에서 띄운 모델 서버(localhost)는 http도 허용.
+pub fn validate_base_url(raw: &str) -> Result<(), String> {
+    let url = reqwest::Url::parse(raw.trim())
+        .map_err(|_| format!("엔드포인트 주소가 올바르지 않습니다: {}", raw))?;
+    let local = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
+    match url.scheme() {
+        "https" => {}
+        "http" if local => {}
+        _ => {
+            return Err(
+                "API 키 보호를 위해 엔드포인트는 https:// 주소만 쓸 수 있습니다. (localhost는 http 허용)"
+                    .to_string(),
+            )
+        }
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("엔드포인트 주소에 사용자 이름이나 비밀번호를 넣을 수 없습니다.".to_string());
+    }
+    Ok(())
+}
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// 요청 후 응답 헤더가 올 때까지 기다리는 최대 시간.
 const RESPONSE_HEADER_TIMEOUT: Duration = Duration::from_secs(180);
@@ -641,6 +662,7 @@ pub async fn run_exaone_turn<R: Runtime>(
     if settings.api_key.trim().is_empty() {
         return Err("EXAONE API 키가 설정되지 않았습니다. 좌측 하단 [API 설정] 버튼을 눌러 API Key를 입력해 주세요.".to_string());
     }
+    validate_base_url(&settings.base_url)?;
 
     let tools_enabled = req.project.is_some();
     let sys_prompt = build_system_prompt(req.project);
@@ -930,6 +952,41 @@ fn file_title(rel: &str) -> String {
 /// `.docx`/`.pptx`/`.pdf`는 웹뷰의 문서 변환기를 거쳐 Markdown으로 읽고 쓴다.
 /// 반환값: (기록, 스냅샷, 승인 필요 여부)
 pub async fn execute_or_queue_tool<R: Runtime>(
+    app: &AppHandle<R>,
+    root: &Path,
+    project_id: &str,
+    call_id: &str,
+    name: &str,
+    args: &Value,
+) -> (ToolExecutionRecord, Option<FileSnapshot>, bool) {
+    // git hook·VS Code 작업·CI 워크플로처럼 다른 프로그램이 자동 실행하는 설정은 승인 후에만 쓴다.
+    if matches!(name, "write_file" | "modify_file")
+        && fs_ops::is_sensitive_for_agent(str_arg(args, "relative_path"))
+    {
+        let rel = str_arg(args, "relative_path").replace('\\', "/");
+        return (
+            tool_record(
+                call_id,
+                name,
+                serde_json::to_string(args).unwrap_or_default(),
+                "pending_approval",
+                format!(
+                    "'{}'은(는) 다른 프로그램이 자동으로 실행할 수 있는 설정 폴더라 사용자 승인이 필요합니다.",
+                    rel
+                ),
+                Some(rel),
+                None,
+            ),
+            None,
+            true,
+        );
+    }
+    execute_tool_now(app, root, project_id, call_id, name, args).await
+}
+
+/// 승인 여부를 따지지 않고 도구를 실행한다. 삭제·명령 실행은 여전히 승인 대기로 돌려준다.
+/// (사용자가 승인한 보호 경로 쓰기도 이 함수로 실행한다.)
+pub async fn execute_tool_now<R: Runtime>(
     app: &AppHandle<R>,
     root: &Path,
     project_id: &str,
@@ -1298,6 +1355,63 @@ mod tests {
         assert_eq!(r.status, "error");
     }
 
+    #[tokio::test]
+    async fn writes_to_auto_run_config_need_approval() {
+        let app = tauri::test::mock_app();
+        let dir = tempfile::tempdir().unwrap();
+        let args = json!({"relative_path": ".git/hooks/pre-commit", "content": "evil"});
+        let (r, snap, needs) =
+            execute_or_queue_tool(app.handle(), dir.path(), "p", "c1", "write_file", &args).await;
+        assert!(needs);
+        assert!(snap.is_none());
+        assert_eq!(r.status, "pending_approval");
+        assert!(!dir.path().join(".git/hooks/pre-commit").exists());
+
+        // 승인되면 그대로 실행된다.
+        let (r, snap, needs) =
+            execute_tool_now(app.handle(), dir.path(), "p", "c1", "write_file", &args).await;
+        assert!(!needs);
+        assert_eq!(r.status, "completed");
+        assert!(snap.is_some());
+        assert!(dir.path().join(".git/hooks/pre-commit").exists());
+
+        // 일반 경로는 바로 쓴다.
+        let (r, _, needs) = execute_or_queue_tool(
+            app.handle(), dir.path(), "p", "c2", "write_file",
+            &json!({"relative_path": "src/.gitignore", "content": "x"}),
+        )
+        .await;
+        assert!(!needs);
+        assert_eq!(r.status, "completed");
+    }
+
+    #[test]
+    fn base_url_must_be_https_unless_local() {
+        assert!(validate_base_url("https://api.exaone.ai/v1/chat/completions").is_ok());
+        assert!(validate_base_url("http://localhost:8000/v1/chat/completions").is_ok());
+        assert!(validate_base_url("http://127.0.0.1:8000/v1").is_ok());
+        assert!(validate_base_url("http://api.exaone.ai/v1").is_err());
+        assert!(validate_base_url("http://localhost.evil.com/v1").is_err());
+        assert!(validate_base_url("https://user:pw@api.exaone.ai/v1").is_err());
+        assert!(validate_base_url("file:///C:/x").is_err());
+        assert!(validate_base_url("not a url").is_err());
+    }
+
+    #[test]
+    fn api_key_is_never_serialized() {
+        let s = test_settings("https://x".into());
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("test-key"));
+        assert!(!json.contains("apiKey\""));
+        assert!(json.contains("\"apiKeySet\":true"));
+        // 화면에서 보낸 키는 받을 수 있어야 한다.
+        let back: AppSettings = serde_json::from_str(
+            r#"{"apiKey":"new","baseUrl":"https://x","model":"m","reasoningEffort":"high","writingStyle":"default"}"#,
+        )
+        .unwrap();
+        assert_eq!(back.api_key, "new");
+    }
+
     /// 프론트엔드 문서 변환기를 흉내 내는 응답기를 붙인 모의 앱
     fn app_with_fake_converter() -> tauri::App<tauri::test::MockRuntime> {
         use base64::Engine;
@@ -1441,6 +1555,7 @@ mod tests {
     fn test_settings(url: String) -> AppSettings {
         AppSettings {
             api_key: "test-key".into(),
+            api_key_set: true,
             base_url: url,
             model: "k-exaone_v2.5".into(),
             reasoning_effort: "high".into(),

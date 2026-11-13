@@ -1,9 +1,11 @@
 import { marked } from "marked";
 import TurndownService from "turndown";
 import { gfm } from "turndown-plugin-gfm";
+import { sanitizeHtml } from "../security/sanitize";
 
 export function markdownToHtml(md: string): string {
-  return marked.parse(md, { gfm: true, breaks: false, async: false }) as string;
+  // Markdown 안의 원시 HTML(스크립트·이벤트 처리기 등)은 편집기에 넣기 전에 걸러 낸다.
+  return sanitizeHtml(marked.parse(md, { gfm: true, breaks: false, async: false }) as string);
 }
 
 function createTurndown(): TurndownService {

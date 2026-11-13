@@ -1,5 +1,8 @@
 export interface AppSettings {
+  /** 화면에서 새 키를 보낼 때만 쓴다. 저장된 키는 화면으로 돌아오지 않는다 (비어 있으면 기존 키 유지). */
   apiKey: string;
+  /** 저장된 키가 있는지 */
+  apiKeySet?: boolean;
   baseUrl: string;
   model: string;
   reasoningEffort: "low" | "high" | "max";

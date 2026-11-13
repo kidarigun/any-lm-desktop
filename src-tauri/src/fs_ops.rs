@@ -24,19 +24,74 @@ pub fn resolve_safe_path(root: &Path, relative: &str) -> Result<PathBuf, String>
         .trim_start_matches('/')
         .trim_start_matches('\\');
 
+    let outside = || {
+        format!(
+            "보안 오류: 프로젝트 루트 외부 경로('{}')에는 접근할 수 없습니다.",
+            relative
+        )
+    };
     let rel_path = Path::new(clean_rel);
     for comp in rel_path.components() {
         match comp {
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(format!(
-                    "보안 오류: 프로젝트 루트 외부 경로('{}')에는 접근할 수 없습니다.",
-                    relative
-                ));
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return Err(outside()),
+            Component::Normal(part) => {
+                let part = part.to_string_lossy();
+                // "file.txt:stream" 같은 NTFS 대체 데이터 스트림과 CON·NUL 같은 장치 이름은 막는다.
+                if part.contains(':') || is_reserved_device_name(&part) {
+                    return Err(format!("보안 오류: 사용할 수 없는 경로 이름입니다: '{}'", relative));
+                }
             }
-            _ => {}
+            Component::CurDir => {}
         }
     }
-    Ok(root.join(rel_path))
+    let joined = root.join(rel_path);
+    ensure_inside_root(root, &joined).map_err(|_| outside())?;
+    Ok(joined)
+}
+
+/// 심볼릭 링크·정션을 따라가면 프로젝트 밖이 되는 경로를 막는다.
+/// 아직 없는 경로는 존재하는 가장 가까운 상위 폴더를 기준으로 확인한다.
+fn ensure_inside_root(root: &Path, target: &Path) -> Result<(), ()> {
+    let canon_root = fs::canonicalize(root).map_err(|_| ())?;
+    let mut probe = target;
+    loop {
+        // symlink_metadata는 링크 자체를 본다. 끊어진 링크도 "존재"로 보고 아래 canonicalize에서 거부한다.
+        if fs::symlink_metadata(probe).is_ok() {
+            let canon = fs::canonicalize(probe).map_err(|_| ())?;
+            return if canon.starts_with(&canon_root) { Ok(()) } else { Err(()) };
+        }
+        probe = probe.parent().ok_or(())?;
+    }
+}
+
+fn is_reserved_device_name(part: &str) -> bool {
+    let stem = part.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.as_bytes()[3].is_ascii_digit()
+            && stem.as_bytes()[3] != b'0')
+}
+
+/// 에이전트가 쓰면 다른 프로그램이 자동으로 실행할 수 있는 설정 폴더.
+/// (git hook, VS Code 작업, CI 워크플로, Claude Code hook 등)
+const AGENT_SENSITIVE_DIRS: &[&str] = &[".git", ".vscode", ".idea", ".github", ".claude", ".husky"];
+
+/// 에이전트의 파일 쓰기에 사용자 승인이 필요한 경로인지 확인한다.
+pub fn is_sensitive_for_agent(relative: &str) -> bool {
+    let norm = relative.trim().replace('\\', "/");
+    let first = norm
+        .trim_start_matches('/')
+        .split('/')
+        .find(|s| !s.is_empty() && *s != ".")
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    AGENT_SENSITIVE_DIRS.contains(&first.as_str())
+}
+
+/// 디렉터리 순회에서 심볼릭 링크·정션은 따라가지 않는다 (프로젝트 밖으로 새는 것을 막는다).
+fn is_link(entry: &fs::DirEntry) -> bool {
+    entry.file_type().map(|t| t.is_symlink()).unwrap_or(true)
 }
 
 const IGNORED_DIRS: &[&str] = &[
@@ -139,7 +194,7 @@ pub fn find_files_by_name(root: &Path, query: &str, limit: usize) -> Vec<String>
                 break;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            if IGNORED_DIRS.contains(&name.as_str()) {
+            if IGNORED_DIRS.contains(&name.as_str()) || is_link(&entry) {
                 continue;
             }
             let path = entry.path();
@@ -200,7 +255,7 @@ fn build_tree_recursive(
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        if IGNORED_DIRS.contains(&name.as_str()) {
+        if IGNORED_DIRS.contains(&name.as_str()) || is_link(&entry) {
             continue;
         }
         let rel = path
@@ -475,7 +530,7 @@ fn search_recursive(
         }
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        if IGNORED_DIRS.contains(&name.as_str()) {
+        if IGNORED_DIRS.contains(&name.as_str()) || is_link(&entry) {
             continue;
         }
         if path.is_dir() {
@@ -616,6 +671,59 @@ mod tests {
 
         // 5. Reject path traversal
         assert!(resolve_safe_path(root, "../outside.txt").is_err());
+    }
+
+    #[test]
+    fn rejects_streams_device_names_and_links_outside_root() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("proj");
+        fs::create_dir_all(root.join("docs")).unwrap();
+        let outside = dir.path().join("secret");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("key.txt"), "TOP SECRET").unwrap();
+
+        assert!(resolve_safe_path(&root, "docs/a.md").is_ok());
+        assert!(resolve_safe_path(&root, "new/dir/b.md").is_ok());
+        assert!(resolve_safe_path(&root, "a.txt:hidden").is_err());
+        assert!(resolve_safe_path(&root, "docs/CON").is_err());
+        assert!(resolve_safe_path(&root, "nul.txt").is_err());
+        assert!(resolve_safe_path(&root, "com1.log").is_err());
+        assert!(resolve_safe_path(&root, "com0.log").is_ok());
+        assert!(resolve_safe_path(&root, "console.md").is_ok());
+        assert!(resolve_safe_path(&root, "C:\\Windows\\win.ini").is_err());
+
+        // 정션(관리자 권한 없이 만들 수 있음)으로 밖을 가리키는 폴더
+        #[cfg(windows)]
+        {
+            let link = root.join("escape");
+            let ok = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&link)
+                .arg(&outside)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if ok {
+                assert!(resolve_safe_path(&root, "escape/key.txt").is_err());
+                assert!(resolve_safe_path(&root, "escape/new.txt").is_err());
+                assert!(read_file_content(&root, "escape/key.txt").is_err());
+                // 검색과 트리도 정션을 따라가지 않는다.
+                assert!(search_in_files(&root, "TOP SECRET").unwrap_or_default().find("key.txt").is_none());
+                assert!(find_files_by_name(&root, "key", 10).is_empty());
+                let _ = fs::remove_dir(&link);
+            }
+        }
+    }
+
+    #[test]
+    fn sensitive_agent_paths() {
+        assert!(is_sensitive_for_agent(".git/hooks/pre-commit"));
+        assert!(is_sensitive_for_agent("./.VSCode/tasks.json"));
+        assert!(is_sensitive_for_agent("\\.github\\workflows\\ci.yml"));
+        assert!(is_sensitive_for_agent(".claude/settings.json"));
+        assert!(!is_sensitive_for_agent("src/.gitignore"));
+        assert!(!is_sensitive_for_agent(".gitignore"));
+        assert!(!is_sensitive_for_agent("docs/report.md"));
     }
 
     #[test]

@@ -59,14 +59,36 @@ export const BackendAPI = {
     return loadFallbackDb();
   },
 
+  /** 저장된 API 키를 Windows 자격 증명 관리자에서 지운다. */
+  async clearApiKey(): Promise<AppSettings> {
+    if (isTauri()) {
+      return await invoke<AppSettings>("clear_api_key");
+    }
+    const db = loadFallbackDb();
+    db.settings = { ...db.settings, apiKey: "", apiKeySet: false };
+    localStorage.setItem(FALLBACK_STORAGE_KEY, JSON.stringify(db));
+    return db.settings;
+  },
+
+  /** http(s)·mailto 링크를 기본 브라우저로 연다. */
+  async openExternalUrl(url: string): Promise<void> {
+    if (isTauri()) {
+      await invoke("open_external_url", { url });
+      return;
+    }
+    window.open(url, "_blank", "noopener,noreferrer");
+  },
+
   async saveSettings(settings: AppSettings): Promise<AppSettings> {
     if (isTauri()) {
       return await invoke<AppSettings>("save_settings", { settings });
     }
     const db = loadFallbackDb();
-    db.settings = settings;
+    // 브라우저 미리보기 모드: 키를 입력하지 않았으면 기존 키를 유지한다.
+    const apiKey = settings.apiKey?.trim() || db.settings.apiKey || "";
+    db.settings = { ...settings, apiKey, apiKeySet: !!apiKey };
     localStorage.setItem(FALLBACK_STORAGE_KEY, JSON.stringify(db));
-    return settings;
+    return { ...db.settings, apiKey: "" };
   },
 
   async pickFolderDialog(initialDir?: string): Promise<string | null> {

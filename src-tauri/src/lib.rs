@@ -1,11 +1,13 @@
 pub mod doc_bridge;
 pub mod exaone;
 pub mod fs_ops;
+pub mod secrets;
 pub mod store;
 
 use exaone::TurnRequest;
 use fs_ops::FileNode;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,7 +16,7 @@ use std::time::Duration;
 use store::{
     AppDatabase, AppSettings, ChatMessage, Conversation, FileSnapshot, Project, StoreManager,
 };
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager, Runtime, State};
 use uuid::Uuid;
 
 /// 일반 채팅(프로젝트 폴더와 연결되지 않은 대화)의 project_id.
@@ -77,7 +79,15 @@ async fn read_attachments<R: tauri::Runtime>(
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| fpath.clone());
         let bytes = if Path::new(fpath).is_absolute() {
-            std::fs::read(fpath).map_err(|e| e.to_string())
+            let granted = app
+                .try_state::<PathGrants>()
+                .map(|g| g.is_granted(Path::new(fpath)))
+                .unwrap_or(false);
+            if granted {
+                std::fs::read(fpath).map_err(|e| e.to_string())
+            } else {
+                Err(not_granted(fpath))
+            }
         } else if let Some(p) = project {
             fs_ops::read_file_bytes(Path::new(&p.root_path), fpath)
         } else {
@@ -128,12 +138,103 @@ fn get_initial_state(state: State<'_, AppState>) -> Result<AppDatabase, String> 
     Ok(db.clone())
 }
 
+/// 설정 저장. `api_key`가 비어 있으면 기존 키를 그대로 둔다 (키 삭제는 `clear_api_key`).
 #[tauri::command]
 fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> Result<AppSettings, String> {
+    exaone::validate_base_url(&settings.base_url)?;
+    let new_key = settings.api_key.trim().to_string();
+    if !new_key.is_empty() {
+        secrets::store_api_key(&new_key)?;
+    }
     let mut db = state.db.lock().map_err(|e| e.to_string())?;
-    db.settings = settings.clone();
+    let api_key = if new_key.is_empty() { db.settings.api_key.clone() } else { new_key };
+    db.settings = AppSettings { api_key_set: !api_key.is_empty(), api_key, ..settings };
     state.store.save(&db)?;
-    Ok(settings)
+    // api_key는 직렬화되지 않으므로 화면에는 키가 전달되지 않는다.
+    Ok(db.settings.clone())
+}
+
+#[tauri::command]
+fn clear_api_key(state: State<'_, AppState>) -> Result<AppSettings, String> {
+    secrets::delete_api_key()?;
+    let mut db = state.db.lock().map_err(|e| e.to_string())?;
+    db.settings.api_key.clear();
+    db.settings.api_key_set = false;
+    state.store.save(&db)?;
+    Ok(db.settings.clone())
+}
+
+/// 자격 증명 관리자에서 키를 불러온다. 예전 버전이 설정 파일에 평문으로 남긴 키는 옮기고 파일에서 지운다.
+fn load_api_key_into(store: &StoreManager, db: &mut AppDatabase) {
+    let legacy = std::mem::take(&mut db.settings.api_key).trim().to_string();
+    if !legacy.is_empty() {
+        match secrets::store_api_key(&legacy) {
+            // api_key는 직렬화되지 않으므로 다시 저장하면 파일에서 평문 키가 사라진다.
+            Ok(()) => {
+                if let Err(e) = store.save(db) {
+                    eprintln!("설정 파일 정리 실패: {}", e);
+                }
+            }
+            Err(e) => eprintln!("{}", e),
+        }
+        db.settings.api_key = legacy;
+    } else {
+        match secrets::load_api_key() {
+            Ok(k) => db.settings.api_key = k.unwrap_or_default(),
+            Err(e) => eprintln!("{}", e),
+        }
+    }
+    db.settings.api_key_set = !db.settings.api_key.is_empty();
+}
+
+// ---------------------------------------------------------------------------
+// 사용자가 대화상자에서 직접 고른 경로만 프로젝트 밖에서 읽고 쓸 수 있다.
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+pub struct PathGrants(Mutex<HashSet<String>>);
+
+impl PathGrants {
+    fn key(path: &Path) -> Option<String> {
+        if !path.is_absolute() {
+            return None;
+        }
+        let parent = std::fs::canonicalize(path.parent()?).ok()?;
+        Some(parent.join(path.file_name()?).to_string_lossy().to_lowercase())
+    }
+
+    pub fn grant(&self, path: &str) {
+        if let (Some(k), Ok(mut set)) = (Self::key(Path::new(path)), self.0.lock()) {
+            set.insert(k);
+        }
+    }
+
+    pub fn is_granted(&self, path: &Path) -> bool {
+        match (Self::key(path), self.0.lock()) {
+            (Some(k), Ok(set)) => set.contains(&k),
+            _ => false,
+        }
+    }
+}
+
+fn not_granted(path: &str) -> String {
+    format!(
+        "보안 정책: 프로젝트 밖의 파일은 파일 선택 창에서 직접 고른 경우에만 열거나 저장할 수 있습니다. ({})",
+        path
+    )
+}
+
+/// Windows Forms 대화상자를 PowerShell로 띄운다.
+/// 사용자 입력(경로·파일 이름)은 스크립트에 끼워 넣지 않고 환경 변수로 넘겨 명령 주입을 막는다.
+#[cfg(target_os = "windows")]
+fn run_dialog_script(script: &str, env: &[(&str, &str)]) -> Result<String, String> {
+    let mut cmd = Command::new("powershell");
+    cmd.args(["-NoProfile", "-STA", "-WindowStyle", "Hidden", "-Command", script]);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().map_err(|e| format!("대화상자 실행 실패: {}", e))?;
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
 #[tauri::command]
@@ -141,36 +242,22 @@ async fn pick_folder_dialog(initial_dir: Option<String>) -> Result<Option<String
     tokio::task::spawn_blocking(move || {
         #[cfg(target_os = "windows")]
         {
-            let init = initial_dir.unwrap_or_default().replace('\'', "''");
-            let script = format!(
-                r#"
+            const SCRIPT: &str = r#"
                 Add-Type -AssemblyName System.Windows.Forms
                 $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
                 $dlg.Description = '프로젝트 폴더를 선택하세요'
                 $dlg.UseDescriptionForTitle = $true
                 $dlg.AutoUpgradeEnabled = $true
-                if ('{init}' -ne '' -and (Test-Path '{init}')) {{
-                    $dlg.SelectedPath = '{init}'
-                }}
-                $res = $dlg.ShowDialog()
-                if ($res -eq [System.Windows.Forms.DialogResult]::OK) {{
+                $init = $env:EXAONE_DLG_INIT
+                if ($init -and (Test-Path -LiteralPath $init)) { $dlg.SelectedPath = $init }
+                if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
                     Write-Output $dlg.SelectedPath
-                }}
-                "#
-            );
-
-            let out = Command::new("powershell")
-                .args(["-NoProfile", "-STA", "-WindowStyle", "Hidden", "-Command", &script])
-                .output()
-                .map_err(|e| format!("폴더 선택 창 실행 실패: {}", e))?;
-
-            let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if path.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(path))
-            }
+                }
+            "#;
+            let init = initial_dir.unwrap_or_default();
+            let path = run_dialog_script(SCRIPT, &[("EXAONE_DLG_INIT", &init)])?.trim().to_string();
+            Ok(if path.is_empty() { None } else { Some(path) })
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -182,42 +269,33 @@ async fn pick_folder_dialog(initial_dir: Option<String>) -> Result<Option<String
     .map_err(|e| e.to_string())?
 }
 
+/// 고른 파일은 프로젝트 밖에 있어도 이번 실행 동안 읽고(첨부·열기) 저장할 수 있게 허용한다.
 #[tauri::command]
-async fn pick_files_dialog(initial_dir: Option<String>) -> Result<Vec<String>, String> {
-    tokio::task::spawn_blocking(move || {
+async fn pick_files_dialog(
+    grants: State<'_, PathGrants>,
+    initial_dir: Option<String>,
+) -> Result<Vec<String>, String> {
+    let files: Vec<String> = tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
         #[cfg(target_os = "windows")]
         {
-            let init = initial_dir.unwrap_or_default().replace('\'', "''");
-            let script = format!(
-                r#"
+            const SCRIPT: &str = r#"
                 Add-Type -AssemblyName System.Windows.Forms
                 $dlg = New-Object System.Windows.Forms.OpenFileDialog
-                $dlg.Title = '첨부할 파일을 선택하세요'
+                $dlg.Title = '파일을 선택하세요'
                 $dlg.Multiselect = $true
-                if ('{init}' -ne '' -and (Test-Path '{init}')) {{
-                    $dlg.InitialDirectory = '{init}'
-                }}
-                $res = $dlg.ShowDialog()
-                if ($res -eq [System.Windows.Forms.DialogResult]::OK) {{
+                $init = $env:EXAONE_DLG_INIT
+                if ($init -and (Test-Path -LiteralPath $init)) { $dlg.InitialDirectory = $init }
+                if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-                    foreach ($f in $dlg.FileNames) {{
-                        Write-Output $f
-                    }}
-                }}
-                "#
-            );
-
-            let out = Command::new("powershell")
-                .args(["-NoProfile", "-STA", "-WindowStyle", "Hidden", "-Command", &script])
-                .output()
-                .map_err(|e| format!("파일 선택 창 실행 실패: {}", e))?;
-
-            let files: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                    foreach ($f in $dlg.FileNames) { Write-Output $f }
+                }
+            "#;
+            let init = initial_dir.unwrap_or_default();
+            Ok(run_dialog_script(SCRIPT, &[("EXAONE_DLG_INIT", &init)])?
                 .lines()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
-                .collect();
-            Ok(files)
+                .collect())
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -226,7 +304,11 @@ async fn pick_files_dialog(initial_dir: Option<String>) -> Result<Vec<String>, S
         }
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+    for f in &files {
+        grants.grant(f);
+    }
+    Ok(files)
 }
 
 #[tauri::command]
@@ -718,6 +800,17 @@ async fn resolve_tool_approval(
                     Err(e) => ("error", e),
                 }
             }
+            // 보호된 설정 폴더(.git, .vscode 등)에 대한 쓰기
+            "write_file" | "modify_file" => {
+                let (rec, snap, _) =
+                    exaone::execute_tool_now(&app, &root, &project.id, &tool_id, &tool_name, &args).await;
+                new_snap = snap;
+                if rec.status == "completed" {
+                    ("completed", format!("승인 완료: {}", rec.output))
+                } else {
+                    ("error", rec.output)
+                }
+            }
             other => ("error", format!("승인이 필요 없는 도구입니다: {}", other)),
         }
     };
@@ -833,11 +926,14 @@ fn read_project_file_base64(
 
 /// 사용자가 파일 열기 창에서 고른 파일(프로젝트 밖일 수 있음)을 base64로 읽는다.
 #[tauri::command]
-fn read_absolute_file_base64(path: String) -> Result<String, String> {
+fn read_absolute_file_base64(grants: State<'_, PathGrants>, path: String) -> Result<String, String> {
     const MAX_BYTES: u64 = 200 * 1024 * 1024;
     let p = PathBuf::from(&path);
     if !p.is_absolute() || !p.is_file() {
         return Err(format!("파일을 찾을 수 없습니다: {}", path));
+    }
+    if !grants.is_granted(&p) {
+        return Err(not_granted(&path));
     }
     let size = std::fs::metadata(&p).map_err(|e| e.to_string())?.len();
     if size > MAX_BYTES {
@@ -885,6 +981,7 @@ fn relative_to_root(root: &Path, absolute: &Path) -> Option<String> {
 #[tauri::command]
 fn save_file_to_path(
     state: State<'_, AppState>,
+    grants: State<'_, PathGrants>,
     project_id: Option<String>,
     absolute_path: String,
     data_base64: String,
@@ -902,52 +999,51 @@ fn save_file_to_path(
             return Ok(SaveResult { absolute_path, relative_path: Some(rel), snapshot: Some(snap) });
         }
     }
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("폴더를 만들 수 없습니다: {}", e))?;
+    if !grants.is_granted(&target) {
+        return Err(not_granted(&absolute_path));
     }
     std::fs::write(&target, bytes).map_err(|e| format!("파일 저장 실패: {}", e))?;
     Ok(SaveResult { absolute_path, relative_path: None, snapshot: None })
 }
 
 /// Windows 저장 대화상자. `filter` 예: "Word 문서 (*.docx)|*.docx"
+/// 고른 경로는 이번 실행 동안 저장할 수 있게 허용한다.
 #[tauri::command]
 async fn pick_save_path_dialog(
+    grants: State<'_, PathGrants>,
     initial_dir: Option<String>,
     default_name: String,
     filter: String,
 ) -> Result<Option<String>, String> {
-    tokio::task::spawn_blocking(move || {
+    let picked = tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
         #[cfg(target_os = "windows")]
         {
-            let esc = |s: &str| s.replace('\'', "''");
-            let init = esc(&initial_dir.unwrap_or_default());
-            let script = format!(
-                r#"
+            const SCRIPT: &str = r#"
                 Add-Type -AssemblyName System.Windows.Forms
                 $dlg = New-Object System.Windows.Forms.SaveFileDialog
                 $dlg.Title = '다른 이름으로 저장'
-                $dlg.FileName = '{name}'
-                $dlg.Filter = '{filter}'
+                $dlg.FileName = $env:EXAONE_DLG_NAME
+                try { $dlg.Filter = $env:EXAONE_DLG_FILTER } catch { $dlg.Filter = '모든 파일 (*.*)|*.*' }
                 $dlg.OverwritePrompt = $true
                 $dlg.AddExtension = $true
-                if ('{init}' -ne '' -and (Test-Path '{init}')) {{
-                    $dlg.InitialDirectory = '{init}'
-                }}
-                $res = $dlg.ShowDialog()
-                if ($res -eq [System.Windows.Forms.DialogResult]::OK) {{
+                $init = $env:EXAONE_DLG_INIT
+                if ($init -and (Test-Path -LiteralPath $init)) { $dlg.InitialDirectory = $init }
+                if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
                     Write-Output $dlg.FileName
-                }}
-                "#,
-                name = esc(&default_name),
-                filter = esc(&filter),
-                init = init
-            );
-            let out = Command::new("powershell")
-                .args(["-NoProfile", "-STA", "-WindowStyle", "Hidden", "-Command", &script])
-                .output()
-                .map_err(|e| format!("저장 창 실행 실패: {}", e))?;
-            let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                }
+            "#;
+            let init = initial_dir.unwrap_or_default();
+            let path = run_dialog_script(
+                SCRIPT,
+                &[
+                    ("EXAONE_DLG_INIT", &init),
+                    ("EXAONE_DLG_NAME", &default_name),
+                    ("EXAONE_DLG_FILTER", &filter),
+                ],
+            )?
+            .trim()
+            .to_string();
             Ok(if path.is_empty() { None } else { Some(path) })
         }
         #[cfg(not(target_os = "windows"))]
@@ -957,7 +1053,11 @@ async fn pick_save_path_dialog(
         }
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+    if let Some(p) = &picked {
+        grants.grant(p);
+    }
+    Ok(picked)
 }
 
 // ---------------------------------------------------------------------------
@@ -1048,6 +1148,46 @@ fn reveal_project_path(
     Ok(())
 }
 
+/// 채팅 답변의 링크를 기본 브라우저로 연다. http(s)·mailto만 허용한다.
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url.trim()).map_err(|_| "올바른 링크가 아닙니다.".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https" | "mailto") {
+        return Err(format!("열 수 없는 링크 형식입니다: {}", parsed.scheme()));
+    }
+    #[cfg(target_os = "windows")]
+    Command::new("explorer")
+        .arg(parsed.as_str())
+        .spawn()
+        .map_err(|e| format!("브라우저를 열 수 없습니다: {}", e))?;
+    Ok(())
+}
+
+/// 앱 화면이 외부 사이트로 이동하지 못하게 한다 (외부 링크는 open_external_url로 브라우저에서 연다).
+pub fn is_app_url(url: &tauri::Url) -> bool {
+    match url.scheme() {
+        "tauri" => true,
+        "http" | "https" => match url.host_str() {
+            Some("tauri.localhost") => true,
+            Some("localhost") => cfg!(debug_assertions) && url.port() == Some(1420),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn navigation_guard<R: Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    tauri::plugin::Builder::new("navigation-guard")
+        .on_navigation(|_webview, url| {
+            let ok = is_app_url(url);
+            if !ok {
+                eprintln!("차단한 화면 이동: {}", url);
+            }
+            ok
+        })
+        .build()
+}
+
 /// 웹뷰 문서 변환기가 처리 결과를 돌려준다.
 #[tauri::command]
 fn doc_bridge_respond(
@@ -1061,6 +1201,7 @@ fn doc_bridge_respond(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(navigation_guard())
         .setup(|app| {
             let app_data_dir = app
                 .path()
@@ -1068,18 +1209,22 @@ pub fn run() {
                 .unwrap_or_else(|_| PathBuf::from("c:\\DOCS\\EXAONE\\.exaone_data"));
             fs_ops::set_blob_dir(app_data_dir.join("blobs"));
             let store = StoreManager::new(&app_data_dir);
-            let initial_db = store.load();
+            let mut initial_db = store.load();
+            load_api_key_into(&store, &mut initial_db);
             app.manage(AppState {
                 store,
                 db: Mutex::new(initial_db),
                 cancel_flag: Arc::new(AtomicBool::new(false)),
             });
             app.manage(doc_bridge::DocBridge::default());
+            app.manage(PathGrants::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_initial_state,
             save_settings,
+            clear_api_key,
+            open_external_url,
             pick_folder_dialog,
             pick_files_dialog,
             cancel_generation,
@@ -1113,4 +1258,44 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running EXAONE Desktop application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn navigation_is_limited_to_the_app() {
+        let ok = |u: &str| is_app_url(&tauri::Url::parse(u).unwrap());
+        assert!(ok("tauri://localhost/index.html"));
+        assert!(ok("http://tauri.localhost/"));
+        assert!(!ok("https://evil.example.com/"));
+        assert!(!ok("http://tauri.localhost.evil.com/"));
+        assert!(!ok("file:///C:/Windows/win.ini"));
+        assert!(!ok("javascript:alert(1)"));
+        assert_eq!(ok("http://localhost:1420/"), cfg!(debug_assertions));
+        assert!(!ok("http://localhost:9999/"));
+    }
+
+    #[test]
+    fn only_dialog_picked_paths_are_granted() {
+        let dir = tempfile::tempdir().unwrap();
+        let picked = dir.path().join("보고서.docx");
+        std::fs::write(&picked, b"x").unwrap();
+        let other = dir.path().join("other.txt");
+
+        let grants = PathGrants::default();
+        assert!(!grants.is_granted(&picked));
+        grants.grant(&picked.to_string_lossy());
+        assert!(grants.is_granted(&picked));
+        // 대소문자·다른 표기도 같은 파일로 본다.
+        let upper = PathBuf::from(picked.to_string_lossy().to_uppercase());
+        assert!(grants.is_granted(&upper));
+        assert!(!grants.is_granted(&other));
+        assert!(!grants.is_granted(Path::new("보고서.docx")));
+        // 상위 폴더를 거쳐 돌아오는 경로도 정규화된다.
+        let dotted = dir.path().join("sub").join("..").join("보고서.docx");
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        assert!(grants.is_granted(&dotted));
+    }
 }

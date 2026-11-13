@@ -5,7 +5,13 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
+    /// 실제 키는 Windows 자격 증명 관리자에 둔다. 설정 파일에도, 화면(웹뷰)에도 내보내지 않는다.
+    /// 화면에서 받을 때만 쓰며, 비어 있으면 "기존 키 유지"를 뜻한다.
+    #[serde(default, skip_serializing)]
     pub api_key: String,
+    /// 저장된 키가 있는지 (화면 표시용)
+    #[serde(default)]
+    pub api_key_set: bool,
     pub base_url: String,
     pub model: String,
     pub reasoning_effort: String, // "low" | "high" | "max"
@@ -16,6 +22,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             api_key: String::new(),
+            api_key_set: false,
             base_url: "https://api.exaone.ai/v1/chat/completions".to_string(),
             model: "k-exaone_v2.5".to_string(),
             reasoning_effort: "high".to_string(),

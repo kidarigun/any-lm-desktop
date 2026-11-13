@@ -201,9 +201,22 @@ async function readTheme(zip: JSZip, masterPath: string): Promise<Theme> {
   for (const c of scheme ? Array.from(scheme.children) : []) {
     const srgb = kid(c, "srgbClr")?.getAttribute("val");
     const sys = kid(c, "sysClr")?.getAttribute("lastClr");
-    if (srgb || sys) theme[c.localName] = (srgb || sys)!.toUpperCase();
+    const hex = safeHex(srgb || sys);
+    if (hex) theme[c.localName] = hex;
   }
   return theme;
+}
+
+/** 파일에서 읽은 색 값은 6자리 16진수만 받는다 (HTML·CSS에 그대로 들어가므로). */
+/** 글꼴 이름에는 글자·숫자·공백·하이픈 등만 남긴다 (CSS에 들어가므로). */
+export function safeFontName(v: string | null | undefined): string | undefined {
+  const t = (v ?? "").replace(/[^\p{L}\p{N} _.+\-]/gu, "").trim();
+  return t || undefined;
+}
+
+export function safeHex(v: string | null | undefined): string | undefined {
+  const t = (v ?? "").trim().toUpperCase();
+  return /^[0-9A-F]{6}$/.test(t) ? t : undefined;
 }
 
 function applyLum(hex: string, colorEl: Element): string {
@@ -222,7 +235,7 @@ const SCHEME_ALIAS: Record<string, string> = { bg1: "lt1", tx1: "dk1", bg2: "lt2
 function colorFrom(container: Element | null, theme: Theme): string | undefined {
   if (!container) return undefined;
   const srgb = kid(container, "srgbClr");
-  if (srgb) return "#" + applyLum((srgb.getAttribute("val") || "000000").toUpperCase(), srgb);
+  if (srgb) return "#" + applyLum(safeHex(srgb.getAttribute("val")) ?? "000000", srgb);
   const scheme = kid(container, "schemeClr");
   if (scheme) {
     const name = scheme.getAttribute("val") || "";
@@ -230,7 +243,7 @@ function colorFrom(container: Element | null, theme: Theme): string | undefined 
     return base ? "#" + applyLum(base, scheme) : undefined;
   }
   const sys = kid(container, "sysClr");
-  if (sys) return "#" + (sys.getAttribute("lastClr") || "000000");
+  if (sys) return "#" + (safeHex(sys.getAttribute("lastClr")) ?? "000000");
   return undefined;
 }
 
@@ -424,7 +437,7 @@ function parseTextBody(
         underline: !!rPr?.getAttribute("u") && rPr?.getAttribute("u") !== "none",
         sizePt: (sz ? num(sz) / 100 : defaultSize) * fontScale,
         color: colorFrom(kid(rPr, "solidFill"), ctx.theme),
-        font: kid(rPr, "latin")?.getAttribute("typeface") || undefined,
+        font: safeFontName(kid(rPr, "latin")?.getAttribute("typeface")),
       });
     }
 

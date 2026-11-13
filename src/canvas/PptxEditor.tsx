@@ -228,7 +228,7 @@ function runsHtml(runs: PptxRun[], scale: number): string {
       ]
         .filter(Boolean)
         .join(";");
-      return `<span style="${css}">${escapeHtml(r.text)}</span>`;
+      return `<span style="${escapeHtml(css)}">${escapeHtml(r.text)}</span>`;
     })
     .join("");
 }

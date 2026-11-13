@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { marked } from "marked";
+import { isExternalLink, renderMarkdownSafe } from "./security/sanitize";
 import {
   Check,
   ChevronDown,
@@ -92,6 +92,15 @@ function extractArtifactFromMessage(msg: ChatMessage): ArtifactRef | null {
   return bestBlock;
 }
 
+/** 답변 속 링크는 앱 화면을 바꾸지 않고 기본 브라우저로 연다. */
+function handleMarkdownLinkClick(e: React.MouseEvent<HTMLElement>) {
+  const a = (e.target as HTMLElement).closest("a");
+  if (!a) return;
+  e.preventDefault();
+  const href = a.getAttribute("href");
+  if (isExternalLink(href)) BackendAPI.openExternalUrl(href).catch(() => {});
+}
+
 function isInsideRoot(root: string, absolute: string): string | null {
   const norm = (p: string) => p.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
   const r = norm(root);
@@ -165,6 +174,13 @@ export default function App() {
   );
   // Modals
   const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  /** 저장하지 않고 닫으면 입력하던 키는 버린다. */
+  function closeSettingsModal() {
+    setSettings((s) => ({ ...s, apiKey: "" }));
+    setSettingsError(null);
+    setShowSettingsModal(false);
+  }
   const [showProjectModal, setShowProjectModal] = useState<boolean>(false);
   const [editingProject, setEditingProject] = useState<{
     id?: string;
@@ -271,7 +287,8 @@ export default function App() {
     (async () => {
       try {
         const db = await BackendAPI.getInitialState();
-        setSettings(db.settings);
+        // 저장된 API 키는 화면으로 오지 않는다 (apiKeySet으로 존재 여부만 안다).
+        setSettings({ ...db.settings, apiKey: "" });
         setProjects(db.projects);
         setConversations(db.conversations);
         setSnapshots(db.snapshots);
@@ -966,12 +983,12 @@ export default function App() {
             </span>
             <span
               className={`text-xs font-semibold ${
-                settings.apiKey
+                settings.apiKeySet
                   ? "text-emerald-700 dark:text-emerald-400"
                   : "text-amber-700 dark:text-amber-400"
               }`}
             >
-              {settings.apiKey ? "연결됨" : "키 입력 필요"}
+              {settings.apiKeySet ? "연결됨" : "키 입력 필요"}
             </span>
           </button>
         </div>
@@ -1389,8 +1406,9 @@ export default function App() {
                           {msg.content && (
                             <div
                               className="markdown-body text-sm text-stone-800 dark:text-stone-100 select-text"
+                              onClick={handleMarkdownLinkClick}
                               dangerouslySetInnerHTML={{
-                                __html: marked.parse(msg.content) as string,
+                                __html: renderMarkdownSafe(msg.content),
                               }}
                             />
                           )}
@@ -1489,8 +1507,9 @@ export default function App() {
                     {streamingContent && (
                       <div
                         className="markdown-body text-sm text-stone-800 dark:text-stone-100 select-text"
+                        onClick={handleMarkdownLinkClick}
                         dangerouslySetInnerHTML={{
-                          __html: marked.parse(streamingContent) as string,
+                          __html: renderMarkdownSafe(streamingContent),
                         }}
                       />
                     )}
@@ -1647,7 +1666,7 @@ export default function App() {
               <h3 className="text-sm font-bold text-stone-900 dark:text-stone-100">
                 API 설정
               </h3>
-              <button onClick={() => setShowSettingsModal(false)}>
+              <button onClick={closeSettingsModal}>
                 <X className="w-4 h-4 text-stone-400" />
               </button>
             </div>
@@ -1659,13 +1678,39 @@ export default function App() {
                 </label>
                 <input
                   type="password"
-                  value={settings.apiKey}
+                  autoComplete="off"
+                  value={settings.apiKey ?? ""}
                   onChange={(e) =>
                     setSettings({ ...settings, apiKey: e.target.value })
                   }
-                  placeholder="발급받은 EXAONE API Key 입력"
+                  placeholder={
+                    settings.apiKeySet
+                      ? "저장된 키 사용 중 — 바꾸려면 새 키 입력"
+                      : "발급받은 EXAONE API Key 입력"
+                  }
                   className="w-full bg-white dark:bg-[#1E1E1C] border border-stone-300 dark:border-[#3A3A36] rounded-xl px-3 py-2 text-stone-900 dark:text-stone-100 focus:outline-none focus:border-[#A50034]"
                 />
+                <div className="mt-1 flex items-center justify-between text-[11px] text-stone-500 dark:text-stone-400">
+                  <span>키는 Windows 자격 증명 관리자에 암호화되어 저장됩니다.</span>
+                  {settings.apiKeySet && (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (!window.confirm("저장된 API 키를 삭제할까요?")) return;
+                        try {
+                          const saved = await BackendAPI.clearApiKey();
+                          setSettings({ ...saved, apiKey: "" });
+                          setSettingsError(null);
+                        } catch (err) {
+                          setSettingsError(String(err));
+                        }
+                      }}
+                      className="text-[#A50034] dark:text-[#FF5C8D] font-semibold hover:underline cursor-pointer"
+                    >
+                      저장된 키 삭제
+                    </button>
+                  )}
+                </div>
               </div>
               <div>
                 <label className="font-semibold text-stone-700 dark:text-stone-300 block mb-1">
@@ -1695,17 +1740,28 @@ export default function App() {
               </div>
             </div>
 
+            {settingsError && (
+              <div className="rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 px-3 py-2 text-xs text-red-700 dark:text-red-300">
+                {settingsError}
+              </div>
+            )}
             <div className="flex justify-end gap-2 pt-2">
               <button
-                onClick={() => setShowSettingsModal(false)}
+                onClick={closeSettingsModal}
                 className="px-4 py-2 rounded-xl bg-stone-100 dark:bg-[#32322F] text-stone-700 dark:text-stone-200 text-xs font-semibold cursor-pointer"
               >
                 취소
               </button>
               <button
                 onClick={async () => {
-                  await BackendAPI.saveSettings(settings);
-                  setShowSettingsModal(false);
+                  try {
+                    const saved = await BackendAPI.saveSettings(settings);
+                    setSettings({ ...saved, apiKey: "" });
+                    setSettingsError(null);
+                    setShowSettingsModal(false);
+                  } catch (err) {
+                    setSettingsError(String(err));
+                  }
                 }}
                 className="px-4 py-2 rounded-xl bg-[#A50034] text-white text-xs font-bold cursor-pointer"
               >
@@ -1849,6 +1905,29 @@ export default function App() {
   );
 }
 
+/** 승인 카드에 보여 줄 내용: 명령은 그대로, 파일 쓰기는 경로와 내용을 보여 준다. */
+function approvalPreview(record: ToolExecutionRecord): string {
+  let args: Record<string, unknown> = {};
+  try {
+    args = JSON.parse(record.argumentsJson || "{}");
+  } catch {
+    return record.argumentsJson;
+  }
+  const str = (k: string) => (typeof args[k] === "string" ? (args[k] as string) : "");
+  switch (record.toolName) {
+    case "run_command":
+      return `> ${str("command")}`;
+    case "delete_path":
+      return `삭제: ${str("relative_path")}`;
+    case "write_file":
+      return `파일: ${str("relative_path")}\n\n${str("content")}`;
+    case "modify_file":
+      return `파일: ${str("relative_path")}\n\n- 바꿀 원문:\n${str("target")}\n\n+ 새 내용:\n${str("replacement")}`;
+    default:
+      return JSON.stringify(args, null, 2);
+  }
+}
+
 function ToolCallBox({
   record,
   onOpenFile,
@@ -1904,11 +1983,16 @@ function ToolCallBox({
       </div>
 
       {isPending ? (
-        <div className="pt-1 flex items-center justify-between">
-          <span className="text-amber-800 dark:text-amber-300">
-            실행 승인이 필요합니다: <code>{record.argumentsJson}</code>
-          </span>
-          <div className="flex gap-1.5">
+        <div className="pt-1 space-y-1.5">
+          <div className="text-amber-800 dark:text-amber-300">
+            {record.output && record.output !== "사용자 승인을 기다리고 있습니다."
+              ? record.output
+              : "실행 승인이 필요합니다. 내용을 확인하세요."}
+          </div>
+          <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-stone-900 text-stone-100 px-2.5 py-2 font-mono text-[11px]">
+            {approvalPreview(record)}
+          </pre>
+          <div className="flex justify-end gap-1.5">
             <button
               onClick={() => onApprove(true)}
               disabled={approvalDisabled}

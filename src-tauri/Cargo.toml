@@ -23,6 +23,7 @@ uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 base64 = "0.22"
 trash = "5.3.0"
+keyring = { version = "3.6", features = ["windows-native"] }
 
 [dev-dependencies]
 tempfile = "3"
