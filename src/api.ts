@@ -262,6 +262,36 @@ export const BackendAPI = {
     throw new Error("Tauri 데스크톱 창에서만 문서 파일을 열 수 있습니다.");
   },
 
+  async listProjectDir(projectId: string, relativePath: string): Promise<FileNode[]> {
+    if (isTauri()) {
+      return await invoke<FileNode[]>("list_project_dir", { projectId, relativePath });
+    }
+    return [];
+  },
+
+  async createProjectFile(projectId: string, relativePath: string): Promise<string> {
+    return await invoke<string>("create_project_file", { projectId, relativePath });
+  },
+
+  async renameProjectPath(projectId: string, from: string, to: string): Promise<string> {
+    return await invoke<string>("rename_project_path", { projectId, from, to });
+  },
+
+  async trashProjectPath(projectId: string, relativePath: string): Promise<void> {
+    await invoke("trash_project_path", { projectId, relativePath });
+  },
+
+  async findProjectFiles(projectId: string, query: string): Promise<string[]> {
+    if (isTauri()) {
+      return await invoke<string[]>("find_project_files", { projectId, query });
+    }
+    return [];
+  },
+
+  async revealProjectPath(projectId: string, relativePath: string): Promise<void> {
+    await invoke("reveal_project_path", { projectId, relativePath });
+  },
+
   async readAbsoluteFileBase64(path: string): Promise<string> {
     if (isTauri()) {
       return await invoke<string>("read_absolute_file_base64", { path });

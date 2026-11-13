@@ -143,7 +143,9 @@ export default function DocumentCanvas({
     return () => {
       cancelled = true;
     };
-  }, [doc]);
+    // 저장·이름 바꾸기로 경로나 제목만 바뀐 경우에는 편집 중인 내용을 다시 불러오지 않는다.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc.id]);
 
   const markDirty = useCallback(() => setDirty(true), []);
 

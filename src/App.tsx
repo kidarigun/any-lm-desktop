@@ -37,6 +37,8 @@ import {
 // 문서 편집 라이브러리(TipTap, docx, pptxgenjs, pdf.js)는 캔버스를 처음 열 때 불러온다.
 const DocumentCanvas = React.lazy(() => import("./canvas/DocumentCanvas"));
 import { startDocBridge } from "./docs/bridge";
+import { DRAG_MIME, FileExplorer, type ExplorerApi } from "./explorer/FileExplorer";
+import { useFileMention } from "./explorer/FileMention";
 import { docKindOf, docKindOfLanguage, isBinaryKind } from "./docs/formats";
 import {
   AppSettings,
@@ -153,6 +155,11 @@ export default function App() {
 
   // Collapsible Claude-style Right Artifact Drawer
   const [canvasExpanded, setCanvasExpanded] = useState<boolean>(false);
+  // 사이드바 하단: 대화 목록 / 프로젝트 파일 탐색기
+  const [sidebarTab, setSidebarTab] = useState<"chats" | "files">("chats");
+  const [fileTreeVersion, setFileTreeVersion] = useState(0);
+  const bumpFileTree = () => setFileTreeVersion((v) => v + 1);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const [activeArtifact, setActiveArtifact] = useState<CanvasDoc | null>(
     null
   );
@@ -202,6 +209,63 @@ export default function App() {
     [filteredConversations, activeConvId]
   );
 
+  // 프로젝트 파일 탐색기 (일반 채팅에서는 사용하지 않음)
+  const explorerProjectId = currentScopeId !== "general-chat" ? activeProject?.id : undefined;
+  const explorerApi = useMemo<ExplorerApi | null>(() => {
+    if (!explorerProjectId) return null;
+    const id = explorerProjectId;
+    return {
+      listDir: (rel) => BackendAPI.listProjectDir(id, rel),
+      createFile: (rel) => BackendAPI.createProjectFile(id, rel),
+      createFolder: (rel) => BackendAPI.createProjectFolder(id, rel),
+      rename: (from, to) => BackendAPI.renameProjectPath(id, from, to),
+      trash: (rel) => BackendAPI.trashProjectPath(id, rel),
+      reveal: (rel) => BackendAPI.revealProjectPath(id, rel),
+      find: (q) => BackendAPI.findProjectFiles(id, q),
+    };
+  }, [explorerProjectId]);
+
+  const attachFile = (path: string) =>
+    setAttachedFiles((prev) => (prev.includes(path) ? prev : [...prev, path]));
+
+  const mention = useFileMention({
+    search: explorerApi ? explorerApi.find : null,
+    value: inputPrompt,
+    setValue: setInputPrompt,
+    textareaRef: composerRef,
+    onPick: attachFile,
+  });
+
+  // 다른 프로그램에서 파일을 바꿨을 수 있으니 창으로 돌아오면 파일 목록을 다시 읽는다.
+  useEffect(() => {
+    const onFocus = () => setFileTreeVersion((v) => v + 1);
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, []);
+
+  const isUnderPath = (path: string, dir: string) => path === dir || path.startsWith(dir + "/");
+
+  function handleExplorerRenamed(from: string, to: string) {
+    setActiveArtifact((prev) =>
+      prev?.filePath && isUnderPath(prev.filePath, from)
+        ? {
+            ...prev,
+            filePath: to + prev.filePath.slice(from.length),
+            title: (to + prev.filePath.slice(from.length)).split("/").pop() || prev.title,
+          }
+        : prev
+    );
+    setAttachedFiles((prev) => prev.map((f) => (isUnderPath(f, from) ? to + f.slice(from.length) : f)));
+  }
+
+  function handleExplorerDeleted(rel: string) {
+    // 캔버스의 편집 내용은 남겨 두고, 저장하면 새 위치를 묻도록 경로만 지운다.
+    setActiveArtifact((prev) =>
+      prev?.filePath && isUnderPath(prev.filePath, rel) ? { ...prev, filePath: undefined } : prev
+    );
+    setAttachedFiles((prev) => prev.filter((f) => !isUnderPath(f, rel)));
+  }
+
   // Initial load
   useEffect(() => {
     (async () => {
@@ -241,6 +305,10 @@ export default function App() {
       }
       if (payload.toolRecord) {
         setStreamingTools((prev) => [...prev, payload.toolRecord!]);
+        const r = payload.toolRecord;
+        if (r.status === "completed" && ["write_file", "modify_file", "delete_path"].includes(r.toolName)) {
+          setFileTreeVersion((v) => v + 1);
+        }
       }
       if (payload.snapshot) {
         setSnapshots((prev) => [...prev, payload.snapshot!]);
@@ -408,6 +476,7 @@ export default function App() {
   }
 
   function handleCanvasSaved(info: CanvasSavedInfo) {
+    bumpFileTree();
     if (info.snapshot) setSnapshots((prev) => [...prev, info.snapshot!]);
     if (info.replacesCurrent) {
       setActiveArtifact((prev) =>
@@ -478,6 +547,7 @@ export default function App() {
         setShowSettingsModal(true);
       }
     } finally {
+      bumpFileTree();
       setIsStreaming(false);
       setRetryNotice("");
       setStreamingReasoning("");
@@ -533,6 +603,7 @@ export default function App() {
       );
       setErrorBanner(String(err));
     } finally {
+      bumpFileTree();
       setIsStreaming(false);
       setRetryNotice("");
       setStreamingReasoning("");
@@ -621,6 +692,7 @@ export default function App() {
         // ignore
       }
     } finally {
+      bumpFileTree();
       setIsStreaming(false);
       setRetryNotice("");
       setStreamingReasoning("");
@@ -632,6 +704,7 @@ export default function App() {
   async function handleUndoSnapshot(snapshotId: string) {
     try {
       await BackendAPI.undoFileSnapshot(snapshotId);
+      bumpFileTree();
       if (activeArtifact?.filePath && activeProject) {
         await openFileInArtifact(activeArtifact.filePath);
       }
@@ -795,14 +868,46 @@ export default function App() {
             </div>
           )}
 
-          {/* Recent Conversations with Search */}
+          {/* Recent Conversations with Search / Project File Explorer */}
           <div className="flex-1 flex flex-col min-h-0 space-y-2">
-            <div className="flex items-center justify-between px-1">
-              <span className="text-xs font-bold text-stone-500 dark:text-stone-400">
-                최근 대화
-              </span>
-            </div>
+            {explorerApi ? (
+              <div className="grid grid-cols-2 gap-1 bg-stone-200/80 dark:bg-[#242421] p-1 rounded-xl text-xs">
+                {(["chats", "files"] as const).map((tab) => (
+                  <button
+                    key={tab}
+                    onClick={() => setSidebarTab(tab)}
+                    className={`py-1 rounded-lg font-semibold cursor-pointer transition ${
+                      sidebarTab === tab
+                        ? "bg-white dark:bg-[#32322E] text-stone-900 dark:text-stone-100 shadow-2xs"
+                        : "text-stone-600 dark:text-stone-400 hover:text-stone-900 dark:hover:text-stone-200"
+                    }`}
+                  >
+                    {tab === "chats" ? "대화" : "파일"}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="flex items-center justify-between px-1">
+                <span className="text-xs font-bold text-stone-500 dark:text-stone-400">
+                  최근 대화
+                </span>
+              </div>
+            )}
 
+            {explorerApi && sidebarTab === "files" ? (
+              <FileExplorer
+                api={explorerApi}
+                rootName={activeProject?.name ?? "프로젝트"}
+                refreshToken={fileTreeVersion}
+                activePath={activeArtifact?.filePath}
+                onOpen={openFileInArtifact}
+                onAttach={attachFile}
+                onRenamed={handleExplorerRenamed}
+                onDeleted={handleExplorerDeleted}
+                onError={(msg) => setErrorBanner(msg)}
+              />
+            ) : (
+            <>
             <div className="relative">
               <Search className="w-3.5 h-3.5 text-stone-400 absolute left-2.5 top-2" />
               <input
@@ -844,6 +949,8 @@ export default function App() {
                 </div>
               ))}
             </div>
+            </>
+            )}
           </div>
         </div>
 
@@ -1396,7 +1503,23 @@ export default function App() {
 
             {/* Bottom Input Composer */}
             <div className="px-6 pb-5 pt-2">
-              <div className="max-w-3xl mx-auto bg-white dark:bg-[#262624] border border-stone-300 dark:border-[#3A3A36] rounded-2xl p-3 shadow-xs focus-within:border-[#A50034] dark:focus-within:border-[#FF5C8D] space-y-2">
+              <div
+                className="relative max-w-3xl mx-auto bg-white dark:bg-[#262624] border border-stone-300 dark:border-[#3A3A36] rounded-2xl p-3 shadow-xs focus-within:border-[#A50034] dark:focus-within:border-[#FF5C8D] space-y-2"
+                onDragOver={(e) => {
+                  if (e.dataTransfer.types.includes(DRAG_MIME)) {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = "copy";
+                  }
+                }}
+                onDrop={(e) => {
+                  const rel = e.dataTransfer.getData(DRAG_MIME);
+                  if (rel) {
+                    e.preventDefault();
+                    attachFile(rel);
+                  }
+                }}
+              >
+                {mention.popup}
                 {attachedFiles.length > 0 && (
                   <div className="flex flex-wrap gap-1.5 pb-1.5 border-b border-stone-100 dark:border-[#363632]">
                     {attachedFiles.map((f) => {
@@ -1427,16 +1550,30 @@ export default function App() {
                 )}
 
                 <textarea
+                  ref={composerRef}
                   rows={3}
                   value={inputPrompt}
-                  onChange={(e) => setInputPrompt(e.target.value)}
+                  onChange={(e) => {
+                    setInputPrompt(e.target.value);
+                    mention.sync();
+                  }}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
+                    if (mention.handleKeyDown(e)) return;
+                    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                       e.preventDefault();
                       handleSend();
                     }
                   }}
-                  placeholder="메시지를 입력하세요..."
+                  onKeyUp={(e) => {
+                    if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) mention.sync();
+                  }}
+                  onClick={() => mention.sync()}
+                  onBlur={() => mention.close()}
+                  placeholder={
+                    explorerApi
+                      ? "메시지를 입력하세요... (@로 프로젝트 파일 첨부)"
+                      : "메시지를 입력하세요..."
+                  }
                   className="w-full text-sm text-stone-800 dark:text-stone-100 bg-transparent placeholder:text-stone-400 dark:placeholder:text-stone-500 resize-none focus:outline-none leading-relaxed"
                 />
 

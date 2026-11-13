@@ -960,6 +960,94 @@ async fn pick_save_path_dialog(
     .map_err(|e| e.to_string())?
 }
 
+// ---------------------------------------------------------------------------
+// 파일 탐색기
+// ---------------------------------------------------------------------------
+
+/// 폴더 하나의 바로 아래 항목 (빈 문자열이면 프로젝트 루트)
+#[tauri::command]
+fn list_project_dir(
+    state: State<'_, AppState>,
+    project_id: String,
+    relative_path: String,
+) -> Result<Vec<FileNode>, String> {
+    let (root, _) = project_root(&state, &project_id)?;
+    fs_ops::list_dir_children(&root, &relative_path)
+}
+
+#[tauri::command]
+fn create_project_file(
+    state: State<'_, AppState>,
+    project_id: String,
+    relative_path: String,
+) -> Result<String, String> {
+    let (root, _) = project_root(&state, &project_id)?;
+    fs_ops::create_empty_file(&root, &relative_path)
+}
+
+#[tauri::command]
+fn rename_project_path(
+    state: State<'_, AppState>,
+    project_id: String,
+    from: String,
+    to: String,
+) -> Result<String, String> {
+    let (root, _) = project_root(&state, &project_id)?;
+    fs_ops::rename_path(&root, &from, &to)
+}
+
+/// 사용자가 탐색기에서 지운 항목은 Windows 휴지통으로 보낸다.
+#[tauri::command]
+async fn trash_project_path(
+    state: State<'_, AppState>,
+    project_id: String,
+    relative_path: String,
+) -> Result<(), String> {
+    let (root, _) = project_root(&state, &project_id)?;
+    tokio::task::spawn_blocking(move || fs_ops::move_to_trash(&root, &relative_path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// @멘션용 파일 이름 검색
+#[tauri::command]
+async fn find_project_files(
+    state: State<'_, AppState>,
+    project_id: String,
+    query: String,
+) -> Result<Vec<String>, String> {
+    let (root, _) = project_root(&state, &project_id)?;
+    tokio::task::spawn_blocking(move || fs_ops::find_files_by_name(&root, &query, 30))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Windows 탐색기에서 해당 파일을 선택한 상태로 연다.
+#[tauri::command]
+fn reveal_project_path(
+    state: State<'_, AppState>,
+    project_id: String,
+    relative_path: String,
+) -> Result<(), String> {
+    let (root, _) = project_root(&state, &project_id)?;
+    let target = fs_ops::resolve_safe_path(&root, &relative_path)?;
+    #[cfg(target_os = "windows")]
+    {
+        let arg = if target.is_dir() && relative_path.is_empty() {
+            target.to_string_lossy().to_string()
+        } else {
+            format!("/select,{}", target.to_string_lossy())
+        };
+        Command::new("explorer")
+            .arg(arg)
+            .spawn()
+            .map_err(|e| format!("탐색기를 열 수 없습니다: {}", e))?;
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = target;
+    Ok(())
+}
+
 /// 웹뷰 문서 변환기가 처리 결과를 돌려준다.
 #[tauri::command]
 fn doc_bridge_respond(
@@ -1016,6 +1104,12 @@ pub fn run() {
             save_file_to_path,
             pick_save_path_dialog,
             doc_bridge_respond,
+            list_project_dir,
+            create_project_file,
+            rename_project_path,
+            trash_project_path,
+            find_project_files,
+            reveal_project_path,
         ])
         .run(tauri::generate_context!())
         .expect("error while running EXAONE Desktop application");

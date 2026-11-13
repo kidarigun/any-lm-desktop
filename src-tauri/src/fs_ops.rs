@@ -65,6 +65,113 @@ pub fn list_project_subtree(
     build_tree_recursive(root, start, 0, max_depth)
 }
 
+/// 폴더 하나의 바로 아래 항목만 나열한다 (파일 탐색기의 지연 로딩용).
+pub fn list_dir_children(root: &Path, relative_path: &str) -> Result<Vec<FileNode>, String> {
+    let target = resolve_safe_path(root, relative_path)?;
+    list_project_subtree(root, &target, 0)
+}
+
+/// 파일·폴더 이름을 바꾸거나 다른 폴더로 옮긴다.
+pub fn rename_path(root: &Path, from: &str, to: &str) -> Result<String, String> {
+    let src = resolve_safe_path(root, from)?;
+    let dst = resolve_safe_path(root, to)?;
+    if src == root || dst == root {
+        return Err("프로젝트 폴더 자체는 이름을 바꿀 수 없습니다.".to_string());
+    }
+    if !src.exists() {
+        return Err(format!("대상이 존재하지 않습니다: {}", from));
+    }
+    // Windows는 대소문자만 다른 이름도 같은 파일로 보므로, 그 경우는 허용한다.
+    let case_only = from.to_lowercase() == to.to_lowercase() && from != to;
+    if dst.exists() && !case_only {
+        return Err(format!("같은 이름이 이미 있습니다: {}", to));
+    }
+    if dst.starts_with(&src) && src != dst {
+        return Err("폴더를 자기 자신 안으로 옮길 수 없습니다.".to_string());
+    }
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::rename(&src, &dst).map_err(|e| format!("이름 바꾸기 실패: {}", e))?;
+    Ok(to.replace('\\', "/"))
+}
+
+/// 빈 파일을 새로 만든다. 이미 있으면 오류.
+pub fn create_empty_file(root: &Path, relative_path: &str) -> Result<String, String> {
+    let target = resolve_safe_path(root, relative_path)?;
+    if target.exists() {
+        return Err(format!("같은 이름이 이미 있습니다: {}", relative_path));
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
+        .map_err(|e| format!("파일 생성 실패: {}", e))?;
+    Ok(relative_path.replace('\\', "/"))
+}
+
+/// Windows 휴지통으로 보낸다 (탐색기에서 사용자가 직접 삭제할 때. 휴지통에서 복원 가능).
+pub fn move_to_trash(root: &Path, relative_path: &str) -> Result<(), String> {
+    let target = resolve_safe_path(root, relative_path)?;
+    if target == root || relative_path.trim().trim_matches(['/', '\\', '.']).is_empty() {
+        return Err("프로젝트 폴더 자체는 삭제할 수 없습니다.".to_string());
+    }
+    if !target.exists() {
+        return Err(format!("삭제할 경로가 존재하지 않습니다: {}", relative_path));
+    }
+    trash::delete(&target).map_err(|e| format!("휴지통으로 이동하지 못했습니다: {}", e))
+}
+
+/// 파일 이름(또는 경로)에 검색어가 들어간 파일을 찾는다. 이름이 검색어로 시작하는 파일을 앞에 둔다.
+pub fn find_files_by_name(root: &Path, query: &str, limit: usize) -> Vec<String> {
+    let q = query.trim().to_lowercase().replace('\\', "/");
+    let mut hits: Vec<(u8, String)> = Vec::new();
+    let mut visited = 0usize;
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            visited += 1;
+            if visited > 30_000 {
+                break;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if IGNORED_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+            let path = entry.path();
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if is_dir {
+                if depth < 12 {
+                    stack.push((path, depth + 1));
+                }
+                continue;
+            }
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let lname = name.to_lowercase();
+            let rank = if q.is_empty() || lname.starts_with(&q) {
+                0
+            } else if lname.contains(&q) {
+                1
+            } else if rel.to_lowercase().contains(&q) {
+                2
+            } else {
+                continue;
+            };
+            hits.push((rank, rel));
+        }
+    }
+    hits.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.len().cmp(&b.1.len())).then(a.1.cmp(&b.1)));
+    hits.into_iter().take(limit).map(|(_, p)| p).collect()
+}
+
 /// 모델에 되돌려 줄 도구 출력이 지나치게 길면 앞부분만 남기고 잘라낸다.
 pub fn truncate_for_model(text: &str, max_chars: usize) -> String {
     let total = text.chars().count();
@@ -529,6 +636,43 @@ mod tests {
         restore_snapshot(root, &del).unwrap();
         assert_eq!(std::fs::read(root.join("deck.pptx")).unwrap(), original);
         assert_eq!(read_file_bytes(root, "deck.pptx").unwrap(), original);
+    }
+
+    #[test]
+    fn explorer_operations() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        create_empty_file(root, "docs/보고서.md").unwrap();
+        assert!(create_empty_file(root, "docs/보고서.md").is_err());
+        create_directory(root, "docs/sub").unwrap();
+        create_empty_file(root, "README.md").unwrap();
+        std::fs::create_dir_all(root.join("node_modules/x")).unwrap();
+        std::fs::write(root.join("node_modules/x/보고서.js"), "").unwrap();
+
+        // 바로 아래 항목만, 폴더 먼저
+        let top = list_dir_children(root, "").unwrap();
+        let names: Vec<_> = top.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(names, vec!["docs", "README.md"]);
+        assert!(top[0].children.is_none());
+        let docs = list_dir_children(root, "docs").unwrap();
+        assert_eq!(docs.iter().map(|n| n.relative_path.as_str()).collect::<Vec<_>>(), vec!["docs/sub", "docs/보고서.md"]);
+
+        // 이름 검색 (node_modules 제외, 이름 시작 일치가 먼저)
+        create_empty_file(root, "docs/sub/연간보고서.md").unwrap();
+        assert_eq!(find_files_by_name(root, "보고서", 10), vec!["docs/보고서.md", "docs/sub/연간보고서.md"]);
+        assert_eq!(find_files_by_name(root, "sub/", 10), vec!["docs/sub/연간보고서.md"]);
+
+        // 이름 바꾸기 / 이동
+        rename_path(root, "docs/보고서.md", "docs/최종보고서.md").unwrap();
+        assert!(root.join("docs/최종보고서.md").exists());
+        assert!(rename_path(root, "README.md", "docs/최종보고서.md").is_err());
+        assert!(rename_path(root, "docs", "docs/sub/docs").is_err());
+        rename_path(root, "README.md", "readme.md").unwrap();
+        assert!(rename_path(root, "../x", "y").is_err());
+
+        // 휴지통 보호
+        assert!(move_to_trash(root, "").is_err());
+        assert!(move_to_trash(root, "없는파일.txt").is_err());
     }
 
     #[test]
