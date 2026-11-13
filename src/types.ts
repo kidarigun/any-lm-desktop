@@ -23,10 +23,12 @@ export interface ToolExecutionRecord {
   id: string;
   toolName: string;
   argumentsJson: string;
-  status: "completed" | "pending_approval" | "rejected" | "error";
+  status: "completed" | "pending_approval" | "running" | "rejected" | "error";
   output: string;
   filePath?: string | null;
   snapshotId?: string | null;
+  /** 에이전트 루프에서 호출된 라운드 번호 */
+  round?: number;
 }
 
 export interface ChatMessage {
@@ -36,6 +38,8 @@ export interface ChatMessage {
   reasoningContent?: string | null;
   toolRecords: ToolExecutionRecord[];
   createdAt: string;
+  /** 라운드별 어시스턴트 텍스트 (content는 이를 합친 표시용 문자열) */
+  roundContents?: string[];
 }
 
 export interface Conversation {
@@ -55,6 +59,15 @@ export interface FileSnapshot {
   newContent: string;
   action: "write" | "modify" | "delete";
   createdAt: string;
+  /** 바이너리 파일의 이전 내용 백업 이름 */
+  backupBlob?: string | null;
+  isBinary?: boolean;
+}
+
+export interface SaveResult {
+  absolutePath: string;
+  relativePath?: string | null;
+  snapshot?: FileSnapshot | null;
 }
 
 export interface FileNode {

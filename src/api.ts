@@ -7,6 +7,7 @@ import {
   FileNode,
   FileSnapshot,
   Project,
+  SaveResult,
   StreamChunkPayload,
 } from "./types";
 
@@ -252,6 +253,53 @@ export const BackendAPI = {
       action: "delete",
       createdAt: new Date().toISOString(),
     };
+  },
+
+  async readProjectFileBase64(projectId: string, relativePath: string): Promise<string> {
+    if (isTauri()) {
+      return await invoke<string>("read_project_file_base64", { projectId, relativePath });
+    }
+    throw new Error("Tauri 데스크톱 창에서만 문서 파일을 열 수 있습니다.");
+  },
+
+  async readAbsoluteFileBase64(path: string): Promise<string> {
+    if (isTauri()) {
+      return await invoke<string>("read_absolute_file_base64", { path });
+    }
+    throw new Error("Tauri 데스크톱 창에서만 파일을 열 수 있습니다.");
+  },
+
+  async writeProjectFileBase64(
+    projectId: string,
+    relativePath: string,
+    dataBase64: string
+  ): Promise<FileSnapshot> {
+    if (isTauri()) {
+      return await invoke<FileSnapshot>("write_project_file_base64", {
+        projectId,
+        relativePath,
+        dataBase64,
+      });
+    }
+    throw new Error("Tauri 데스크톱 창에서만 저장할 수 있습니다.");
+  },
+
+  async pickSavePath(initialDir: string | undefined, defaultName: string, filter: string): Promise<string | null> {
+    if (isTauri()) {
+      return await invoke<string | null>("pick_save_path_dialog", {
+        initialDir: initialDir ?? null,
+        defaultName,
+        filter,
+      });
+    }
+    return null;
+  },
+
+  async saveFileToPath(projectId: string | null, absolutePath: string, dataBase64: string): Promise<SaveResult> {
+    if (isTauri()) {
+      return await invoke<SaveResult>("save_file_to_path", { projectId, absolutePath, dataBase64 });
+    }
+    throw new Error("Tauri 데스크톱 창에서만 저장할 수 있습니다.");
   },
 
   async undoFileSnapshot(snapshotId: string): Promise<string> {

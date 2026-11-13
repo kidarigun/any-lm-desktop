@@ -44,6 +44,9 @@ pub struct ToolExecutionRecord {
     pub output: String,
     pub file_path: Option<String>,
     pub snapshot_id: Option<String>,
+    /// 에이전트 루프에서 이 도구가 호출된 라운드 번호 (API 히스토리 재구성용)
+    #[serde(default)]
+    pub round: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +58,9 @@ pub struct ChatMessage {
     pub reasoning_content: Option<String>,
     pub tool_records: Vec<ToolExecutionRecord>,
     pub created_at: String,
+    /// 라운드별 어시스턴트 텍스트. `content`는 이 값들을 합친 표시용 문자열이다.
+    #[serde(default)]
+    pub round_contents: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +84,12 @@ pub struct FileSnapshot {
     pub new_content: String,
     pub action: String, // "write" | "modify" | "delete"
     pub created_at: String,
+    /// 바이너리 파일(docx, pptx 등)의 이전 내용을 담은 백업 파일 이름 (앱 데이터 폴더의 blobs/ 아래)
+    #[serde(default)]
+    pub backup_blob: Option<String>,
+    /// 새 내용이 바이너리라 `new_content`에 텍스트를 담지 않은 경우
+    #[serde(default)]
+    pub is_binary: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -103,6 +115,17 @@ impl StoreManager {
     pub fn load(&self) -> AppDatabase {
         if let Ok(raw) = fs::read_to_string(&self.db_path) {
             if let Ok(mut db) = serde_json::from_str::<AppDatabase>(&raw) {
+                // 승인된 명령이 실행되던 중 앱이 종료된 경우 상태를 정리한다.
+                for conv in &mut db.conversations {
+                    for m in &mut conv.messages {
+                        for r in &mut m.tool_records {
+                            if r.status == "running" {
+                                r.status = "error".to_string();
+                                r.output = "실행 도중 앱이 종료되어 결과를 확인할 수 없습니다.".to_string();
+                            }
+                        }
+                    }
+                }
                 for p in &mut db.projects {
                     if p.root_path.ends_with("\\src-tauri") || p.root_path.ends_with("/src-tauri") {
                         if let Some(parent) = Path::new(&p.root_path).parent() {

@@ -21,6 +21,8 @@ reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], defau
 futures-util = "0.3"
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"
+tauri = { version = "2", features = ["test"] }

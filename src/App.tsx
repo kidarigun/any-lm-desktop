@@ -29,6 +29,16 @@ import {
 } from "lucide-react";
 import { BackendAPI } from "./api";
 import {
+  canvasDocFromBase64,
+  type CanvasDoc,
+  type CanvasSavedInfo,
+} from "./canvas/canvasDoc";
+
+// 문서 편집 라이브러리(TipTap, docx, pptxgenjs, pdf.js)는 캔버스를 처음 열 때 불러온다.
+const DocumentCanvas = React.lazy(() => import("./canvas/DocumentCanvas"));
+import { startDocBridge } from "./docs/bridge";
+import { docKindOf, docKindOfLanguage, isBinaryKind } from "./docs/formats";
+import {
   AppSettings,
   ChatMessage,
   Conversation,
@@ -37,56 +47,55 @@ import {
   ToolExecutionRecord,
 } from "./types";
 
-interface ArtifactItem {
-  title: string;
-  language: string;
-  content: string;
-  filePath?: string;
-}
+/** 메시지에서 캔버스로 열 문서: 파일(경로) 또는 코드 블록(본문) */
+type ArtifactRef = Omit<CanvasDoc, "id">;
 
-function extractArtifactFromMessage(msg: ChatMessage): ArtifactItem | null {
-  for (const tr of msg.toolRecords || []) {
-    if (
+function extractArtifactFromMessage(msg: ChatMessage): ArtifactRef | null {
+  // 가장 마지막에 작성/수정한 파일을 연다.
+  const fileRecords = (msg.toolRecords || []).filter(
+    (tr) =>
       (tr.toolName === "write_file" || tr.toolName === "modify_file") &&
+      tr.status === "completed" &&
       tr.filePath
-    ) {
-      try {
-        const args = JSON.parse(tr.argumentsJson);
-        return {
-          title: tr.filePath.split("/").pop() || tr.filePath,
-          language: tr.filePath.split(".").pop() || "markdown",
-          content: args.content || args.replacement || "",
-          filePath: tr.filePath,
-        };
-      } catch {
-        return {
-          title: tr.filePath,
-          language: "markdown",
-          content: "",
-          filePath: tr.filePath,
-        };
-      }
-    }
+  );
+  const last = fileRecords[fileRecords.length - 1];
+  if (last?.filePath) {
+    return {
+      title: last.filePath.split("/").pop() || last.filePath,
+      kind: docKindOf(last.filePath),
+      filePath: last.filePath,
+    };
   }
 
   const codeBlockRegex = /```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g;
   let match: RegExpExecArray | null;
-  let bestBlock: ArtifactItem | null = null;
+  let bestBlock: ArtifactRef | null = null;
   while ((match = codeBlockRegex.exec(msg.content)) !== null) {
     const lang = match[1] || "text";
     const body = match[2].trim();
     if (body.split("\n").length >= 10) {
+      const kind = docKindOfLanguage(lang);
       bestBlock = {
         title:
-          lang === "markdown" || lang === "md"
-            ? "작성된 문서"
-            : `코드 스니펫 (${lang})`,
-        language: lang,
-        content: body,
+          kind === "markdown"
+            ? "작성된 문서.md"
+            : kind === "html"
+              ? "작성된 페이지.html"
+              : `코드 스니펫 (${lang})`,
+        kind,
+        text: body,
       };
     }
   }
   return bestBlock;
+}
+
+function isInsideRoot(root: string, absolute: string): string | null {
+  const norm = (p: string) => p.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+  const r = norm(root);
+  const a = absolute.replace(/\//g, "\\");
+  if (!norm(a).startsWith(r + "\\")) return null;
+  return a.slice(r.length + 1).replace(/\\/g, "/");
 }
 
 export default function App() {
@@ -143,12 +152,10 @@ export default function App() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   // Collapsible Claude-style Right Artifact Drawer
-  const [activeArtifact, setActiveArtifact] = useState<ArtifactItem | null>(
+  const [canvasExpanded, setCanvasExpanded] = useState<boolean>(false);
+  const [activeArtifact, setActiveArtifact] = useState<CanvasDoc | null>(
     null
   );
-  const [artifactTab, setArtifactTab] = useState<"preview" | "code">("preview");
-  const [isEditingArtifact, setIsEditingArtifact] = useState<boolean>(false);
-
   // Modals
   const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
   const [showProjectModal, setShowProjectModal] = useState<boolean>(false);
@@ -255,6 +262,20 @@ export default function App() {
     };
   }, []);
 
+  // AI가 DOCX/PPTX/PDF를 읽고 쓸 때 쓰는 문서 변환기 (웹뷰에서 실행)
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    startDocBridge().then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [
@@ -334,40 +355,71 @@ export default function App() {
     }
   }
 
+  /** 프로젝트 안의 파일을 형식에 맞는 캔버스로 연다. */
   async function openFileInArtifact(filePath: string) {
     if (!activeProject) return;
     try {
-      const content = await BackendAPI.readProjectFile(
-        activeProject.id,
-        filePath
+      const kind = docKindOf(filePath);
+      const b64 = await BackendAPI.readProjectFileBase64(activeProject.id, filePath);
+      setActiveArtifact(
+        canvasDocFromBase64(
+          { title: filePath.split("/").pop() || filePath, kind, filePath },
+          b64,
+          isBinaryKind(kind)
+        )
       );
-      setActiveArtifact({
-        title: filePath.split("/").pop() || filePath,
-        language: filePath.split(".").pop() || "markdown",
-        content,
-        filePath,
-      });
-      setArtifactTab("preview");
-      setIsEditingArtifact(false);
     } catch (err: any) {
       setErrorBanner(String(err));
     }
   }
 
-  async function handleSaveArtifactToFile() {
-    if (!activeProject || !activeArtifact) return;
-    const targetPath =
-      activeArtifact.filePath || `docs/${activeArtifact.title}.md`;
+  /** 파일 열기 창에서 문서를 골라 캔버스로 연다 (프로젝트 밖 파일도 가능). */
+  async function handleOpenDocument() {
+    const root = activeProject?.rootPath;
+    const files = await BackendAPI.pickFilesDialog(root);
+    const picked = files[0];
+    if (!picked) return;
+    const rel = root && currentScopeId !== "general-chat" ? isInsideRoot(root, picked) : null;
+    if (rel) {
+      await openFileInArtifact(rel);
+      return;
+    }
     try {
-      const snap = await BackendAPI.writeProjectFile(
-        activeProject.id,
-        targetPath,
-        activeArtifact.content
+      const kind = docKindOf(picked);
+      const b64 = await BackendAPI.readAbsoluteFileBase64(picked);
+      setActiveArtifact(
+        canvasDocFromBase64(
+          { title: picked.split(/[\\/]/).pop() || picked, kind, absolutePath: picked },
+          b64,
+          isBinaryKind(kind)
+        )
       );
-      setSnapshots((prev) => [...prev, snap]);
-      setIsEditingArtifact(false);
     } catch (err: any) {
       setErrorBanner(String(err));
+    }
+  }
+
+  function openArtifactRef(art: ArtifactRef) {
+    if (art.filePath) {
+      openFileInArtifact(art.filePath);
+    } else {
+      setActiveArtifact({ ...art, id: `msg#${Date.now()}` });
+    }
+  }
+
+  function handleCanvasSaved(info: CanvasSavedInfo) {
+    if (info.snapshot) setSnapshots((prev) => [...prev, info.snapshot!]);
+    if (info.replacesCurrent) {
+      setActiveArtifact((prev) =>
+        prev
+          ? {
+              ...prev,
+              title: info.title,
+              filePath: info.relativePath ?? undefined,
+              absolutePath: info.relativePath ? undefined : info.absolutePath,
+            }
+          : prev
+      );
     }
   }
 
@@ -414,13 +466,7 @@ export default function App() {
       const lastMsg = updatedConv.messages[updatedConv.messages.length - 1];
       if (lastMsg && lastMsg.role === "assistant") {
         const art = extractArtifactFromMessage(lastMsg);
-        if (art) {
-          if (art.filePath) {
-            await openFileInArtifact(art.filePath);
-          } else {
-            setActiveArtifact(art);
-          }
-        }
+        if (art) openArtifactRef(art);
       }
     } catch (err: any) {
       const msg = String(err);
@@ -515,10 +561,48 @@ export default function App() {
     toolId: string,
     approve: boolean
   ) {
-    if (!activeConversation) return;
+    if (!activeConversation || isStreaming) return;
+    const convId = activeConversation.id;
+
+    // 승인/거부 직후 화면에 바로 반영하고, 마지막 대기 작업이면 백엔드가 에이전트를 이어서 실행한다.
+    setConversations((prev) =>
+      prev.map((c) =>
+        c.id !== convId
+          ? c
+          : {
+              ...c,
+              messages: c.messages.map((m) =>
+                m.id !== messageId
+                  ? m
+                  : {
+                      ...m,
+                      toolRecords: m.toolRecords.map((r) =>
+                        r.id === toolId
+                          ? {
+                              ...r,
+                              status: approve ? "running" : "rejected",
+                              output: approve
+                                ? "실행 중입니다..."
+                                : "사용자가 실행을 거부했습니다.",
+                            }
+                          : r
+                      ),
+                    }
+              ),
+            }
+      )
+    );
+
+    setErrorBanner(null);
+    setIsStreaming(true);
+    setRetryNotice(approve ? "승인된 작업을 실행하고 있습니다..." : "");
+    setStreamingReasoning("");
+    setStreamingContent("");
+    setStreamingTools([]);
+
     try {
       const updated = await BackendAPI.resolveToolApproval(
-        activeConversation.id,
+        convId,
         messageId,
         toolId,
         approve
@@ -528,6 +612,20 @@ export default function App() {
       );
     } catch (err: any) {
       setErrorBanner(String(err));
+      // 도구 결과는 저장됐지만 이어가기가 실패했을 수 있으므로 저장된 상태로 다시 맞춘다.
+      try {
+        const db = await BackendAPI.getInitialState();
+        setConversations(db.conversations);
+        setSnapshots(db.snapshots);
+      } catch {
+        // ignore
+      }
+    } finally {
+      setIsStreaming(false);
+      setRetryNotice("");
+      setStreamingReasoning("");
+      setStreamingContent("");
+      setStreamingTools([]);
     }
   }
 
@@ -817,16 +915,14 @@ export default function App() {
               </button>
             )}
 
-            {activeArtifact && (
-              <button
-                onClick={() => setActiveArtifact(null)}
-                className="px-2.5 py-1.5 rounded-lg bg-stone-200/80 dark:bg-[#2C2C28] hover:bg-stone-300 dark:hover:bg-[#383833] text-xs font-semibold text-stone-700 dark:text-stone-200 flex items-center gap-1 cursor-pointer"
-                title="문서 패널 닫기"
-              >
-                <PanelRightClose className="w-3.5 h-3.5" />
-                <span>패널 닫기</span>
-              </button>
-            )}
+            <button
+              onClick={handleOpenDocument}
+              className="px-2.5 py-1.5 rounded-lg bg-stone-200/80 dark:bg-[#2C2C28] hover:bg-stone-300 dark:hover:bg-[#383833] text-xs font-semibold text-stone-700 dark:text-stone-200 flex items-center gap-1 cursor-pointer"
+              title="Markdown, Word, PowerPoint, PDF, HTML, 텍스트 파일을 문서 캔버스에서 엽니다"
+            >
+              <FileText className="w-3.5 h-3.5" />
+              <span>문서 열기</span>
+            </button>
           </div>
         </header>
 
@@ -1176,6 +1272,7 @@ export default function App() {
                                   onApprove={(approve) =>
                                     handleToolApproval(msg.id, tr.id, approve)
                                   }
+                                  approvalDisabled={isStreaming}
                                 />
                               ))}
                             </div>
@@ -1194,13 +1291,7 @@ export default function App() {
                           {/* Claude-Style Artifact Card */}
                           {msgArtifact && (
                             <div
-                              onClick={() => {
-                                if (msgArtifact.filePath) {
-                                  openFileInArtifact(msgArtifact.filePath);
-                                } else {
-                                  setActiveArtifact(msgArtifact);
-                                }
-                              }}
+                              onClick={() => openArtifactRef(msgArtifact)}
                               className="p-3 rounded-xl bg-[#FAF9F5] dark:bg-[#1E1E1C] hover:bg-[#F2EFE9] dark:hover:bg-[#2C2C29] border border-stone-200 dark:border-[#383834] flex items-center justify-between cursor-pointer transition"
                             >
                               <div className="flex items-center gap-2.5">
@@ -1284,6 +1375,7 @@ export default function App() {
                         onOpenFile={openFileInArtifact}
                         onUndo={handleUndoSnapshot}
                         onApprove={() => {}}
+                        approvalDisabled
                       />
                     ))}
 
@@ -1383,121 +1475,30 @@ export default function App() {
         )}
       </main>
 
-      {/* Collapsible Right Artifact Panel */}
+      {/* 문서 캔버스: 형식(Markdown·Word·PowerPoint·PDF·HTML·텍스트)에 맞춘 편집기 */}
       {activeArtifact && (
-        <aside className="w-[460px] bg-white dark:bg-[#232321] border-l border-[#E2E0D8] dark:border-[#2E2E2A] flex flex-col shrink-0 shadow-lg transition-colors duration-150">
-          <div className="h-13 px-4 border-b border-[#E5E3DB] dark:border-[#343430] flex items-center justify-between bg-[#F6F5F0] dark:bg-[#1B1B19]">
-            <div className="truncate pr-2">
-              <div className="text-xs font-bold text-stone-900 dark:text-stone-100 truncate">
-                {activeArtifact.title}
-              </div>
-              {activeArtifact.filePath && (
-                <div className="text-xs text-stone-500 dark:text-stone-400 font-mono truncate">
-                  {activeArtifact.filePath}
-                </div>
-              )}
-            </div>
-
-            <div className="flex items-center gap-1.5 shrink-0">
-              <div className="flex bg-stone-200/80 dark:bg-[#2A2A27] p-0.5 rounded-lg text-xs">
-                <button
-                  onClick={() => {
-                    setArtifactTab("preview");
-                    setIsEditingArtifact(false);
-                  }}
-                  className={`px-2 py-1 rounded-md font-semibold cursor-pointer ${
-                    artifactTab === "preview" && !isEditingArtifact
-                      ? "bg-white dark:bg-[#383834] text-stone-900 dark:text-stone-100 shadow-2xs"
-                      : "text-stone-600 dark:text-stone-400"
-                  }`}
-                >
-                  미리보기
-                </button>
-                <button
-                  onClick={() => {
-                    setArtifactTab("code");
-                    setIsEditingArtifact(true);
-                  }}
-                  className={`px-2 py-1 rounded-md font-semibold cursor-pointer ${
-                    isEditingArtifact
-                      ? "bg-white dark:bg-[#383834] text-stone-900 dark:text-stone-100 shadow-2xs"
-                      : "text-stone-600 dark:text-stone-400"
-                  }`}
-                >
-                  편집
-                </button>
-              </div>
-
-              <button
-                onClick={() =>
-                  handleCopyText("artifact", activeArtifact.content)
-                }
-                className="p-1.5 rounded-lg hover:bg-stone-200 dark:hover:bg-[#32322F] text-stone-600 dark:text-stone-300 cursor-pointer"
-                title="내용 복사"
-              >
-                {copiedId === "artifact" ? (
-                  <Check className="w-4 h-4 text-emerald-600" />
-                ) : (
-                  <Copy className="w-4 h-4" />
-                )}
-              </button>
-
-              <button
-                onClick={handleSaveArtifactToFile}
-                className="p-1.5 rounded-lg hover:bg-stone-200 dark:hover:bg-[#32322F] text-stone-600 dark:text-stone-300 cursor-pointer"
-                title="프로젝트 파일로 저장"
-              >
-                <Save className="w-4 h-4" />
-              </button>
-
-              <button
-                onClick={() => {
-                  const blob = new Blob([activeArtifact.content], {
-                    type: "text/plain;charset=utf-8",
-                  });
-                  const url = URL.createObjectURL(blob);
-                  const a = document.createElement("a");
-                  a.href = url;
-                  a.download = activeArtifact.title;
-                  a.click();
-                  URL.revokeObjectURL(url);
-                }}
-                className="p-1.5 rounded-lg hover:bg-stone-200 dark:hover:bg-[#32322F] text-stone-600 dark:text-stone-300 cursor-pointer"
-                title="다운로드"
-              >
-                <Download className="w-4 h-4" />
-              </button>
-
-              <button
-                onClick={() => setActiveArtifact(null)}
-                className="p-1.5 rounded-lg hover:bg-stone-200 dark:hover:bg-[#32322F] text-stone-500 dark:text-stone-400 cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-
-          <div className="flex-1 overflow-y-auto p-5 select-text">
-            {isEditingArtifact ? (
-              <textarea
-                value={activeArtifact.content}
-                onChange={(e) =>
-                  setActiveArtifact({
-                    ...activeArtifact,
-                    content: e.target.value,
-                  })
-                }
-                className="w-full h-full font-mono text-xs text-stone-800 dark:text-stone-100 bg-transparent focus:outline-none resize-none leading-relaxed"
-              />
-            ) : (
-              <div
-                className="markdown-body text-xs text-stone-800 dark:text-stone-100"
-                dangerouslySetInnerHTML={{
-                  __html: marked.parse(activeArtifact.content) as string,
-                }}
-              />
-            )}
-          </div>
+        <aside
+          className={`${
+            canvasExpanded ? "w-[min(64vw,1180px)]" : "w-[520px]"
+          } bg-white dark:bg-[#232321] border-l border-[#E2E0D8] dark:border-[#2E2E2A] flex flex-col shrink-0 shadow-lg transition-[width] duration-150 min-w-0`}
+        >
+          <React.Suspense
+            fallback={<div className="p-6 text-xs text-stone-500">문서 편집기를 불러오는 중...</div>}
+          >
+          <DocumentCanvas
+            doc={activeArtifact}
+            projectId={currentScopeId === "general-chat" ? null : activeProject?.id ?? null}
+            projectRoot={currentScopeId === "general-chat" ? undefined : activeProject?.rootPath}
+            expanded={canvasExpanded}
+            onToggleExpand={() => setCanvasExpanded((v) => !v)}
+            onClose={() => setActiveArtifact(null)}
+            onSaved={handleCanvasSaved}
+            onAttach={(abs) =>
+              setAttachedFiles((prev) => Array.from(new Set([...prev, abs])))
+            }
+            onError={(msg) => setErrorBanner(msg)}
+          />
+          </React.Suspense>
         </aside>
       )}
 
@@ -1716,13 +1717,16 @@ function ToolCallBox({
   onOpenFile,
   onUndo,
   onApprove,
+  approvalDisabled = false,
 }: {
   record: ToolExecutionRecord;
   onOpenFile: (rel: string) => void;
   onUndo: (snapId: string) => void;
   onApprove: (approve: boolean) => void;
+  approvalDisabled?: boolean;
 }) {
   const isPending = record.status === "pending_approval";
+  const isRunning = record.status === "running";
 
   return (
     <div className="rounded-xl border border-stone-200 dark:border-[#383834] bg-[#FAF9F5] dark:bg-[#1E1E1C] px-3 py-2 text-xs space-y-1">
@@ -1754,6 +1758,11 @@ function ToolCallBox({
               <Check className="w-3.5 h-3.5" /> 완료
             </span>
           )}
+          {isRunning && (
+            <span className="text-amber-700 dark:text-amber-300 font-semibold flex items-center gap-1">
+              <RefreshCw className="w-3.5 h-3.5 animate-spin" /> 실행 중
+            </span>
+          )}
         </div>
       </div>
 
@@ -1765,13 +1774,15 @@ function ToolCallBox({
           <div className="flex gap-1.5">
             <button
               onClick={() => onApprove(true)}
-              className="px-2.5 py-1 rounded bg-emerald-600 text-white font-semibold cursor-pointer"
+              disabled={approvalDisabled}
+              className="px-2.5 py-1 rounded bg-emerald-600 text-white font-semibold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
             >
               승인
             </button>
             <button
               onClick={() => onApprove(false)}
-              className="px-2.5 py-1 rounded bg-stone-300 dark:bg-[#383834] text-stone-800 dark:text-stone-200 font-semibold cursor-pointer"
+              disabled={approvalDisabled}
+              className="px-2.5 py-1 rounded bg-stone-300 dark:bg-[#383834] text-stone-800 dark:text-stone-200 font-semibold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
             >
               거부
             </button>

@@ -1,0 +1,520 @@
+import {
+  Check,
+  ChevronDown,
+  Copy,
+  Info,
+  Maximize2,
+  Minimize2,
+  Paperclip,
+  Save,
+  SaveAll,
+  X,
+} from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { BackendAPI } from "../api";
+import { bytesToBase64 } from "../docs/base64";
+import { docxToHtml, htmlToDocx } from "../docs/docx";
+import {
+  KIND_EXTENSION,
+  KIND_LABEL,
+  SAVE_AS_TARGETS,
+  replaceExtension,
+  type DocKind,
+} from "../docs/formats";
+import { extractBodyHtml, htmlToMarkdown, markdownToHtml, wrapHtmlDocument } from "../docs/markdown";
+import { extractPdfText } from "../docs/pdf";
+import { applyPptxEdits, deckToMarkdown, markdownToPptx, parsePptx, type PptxSession } from "../docs/pptx";
+import type { FileSnapshot } from "../types";
+import type { CanvasDoc, CanvasSavedInfo } from "./canvasDoc";
+import { PdfViewer } from "./PdfViewer";
+import { PptxEditor } from "./PptxEditor";
+import { RichTextEditor } from "./RichTextEditor";
+
+export interface DocumentCanvasProps {
+  doc: CanvasDoc;
+  projectId: string | null;
+  projectRoot?: string;
+  expanded: boolean;
+  onToggleExpand: () => void;
+  onClose: () => void;
+  onSaved: (info: CanvasSavedInfo) => void;
+  onAttach?: (absolutePath: string) => void;
+  onError: (msg: string) => void;
+}
+
+type Mode = "rich" | "source" | "preview";
+
+function joinPath(root: string, rel: string): string {
+  return `${root.replace(/[\\/]+$/, "")}\\${rel.replace(/\//g, "\\")}`;
+}
+
+function dirOf(p: string): string {
+  const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+  return i > 0 ? p.slice(0, i) : "";
+}
+
+export default function DocumentCanvas({
+  doc,
+  projectId,
+  projectRoot,
+  expanded,
+  onToggleExpand,
+  onClose,
+  onSaved,
+  onAttach,
+  onError,
+}: DocumentCanvasProps) {
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [mode, setMode] = useState<Mode>("rich");
+  const [editorKey, setEditorKey] = useState(0);
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [savedFlash, setSavedFlash] = useState(false);
+  const [saveAsOpen, setSaveAsOpen] = useState(false);
+  const [confirmClose, setConfirmClose] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [noticeHidden, setNoticeHidden] = useState(false);
+
+  // 현재 편집 내용 (렌더링과 무관하게 최신 값을 유지)
+  const htmlRef = useRef("");
+  const textRef = useRef("");
+  const [initialHtml, setInitialHtml] = useState("");
+  const [sourceText, setSourceText] = useState("");
+  const [pptx, setPptx] = useState<PptxSession | null>(null);
+  const editsRef = useRef(new Map<string, string>());
+
+  // 문서 불러오기
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setLoadError(null);
+    setDirty(false);
+    setConfirmClose(false);
+    setNoticeHidden(false);
+    setPptx(null);
+    editsRef.current = new Map();
+    (async () => {
+      try {
+        switch (doc.kind) {
+          case "markdown": {
+            const text = doc.text ?? "";
+            textRef.current = text;
+            htmlRef.current = markdownToHtml(text);
+            setSourceText(text);
+            setInitialHtml(htmlRef.current);
+            setMode("rich");
+            break;
+          }
+          case "docx": {
+            const html = await docxToHtml(doc.bytes ?? new Uint8Array());
+            htmlRef.current = html;
+            setInitialHtml(html);
+            setMode("rich");
+            break;
+          }
+          case "pptx": {
+            const session = await parsePptx(doc.bytes ?? new Uint8Array());
+            if (!cancelled) setPptx(session);
+            break;
+          }
+          case "html": {
+            textRef.current = doc.text ?? "";
+            setSourceText(textRef.current);
+            setMode("preview");
+            break;
+          }
+          case "text": {
+            textRef.current = doc.text ?? "";
+            setSourceText(textRef.current);
+            setMode("source");
+            break;
+          }
+          case "pdf":
+            break;
+        }
+        if (!cancelled) setEditorKey((k) => k + 1);
+      } catch (e) {
+        if (!cancelled) setLoadError(`문서를 열 수 없습니다: ${e instanceof Error ? e.message : String(e)}`);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [doc]);
+
+  const markDirty = useCallback(() => setDirty(true), []);
+
+  // Markdown 서식 편집 ↔ 원문 편집 전환
+  function switchMode(next: Mode) {
+    if (next === mode) return;
+    if (doc.kind === "markdown") {
+      if (next === "source") {
+        textRef.current = htmlToMarkdown(htmlRef.current);
+        setSourceText(textRef.current);
+      } else {
+        htmlRef.current = markdownToHtml(textRef.current);
+        setInitialHtml(htmlRef.current);
+        setEditorKey((k) => k + 1);
+      }
+    }
+    setMode(next);
+  }
+
+  // ---- 내보내기 ----------------------------------------------------------
+
+  async function currentMarkdown(): Promise<string> {
+    switch (doc.kind) {
+      case "markdown":
+        return mode === "rich" ? htmlToMarkdown(htmlRef.current) : textRef.current;
+      case "docx":
+        return htmlToMarkdown(htmlRef.current);
+      case "html":
+        return htmlToMarkdown(extractBodyHtml(textRef.current));
+      case "pptx":
+        return pptx ? deckToMarkdown(pptx.deck, editsRef.current) : "";
+      case "pdf":
+        return extractPdfText(doc.bytes ?? new Uint8Array());
+      default:
+        return textRef.current;
+    }
+  }
+
+  function currentHtml(): string {
+    switch (doc.kind) {
+      case "markdown":
+        return mode === "rich" ? htmlRef.current : markdownToHtml(textRef.current);
+      case "docx":
+        return htmlRef.current;
+      case "html":
+        return extractBodyHtml(textRef.current);
+      default:
+        return markdownToHtml(textRef.current);
+    }
+  }
+
+  const baseTitle = useMemo(() => doc.title.replace(/\.[^.]+$/, "") || "문서", [doc.title]);
+
+  async function exportAs(target: DocKind): Promise<Uint8Array | string> {
+    switch (target) {
+      case "markdown":
+        return currentMarkdown();
+      case "text":
+        return doc.kind === "text" ? textRef.current : currentMarkdown();
+      case "html":
+        return doc.kind === "html" ? textRef.current : wrapHtmlDocument(currentHtml(), baseTitle);
+      case "docx":
+        return htmlToDocx(currentHtml(), baseTitle);
+      case "pptx":
+        if (doc.kind === "pptx" && pptx) return applyPptxEdits(pptx, editsRef.current);
+        return markdownToPptx(await currentMarkdown(), baseTitle);
+      case "pdf":
+        return (doc.bytes ?? new Uint8Array()).slice();
+    }
+  }
+
+  function toBase64(data: Uint8Array | string): string {
+    return typeof data === "string" ? bytesToBase64(new TextEncoder().encode(data)) : bytesToBase64(data);
+  }
+
+  function flashSaved() {
+    setSavedFlash(true);
+    setTimeout(() => setSavedFlash(false), 1600);
+  }
+
+  async function save() {
+    if (saving || loading || doc.kind === "pdf") return;
+    if (!doc.filePath && !doc.absolutePath) return saveAs(doc.kind);
+    setSaving(true);
+    try {
+      const data = await exportAs(doc.kind);
+      let snapshot: FileSnapshot | null | undefined;
+      let relativePath: string | null | undefined = doc.filePath;
+      let absolutePath = doc.absolutePath;
+      if (doc.filePath && projectId) {
+        snapshot =
+          typeof data === "string"
+            ? await BackendAPI.writeProjectFile(projectId, doc.filePath, data)
+            : await BackendAPI.writeProjectFileBase64(projectId, doc.filePath, bytesToBase64(data));
+      } else if (doc.absolutePath) {
+        const res = await BackendAPI.saveFileToPath(projectId, doc.absolutePath, toBase64(data));
+        snapshot = res.snapshot;
+        relativePath = res.relativePath;
+        absolutePath = res.absolutePath;
+      }
+      setDirty(false);
+      flashSaved();
+      onSaved({ kind: doc.kind, title: doc.title, snapshot, relativePath, absolutePath, replacesCurrent: true });
+    } catch (e) {
+      onError(`저장하지 못했습니다: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveAs(target: DocKind) {
+    setSaveAsOpen(false);
+    if (saving || loading) return;
+    const ext = KIND_EXTENSION[target];
+    const currentName = (doc.filePath || doc.absolutePath || doc.title).split(/[\\/]/).pop() || doc.title;
+    const initialDir = doc.absolutePath
+      ? dirOf(doc.absolutePath)
+      : projectRoot
+        ? doc.filePath
+          ? dirOf(joinPath(projectRoot, doc.filePath))
+          : projectRoot
+        : undefined;
+    try {
+      const picked = await BackendAPI.pickSavePath(
+        initialDir,
+        replaceExtension(currentName, target),
+        `${KIND_LABEL[target]} (*.${ext})|*.${ext}|모든 파일 (*.*)|*.*`
+      );
+      if (!picked) return;
+      setSaving(true);
+      const data = await exportAs(target);
+      const res = await BackendAPI.saveFileToPath(projectId, picked, toBase64(data));
+      const replacesCurrent = target === doc.kind;
+      if (replacesCurrent) setDirty(false);
+      flashSaved();
+      onSaved({
+        kind: target,
+        title: picked.split(/[\\/]/).pop() || picked,
+        snapshot: res.snapshot,
+        relativePath: res.relativePath,
+        absolutePath: res.absolutePath,
+        replacesCurrent,
+      });
+    } catch (e) {
+      onError(`저장하지 못했습니다: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Ctrl+S 저장
+  const saveRef = useRef(save);
+  saveRef.current = save;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        saveRef.current();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  async function copyContent() {
+    try {
+      await navigator.clipboard.writeText(await currentMarkdown());
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch (e) {
+      onError(String(e));
+    }
+  }
+
+  function requestClose() {
+    if (dirty) setConfirmClose(true);
+    else onClose();
+  }
+
+  const absoluteForAttach = doc.absolutePath || (projectRoot && doc.filePath ? joinPath(projectRoot, doc.filePath) : undefined);
+  const notice =
+    doc.kind === "docx"
+      ? "Word 문서를 서식 편집기로 열었습니다. 저장하면 글꼴·색상·머리글/바닥글 같은 복잡한 서식은 단순화됩니다. 저장 전 상태는 채팅의 [되돌리기]로 복구할 수 있습니다."
+      : doc.kind === "pptx"
+        ? "슬라이드의 글자를 클릭해 바로 고칠 수 있습니다. 디자인과 서식은 그대로 유지됩니다."
+        : doc.kind === "pdf"
+          ? "PDF는 읽기 전용입니다. [다른 이름으로 저장]에서 Markdown 텍스트로 내보낼 수 있습니다."
+          : null;
+
+  const modeOptions: { value: Mode; label: string }[] =
+    doc.kind === "markdown"
+      ? [
+          { value: "rich", label: "서식" },
+          { value: "source", label: "원문" },
+        ]
+      : doc.kind === "html"
+        ? [
+            { value: "preview", label: "미리보기" },
+            { value: "source", label: "원문" },
+          ]
+        : [];
+
+  return (
+    <div className="flex flex-col h-full min-h-0">
+      {/* 헤더 */}
+      <div className="px-3 py-2 border-b border-[#E5E3DB] dark:border-[#343430] flex items-center gap-2 bg-[#F6F5F0] dark:bg-[#1B1B19]">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#A50034]/10 text-[#A50034] dark:bg-[#FF5C8D]/15 dark:text-[#FF5C8D] shrink-0">
+              {KIND_LABEL[doc.kind]}
+            </span>
+            <span className="text-xs font-bold text-stone-900 dark:text-stone-100 truncate">{doc.title}</span>
+            {dirty && <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" title="저장하지 않은 변경 사항" />}
+          </div>
+          {(doc.filePath || doc.absolutePath) && (
+            <div className="text-[11px] text-stone-500 dark:text-stone-400 font-mono truncate">
+              {doc.filePath || doc.absolutePath}
+            </div>
+          )}
+        </div>
+
+        {modeOptions.length > 0 && (
+          <div className="flex bg-stone-200/80 dark:bg-[#2A2A27] p-0.5 rounded-lg text-xs shrink-0">
+            {modeOptions.map((o) => (
+              <button
+                key={o.value}
+                onClick={() => switchMode(o.value)}
+                className={`px-2 py-1 rounded-md font-semibold cursor-pointer ${
+                  mode === o.value
+                    ? "bg-white dark:bg-[#383834] text-stone-900 dark:text-stone-100 shadow-2xs"
+                    : "text-stone-600 dark:text-stone-400"
+                }`}
+              >
+                {o.label}
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div className="flex items-center gap-0.5 shrink-0 text-stone-600 dark:text-stone-300">
+          {doc.kind !== "pdf" && (
+            <button
+              onClick={save}
+              disabled={saving || loading}
+              className="px-2 py-1 rounded-lg hover:bg-stone-200 dark:hover:bg-[#32322F] cursor-pointer disabled:opacity-40 flex items-center gap-1 text-xs font-semibold"
+              title="저장 (Ctrl+S)"
+            >
+              {savedFlash ? <Check className="w-4 h-4 text-emerald-600" /> : <Save className="w-4 h-4" />}
+              <span className="hidden xl:inline">{saving ? "저장 중" : "저장"}</span>
+            </button>
+          )}
+          <div className="relative">
+            <button
+              onClick={() => setSaveAsOpen((v) => !v)}
+              disabled={saving || loading}
+              className="px-1.5 py-1 rounded-lg hover:bg-stone-200 dark:hover:bg-[#32322F] cursor-pointer disabled:opacity-40 flex items-center"
+              title="다른 이름으로 저장 / 형식 변환"
+            >
+              <SaveAll className="w-4 h-4" />
+              <ChevronDown className="w-3 h-3" />
+            </button>
+            {saveAsOpen && (
+              <div className="absolute right-0 top-full mt-1 z-20 w-52 rounded-xl border border-stone-200 dark:border-[#3A3A36] bg-white dark:bg-[#262624] shadow-lg py-1 text-xs">
+                <div className="px-3 py-1 text-stone-400">다른 이름으로 저장</div>
+                {SAVE_AS_TARGETS[doc.kind].map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => saveAs(t)}
+                    className="w-full text-left px-3 py-1.5 hover:bg-stone-100 dark:hover:bg-[#32322F] text-stone-800 dark:text-stone-100 cursor-pointer"
+                  >
+                    {KIND_LABEL[t]} <span className="text-stone-400">(.{KIND_EXTENSION[t]})</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <button onClick={copyContent} className="p-1.5 rounded-lg hover:bg-stone-200 dark:hover:bg-[#32322F] cursor-pointer" title="내용 복사 (Markdown)">
+            {copied ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
+          </button>
+          {onAttach && absoluteForAttach && (
+            <button onClick={() => onAttach(absoluteForAttach)} className="p-1.5 rounded-lg hover:bg-stone-200 dark:hover:bg-[#32322F] cursor-pointer" title="채팅에 첨부">
+              <Paperclip className="w-4 h-4" />
+            </button>
+          )}
+          <button onClick={onToggleExpand} className="p-1.5 rounded-lg hover:bg-stone-200 dark:hover:bg-[#32322F] cursor-pointer" title={expanded ? "패널 좁게" : "패널 넓게"}>
+            {expanded ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+          </button>
+          <button onClick={requestClose} className="p-1.5 rounded-lg hover:bg-stone-200 dark:hover:bg-[#32322F] cursor-pointer" title="닫기">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      {confirmClose && (
+        <div className="px-3 py-2 bg-amber-50 dark:bg-amber-950/40 border-b border-amber-200 dark:border-amber-900 text-xs text-amber-900 dark:text-amber-200 flex items-center gap-2">
+          <span className="flex-1">저장하지 않은 변경 사항이 있습니다.</span>
+          <button
+            onClick={async () => {
+              await save();
+              onClose();
+            }}
+            className="px-2 py-1 rounded-md bg-[#A50034] text-white font-semibold cursor-pointer"
+          >
+            저장 후 닫기
+          </button>
+          <button onClick={onClose} className="px-2 py-1 rounded-md bg-stone-200 dark:bg-[#32322F] font-semibold cursor-pointer">
+            버리기
+          </button>
+          <button onClick={() => setConfirmClose(false)} className="px-2 py-1 rounded-md font-semibold cursor-pointer">
+            취소
+          </button>
+        </div>
+      )}
+
+      {notice && !noticeHidden && !loading && !loadError && (
+        <div className="px-3 py-1.5 bg-sky-50 dark:bg-sky-950/30 border-b border-sky-100 dark:border-sky-900/50 text-[11px] text-sky-800 dark:text-sky-200 flex items-start gap-1.5">
+          <Info className="w-3.5 h-3.5 mt-px shrink-0" />
+          <span className="flex-1">{notice}</span>
+          <button onClick={() => setNoticeHidden(true)} className="cursor-pointer">
+            <X className="w-3 h-3" />
+          </button>
+        </div>
+      )}
+
+      {/* 본문 */}
+      <div className="flex-1 min-h-0">
+        {loading ? (
+          <div className="p-6 text-xs text-stone-500">문서를 여는 중...</div>
+        ) : loadError ? (
+          <div className="p-6 text-xs text-red-600 dark:text-red-400">{loadError}</div>
+        ) : doc.kind === "pdf" ? (
+          <PdfViewer bytes={doc.bytes ?? new Uint8Array()} onError={onError} />
+        ) : doc.kind === "pptx" && pptx ? (
+          <PptxEditor
+            deck={pptx.deck}
+            edits={editsRef.current}
+            onEdit={(key, text) => {
+              editsRef.current.set(key, text);
+              markDirty();
+            }}
+          />
+        ) : (doc.kind === "markdown" || doc.kind === "docx") && mode === "rich" ? (
+          <RichTextEditor
+            key={`${doc.id}:${editorKey}`}
+            initialHtml={initialHtml}
+            variant={doc.kind === "docx" ? "page" : "plain"}
+            onChange={(html) => {
+              htmlRef.current = html;
+              markDirty();
+            }}
+          />
+        ) : doc.kind === "html" && mode === "preview" ? (
+          <iframe
+            title={doc.title}
+            sandbox=""
+            srcDoc={sourceText}
+            className="w-full h-full bg-white border-0"
+          />
+        ) : (
+          <textarea
+            value={sourceText}
+            onChange={(e) => {
+              textRef.current = e.target.value;
+              setSourceText(e.target.value);
+              markDirty();
+            }}
+            spellCheck={false}
+            className="w-full h-full p-5 font-mono text-xs leading-relaxed text-stone-800 dark:text-stone-100 bg-transparent focus:outline-none resize-none"
+          />
+        )}
+      </div>
+    </div>
+  );
+}
