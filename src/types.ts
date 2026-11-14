@@ -65,6 +65,29 @@ export interface FileSnapshot {
   /** 바이너리 파일의 이전 내용 백업 이름 */
   backupBlob?: string | null;
   isBinary?: boolean;
+  /** 바이너리 파일의 바뀐 뒤 내용 백업 이름 */
+  afterBlob?: string | null;
+  /** 누가 바꿨는지: agent(AI 도구) | user(캔버스 저장 등). 예전 기록에는 없다. */
+  source?: "agent" | "user" | null;
+}
+
+/** 변경 보기: 스냅샷 하나의 이전·이후 내용 */
+export interface SnapshotDiff {
+  snapshotId: string;
+  relativePath: string;
+  action: "write" | "modify" | "delete" | string;
+  createdAt: string;
+  /** null: 파일이 없었음(beforeExists=false) 또는 텍스트로 볼 수 없음 */
+  before: string | null;
+  after: string | null;
+  beforeExists: boolean;
+  afterExists: boolean;
+  /** text | document(문서를 Markdown으로 바꿔 비교) | binary(비교 불가) */
+  kind: "text" | "document" | "binary";
+  notes: string[];
+  /** 이후에 같은 파일을 또 바꾼 기록이 있음 */
+  superseded: boolean;
+  source?: "agent" | "user" | null;
 }
 
 export interface SaveResult {

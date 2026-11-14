@@ -8,6 +8,7 @@ import {
   FileSnapshot,
   Project,
   SaveResult,
+  SnapshotDiff,
   StreamChunkPayload,
 } from "./types";
 
@@ -352,6 +353,35 @@ export const BackendAPI = {
       return await invoke<SaveResult>("save_file_to_path", { projectId, absolutePath, dataBase64 });
     }
     throw new Error("Tauri 데스크톱 창에서만 저장할 수 있습니다.");
+  },
+
+  /** 변경 보기용: 스냅샷의 이전·이후 내용 (docx·pptx는 Markdown으로 변환됨) */
+  async getSnapshotDiff(snapshotId: string): Promise<SnapshotDiff> {
+    if (isTauri()) {
+      return await invoke<SnapshotDiff>("get_snapshot_diff", { snapshotId });
+    }
+    // 브라우저 미리보기 모드: 저장된 텍스트 스냅샷으로 만든다.
+    const db = loadFallbackDb();
+    const idx = db.snapshots.findIndex((s) => s.id === snapshotId);
+    if (idx < 0) throw new Error("변경 기록을 찾을 수 없습니다.");
+    const s = db.snapshots[idx];
+    const superseded = db.snapshots
+      .slice(idx + 1)
+      .some((n) => n.projectId === s.projectId && n.relativePath === s.relativePath);
+    return {
+      snapshotId: s.id,
+      relativePath: s.relativePath,
+      action: s.action,
+      createdAt: s.createdAt,
+      before: s.existedBefore ? s.previousContent : null,
+      after: s.action === "delete" ? null : s.newContent,
+      beforeExists: s.existedBefore,
+      afterExists: s.action !== "delete",
+      kind: "text",
+      notes: [],
+      superseded,
+      source: s.source ?? null,
+    };
   },
 
   async undoFileSnapshot(snapshotId: string): Promise<string> {

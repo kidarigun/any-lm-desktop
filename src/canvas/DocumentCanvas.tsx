@@ -2,6 +2,7 @@ import {
   Check,
   ChevronDown,
   Copy,
+  History,
   Info,
   Maximize2,
   Minimize2,
@@ -40,6 +41,9 @@ export interface DocumentCanvasProps {
   onSaved: (info: CanvasSavedInfo) => void;
   onAttach?: (absolutePath: string) => void;
   onError: (msg: string) => void;
+  /** 이 파일의 변경 기록 수 (AI 도구·직접 저장 모두) */
+  historyCount?: number;
+  onShowHistory?: () => void;
 }
 
 type Mode = "rich" | "source" | "preview";
@@ -63,6 +67,8 @@ export default function DocumentCanvas({
   onSaved,
   onAttach,
   onError,
+  historyCount = 0,
+  onShowHistory,
 }: DocumentCanvasProps) {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -328,7 +334,7 @@ export default function DocumentCanvas({
   const absoluteForAttach = doc.absolutePath || (projectRoot && doc.filePath ? joinPath(projectRoot, doc.filePath) : undefined);
   const notice =
     doc.kind === "docx"
-      ? "Word 문서를 서식 편집기로 열었습니다. 저장하면 글꼴·색상·머리글/바닥글 같은 복잡한 서식은 단순화됩니다. 저장 전 상태는 채팅의 [되돌리기]로 복구할 수 있습니다."
+      ? "Word 문서를 서식 편집기로 열었습니다. 저장하면 글꼴·색상·머리글/바닥글 같은 복잡한 서식은 단순화됩니다. 저장 전 상태는 위의 [변경 기록]에서 비교하고 되돌릴 수 있습니다."
       : doc.kind === "pptx"
         ? "슬라이드의 글자를 클릭해 바로 고칠 수 있습니다. 디자인과 서식은 그대로 유지됩니다."
         : doc.kind === "pdf"
@@ -422,6 +428,17 @@ export default function DocumentCanvas({
               </div>
             )}
           </div>
+          {onShowHistory && historyCount > 0 && (
+            <button
+              onClick={onShowHistory}
+              className="px-1.5 py-1 rounded-lg hover:bg-stone-200 dark:hover:bg-[#32322F] cursor-pointer flex items-center gap-0.5"
+              title={`변경 기록 ${historyCount}개 — 바뀐 내용 비교·되돌리기`}
+              aria-label={`변경 기록 ${historyCount}개`}
+            >
+              <History className="w-4 h-4" />
+              <span className="text-[10px] font-semibold tabular-nums">{historyCount}</span>
+            </button>
+          )}
           <button onClick={copyContent} className="p-1.5 rounded-lg hover:bg-stone-200 dark:hover:bg-[#32322F] cursor-pointer" title="내용 복사 (Markdown)">
             {copied ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
           </button>

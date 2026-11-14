@@ -994,6 +994,18 @@ pub async fn execute_tool_now<R: Runtime>(
     name: &str,
     args: &Value,
 ) -> (ToolExecutionRecord, Option<FileSnapshot>, bool) {
+    let (rec, snap, pending) = run_tool(app, root, project_id, call_id, name, args).await;
+    (rec, snap.map(|s| s.with_source("agent")), pending)
+}
+
+async fn run_tool<R: Runtime>(
+    app: &AppHandle<R>,
+    root: &Path,
+    project_id: &str,
+    call_id: &str,
+    name: &str,
+    args: &Value,
+) -> (ToolExecutionRecord, Option<FileSnapshot>, bool) {
     let args_json = serde_json::to_string(args).unwrap_or_default();
 
     if matches!(name, "read_file" | "write_file" | "modify_file") {
@@ -1376,13 +1388,15 @@ mod tests {
         assert!(dir.path().join(".git/hooks/pre-commit").exists());
 
         // 일반 경로는 바로 쓴다.
-        let (r, _, needs) = execute_or_queue_tool(
+        let (r, snap, needs) = execute_or_queue_tool(
             app.handle(), dir.path(), "p", "c2", "write_file",
             &json!({"relative_path": "src/.gitignore", "content": "x"}),
         )
         .await;
         assert!(!needs);
         assert_eq!(r.status, "completed");
+        // 변경 기록에서 "AI"가 바꾼 것으로 표시된다.
+        assert_eq!(snap.unwrap().source.as_deref(), Some("agent"));
     }
 
     #[test]
@@ -1439,6 +1453,21 @@ mod tests {
             responder.state::<doc_bridge::DocBridge>().respond(&id, reply).unwrap();
         });
         app
+    }
+
+    #[tokio::test]
+    async fn document_changes_are_diffed_as_markdown() {
+        let app = app_with_fake_converter();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("r.docx"), b"\xffOLD").unwrap();
+        let snap = fs_ops::write_bytes_with_snapshot(dir.path(), "p", "r.docx", b"\xffNEW", "write").unwrap();
+        let d = crate::snapshot_diff::build_snapshot_diff(app.handle(), &snap, None, Some(dir.path()))
+            .await
+            .unwrap();
+        assert_eq!(d.kind, "document");
+        assert_eq!(d.before.as_deref(), Some("추출:\u{FFFD}OLD"));
+        assert_eq!(d.after.as_deref(), Some("추출:\u{FFFD}NEW"));
+        assert!(d.notes.iter().any(|n| n.contains("Markdown")));
     }
 
     #[tokio::test]

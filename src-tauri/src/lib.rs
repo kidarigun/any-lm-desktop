@@ -2,6 +2,7 @@ pub mod doc_bridge;
 pub mod exaone;
 pub mod fs_ops;
 pub mod secrets;
+pub mod snapshot_diff;
 pub mod store;
 
 use exaone::TurnRequest;
@@ -418,7 +419,8 @@ fn write_project_file(
         &proj.id,
         &relative_path,
         &content,
-    )?;
+    )?
+    .with_source("user");
     db.snapshots.push(snap.clone());
     state.store.save(&db)?;
     Ok(snap)
@@ -446,7 +448,8 @@ fn modify_project_file(
         &relative_path,
         &target,
         &replacement,
-    )?;
+    )?
+    .with_source("user");
     db.snapshots.push(snap.clone());
     state.store.save(&db)?;
     Ok(snap)
@@ -486,7 +489,8 @@ fn delete_project_path(
         Path::new(&proj.root_path),
         &proj.id,
         &relative_path,
-    )?;
+    )?
+    .with_source("user");
     db.snapshots.push(snap.clone());
     state.store.save(&db)?;
     Ok(snap)
@@ -512,6 +516,32 @@ fn undo_file_snapshot(
         .ok_or_else(|| "프로젝트를 찾을 수 없습니다.".to_string())?;
 
     fs_ops::restore_snapshot(Path::new(&proj.root_path), &snap)
+}
+
+/// 변경 보기: 스냅샷 하나의 이전·이후 내용 (문서는 Markdown으로 변환)
+#[tauri::command]
+async fn get_snapshot_diff(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    snapshot_id: String,
+) -> Result<snapshot_diff::SnapshotDiff, String> {
+    let (snap, later, root) = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        let snap = db
+            .snapshots
+            .iter()
+            .find(|s| s.id == snapshot_id)
+            .ok_or_else(|| "변경 기록을 찾을 수 없습니다.".to_string())?
+            .clone();
+        let later = snapshot_diff::next_change_of_same_file(&db.snapshots, &snap).cloned();
+        let root = db
+            .projects
+            .iter()
+            .find(|p| p.id == snap.project_id)
+            .map(|p| PathBuf::from(&p.root_path));
+        (snap, later, root)
+    };
+    snapshot_diff::build_snapshot_diff(&app, &snap, later.as_ref(), root.as_deref()).await
 }
 
 #[tauri::command]
@@ -787,7 +817,7 @@ async fn resolve_tool_approval(
                 let rel = args.get("relative_path").and_then(|v| v.as_str()).unwrap_or("");
                 match fs_ops::delete_path_with_snapshot(&root, &project.id, rel) {
                     Ok(snap) => {
-                        new_snap = Some(snap);
+                        new_snap = Some(snap.with_source("agent"));
                         ("completed", format!("승인 완료: '{}' 삭제됨", rel))
                     }
                     Err(e) => ("error", e),
@@ -953,7 +983,7 @@ fn write_project_file_base64(
 ) -> Result<FileSnapshot, String> {
     let (root, pid) = project_root(&state, &project_id)?;
     let bytes = doc_bridge::decode_base64(&data_base64)?;
-    let snap = fs_ops::write_bytes_with_snapshot(&root, &pid, &relative_path, &bytes, "write")?;
+    let snap = fs_ops::write_bytes_with_snapshot(&root, &pid, &relative_path, &bytes, "write")?.with_source("user");
     push_snapshot(&state, &snap)?;
     Ok(snap)
 }
@@ -994,7 +1024,7 @@ fn save_file_to_path(
     if let Some(pid) = project_id.filter(|p| p != GENERAL_CHAT_ID) {
         let (root, pid) = project_root(&state, &pid)?;
         if let Some(rel) = relative_to_root(&root, &target) {
-            let snap = fs_ops::write_bytes_with_snapshot(&root, &pid, &rel, &bytes, "write")?;
+            let snap = fs_ops::write_bytes_with_snapshot(&root, &pid, &rel, &bytes, "write")?.with_source("user");
             push_snapshot(&state, &snap)?;
             return Ok(SaveResult { absolute_path, relative_path: Some(rel), snapshot: Some(snap) });
         }
@@ -1237,6 +1267,7 @@ pub fn run() {
             create_project_folder,
             delete_project_path,
             undo_file_snapshot,
+            get_snapshot_diff,
             create_conversation,
             delete_conversation,
             send_chat_message,

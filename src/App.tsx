@@ -18,6 +18,7 @@ import {
   Plus,
   RefreshCw,
   RotateCcw,
+  FileDiff,
   Save,
   Search,
   Send,
@@ -36,9 +37,11 @@ import {
 
 // 문서 편집 라이브러리(TipTap, docx, pptxgenjs, pdf.js)는 캔버스를 처음 열 때 불러온다.
 const DocumentCanvas = React.lazy(() => import("./canvas/DocumentCanvas"));
+const DiffViewer = React.lazy(() => import("./diff/DiffViewer"));
 import { startDocBridge } from "./docs/bridge";
 import { DRAG_MIME, FileExplorer, type ExplorerApi } from "./explorer/FileExplorer";
 import { useFileMention } from "./explorer/FileMention";
+import { fileHistory } from "./diff/history";
 import { docKindOf, docKindOfLanguage, isBinaryKind } from "./docs/formats";
 import {
   AppSettings,
@@ -174,6 +177,8 @@ export default function App() {
   );
   // Modals
   const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
+  /** 변경 보기 창: 함께 볼 변경 기록들과 처음 보여 줄 기록 */
+  const [diffView, setDiffView] = useState<{ ids: string[]; initial: string; variant?: "files" | "history" } | null>(null);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   /** 저장하지 않고 닫으면 입력하던 키는 버린다. */
   function closeSettingsModal() {
@@ -718,17 +723,35 @@ export default function App() {
     }
   }
 
-  async function handleUndoSnapshot(snapshotId: string) {
+  async function handleUndoSnapshot(snapshotId: string): Promise<boolean> {
     try {
       await BackendAPI.undoFileSnapshot(snapshotId);
       bumpFileTree();
       if (activeArtifact?.filePath && activeProject) {
         await openFileInArtifact(activeArtifact.filePath);
       }
+      return true;
     } catch (err: any) {
       setErrorBanner(String(err));
+      return false;
     }
   }
+
+  /** 도구 기록들 가운데 파일을 바꾼 기록(스냅샷)들로 변경 보기 창을 연다. */
+  function openDiffView(records: ToolExecutionRecord[], initial?: string) {
+    const ids = records.map((r) => r.snapshotId).filter((id): id is string => !!id);
+    if (ids.length === 0) return;
+    setDiffView({ ids, initial: initial ?? ids[0] });
+  }
+
+  /** 캔버스에 열린 파일의 변경 기록 (AI 도구가 바꾼 것과 캔버스에서 직접 저장한 것 모두, 최신순) */
+  const activeFileHistory = useMemo(
+    () =>
+      activeArtifact?.filePath && activeProject && currentScopeId !== "general-chat"
+        ? fileHistory(snapshots, activeProject.id, activeArtifact.filePath)
+        : [],
+    [snapshots, activeArtifact?.filePath, activeProject, currentScopeId]
+  );
 
   function handleCopyText(id: string, text: string) {
     navigator.clipboard.writeText(text);
@@ -1393,12 +1416,22 @@ export default function App() {
                                   record={tr}
                                   onOpenFile={openFileInArtifact}
                                   onUndo={handleUndoSnapshot}
+                                  onViewDiff={(id) => openDiffView(msg.toolRecords, id)}
                                   onApprove={(approve) =>
                                     handleToolApproval(msg.id, tr.id, approve)
                                   }
                                   approvalDisabled={isStreaming}
                                 />
                               ))}
+                              {msg.toolRecords.filter((r) => r.snapshotId).length > 1 && (
+                                <button
+                                  onClick={() => openDiffView(msg.toolRecords)}
+                                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium text-[#A50034] dark:text-[#FF5C8D] hover:bg-[#A50034]/5 dark:hover:bg-[#FF5C8D]/10 cursor-pointer"
+                                >
+                                  <FileDiff className="w-3.5 h-3.5" />
+                                  이 답변의 변경 사항 {msg.toolRecords.filter((r) => r.snapshotId).length}개 모두 보기
+                                </button>
+                              )}
                             </div>
                           )}
 
@@ -1499,6 +1532,7 @@ export default function App() {
                         record={tr}
                         onOpenFile={openFileInArtifact}
                         onUndo={handleUndoSnapshot}
+                        onViewDiff={(id) => openDiffView(streamingTools, id)}
                         onApprove={() => {}}
                         approvalDisabled
                       />
@@ -1653,9 +1687,31 @@ export default function App() {
               setAttachedFiles((prev) => Array.from(new Set([...prev, abs])))
             }
             onError={(msg) => setErrorBanner(msg)}
+            historyCount={activeFileHistory.length}
+            onShowHistory={() =>
+              activeFileHistory.length > 0 &&
+              setDiffView({
+                ids: activeFileHistory.map((s) => s.id),
+                initial: activeFileHistory[0].id,
+                variant: "history",
+              })
+            }
           />
           </React.Suspense>
         </aside>
+      )}
+
+      {diffView && (
+        <React.Suspense fallback={null}>
+          <DiffViewer
+            snapshotIds={diffView.ids}
+            initialId={diffView.initial}
+            onClose={() => setDiffView(null)}
+            onUndo={handleUndoSnapshot}
+            onOpenFile={openFileInArtifact}
+            variant={diffView.variant}
+          />
+        </React.Suspense>
       )}
 
       {/* Modal 1: API & Model Settings */}
@@ -1932,12 +1988,14 @@ function ToolCallBox({
   record,
   onOpenFile,
   onUndo,
+  onViewDiff,
   onApprove,
   approvalDisabled = false,
 }: {
   record: ToolExecutionRecord;
   onOpenFile: (rel: string) => void;
   onUndo: (snapId: string) => void;
+  onViewDiff?: (snapId: string) => void;
   onApprove: (approve: boolean) => void;
   approvalDisabled?: boolean;
 }) {
@@ -1961,6 +2019,14 @@ function ToolCallBox({
           )}
         </div>
         <div className="flex items-center gap-2">
+          {record.snapshotId && onViewDiff && (
+            <button
+              onClick={() => onViewDiff(record.snapshotId!)}
+              className="px-2 py-0.5 rounded bg-[#A50034]/10 dark:bg-[#FF5C8D]/15 hover:bg-[#A50034]/15 dark:hover:bg-[#FF5C8D]/25 text-[#A50034] dark:text-[#FF5C8D] font-medium flex items-center gap-1 cursor-pointer"
+            >
+              <FileDiff className="w-3 h-3" /> 변경 보기
+            </button>
+          )}
           {record.snapshotId && (
             <button
               onClick={() => onUndo(record.snapshotId!)}

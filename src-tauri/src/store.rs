@@ -97,6 +97,19 @@ pub struct FileSnapshot {
     /// 새 내용이 바이너리라 `new_content`에 텍스트를 담지 않은 경우
     #[serde(default)]
     pub is_binary: bool,
+    /// 바이너리 파일의 바뀐 뒤 내용을 담은 백업 파일 이름 (변경 보기용)
+    #[serde(default)]
+    pub after_blob: Option<String>,
+    /// 누가 바꿨는지: "agent"(AI 도구) | "user"(캔버스 저장 등). 예전 기록은 없음.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+impl FileSnapshot {
+    pub fn with_source(mut self, source: &str) -> Self {
+        self.source = Some(source.to_string());
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

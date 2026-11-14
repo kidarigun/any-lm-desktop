@@ -335,7 +335,7 @@ fn save_blob(bytes: &[u8]) -> Result<String, String> {
     Ok(name)
 }
 
-fn load_blob(name: &str) -> Result<Vec<u8>, String> {
+pub fn load_blob(name: &str) -> Result<Vec<u8>, String> {
     // 저장된 이름만 받는다 (경로 조작 방지).
     if name.contains(['/', '\\']) || name.contains("..") {
         return Err("잘못된 백업 파일 이름입니다.".to_string());
@@ -388,6 +388,8 @@ pub fn write_bytes_with_snapshot(
     fs::write(&target, bytes).map_err(|e| format!("파일 쓰기 오류 ({}): {}", relative_path, e))?;
 
     let text = std::str::from_utf8(bytes).ok();
+    // 바이너리(docx 등)는 바뀐 뒤 내용도 백업해 두어야 나중에 변경 내용을 비교할 수 있다.
+    let after_blob = if text.is_none() { save_blob(bytes).ok() } else { None };
     Ok(FileSnapshot {
         id: Uuid::new_v4().to_string(),
         project_id: project_id.to_string(),
@@ -399,6 +401,8 @@ pub fn write_bytes_with_snapshot(
         created_at: chrono::Local::now().to_rfc3339(),
         backup_blob,
         is_binary: text.is_none(),
+        after_blob,
+        source: None,
     })
 }
 
@@ -435,6 +439,8 @@ pub fn modify_file_with_snapshot(
         created_at: chrono::Local::now().to_rfc3339(),
         backup_blob: None,
         is_binary: false,
+        after_blob: None,
+        source: None,
     })
 }
 
@@ -472,6 +478,8 @@ pub fn delete_path_with_snapshot(
         created_at: chrono::Local::now().to_rfc3339(),
         backup_blob,
         is_binary: false,
+        after_blob: None,
+        source: None,
     })
 }
 
