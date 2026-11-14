@@ -42,6 +42,17 @@ import { startDocBridge } from "./docs/bridge";
 import { DRAG_MIME, FileExplorer, type ExplorerApi } from "./explorer/FileExplorer";
 import { useFileMention } from "./explorer/FileMention";
 import { fileHistory } from "./diff/history";
+import { PanelResizer } from "./ui/PanelResizer";
+import {
+  CANVAS_DEFAULT_WIDTH,
+  CANVAS_MIN_WIDTH,
+  availableWidth,
+  clampCanvasWidth,
+  loadCanvasWidth,
+  maxCanvasWidth,
+  saveCanvasWidth,
+  wideCanvasWidth,
+} from "./ui/panelWidth";
 import { docKindOf, docKindOfLanguage, isBinaryKind } from "./docs/formats";
 import {
   AppSettings,
@@ -167,6 +178,10 @@ export default function App() {
 
   // Collapsible Claude-style Right Artifact Drawer
   const [canvasExpanded, setCanvasExpanded] = useState<boolean>(false);
+  /** 사용자가 경계선을 끌어 정한 캔버스 폭 (다음 실행에도 유지) */
+  const [canvasWidth, setCanvasWidth] = useState<number>(loadCanvasWidth);
+  const [windowWidth, setWindowWidth] = useState<number>(() => window.innerWidth);
+  const canvasRef = useRef<HTMLElement>(null);
   // 사이드바 하단: 대화 목록 / 프로젝트 파일 탐색기
   const [sidebarTab, setSidebarTab] = useState<"chats" | "files">("chats");
   const [fileTreeVersion, setFileTreeVersion] = useState(0);
@@ -744,6 +759,25 @@ export default function App() {
     setDiffView({ ids, initial: initial ?? ids[0] });
   }
 
+  useEffect(() => {
+    const onResize = () => setWindowWidth(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  // 창 크기가 바뀌어도 채팅창이 너무 좁아지지 않도록 화면에 쓰는 폭만 줄인다 (저장된 폭은 그대로).
+  const canvasMaxWidth = maxCanvasWidth(availableWidth(windowWidth));
+  const shownCanvasWidth = canvasExpanded
+    ? wideCanvasWidth(windowWidth)
+    : clampCanvasWidth(canvasWidth, availableWidth(windowWidth));
+
+  function changeCanvasWidth(width: number) {
+    const w = clampCanvasWidth(width, availableWidth(window.innerWidth));
+    setCanvasWidth(w);
+    setCanvasExpanded(false);
+    saveCanvasWidth(w);
+  }
+
   /** 캔버스에 열린 파일의 변경 기록 (AI 도구가 바꾼 것과 캔버스에서 직접 저장한 것 모두, 최신순) */
   const activeFileHistory = useMemo(
     () =>
@@ -1020,9 +1054,9 @@ export default function App() {
       {/* Center Main Area */}
       <main className="flex-1 flex flex-col min-w-0 bg-[#FAF9F5] dark:bg-[#1E1E1C] transition-colors duration-150">
         {/* Clean Header */}
-        <header className="h-13 border-b border-[#E5E3DB] dark:border-[#2E2E2A] px-6 flex items-center justify-between shrink-0 bg-[#FAF9F5]/90 dark:bg-[#1E1E1C]/90 backdrop-blur-xs">
-          <div className="flex items-center gap-2.5 text-xs">
-            <span className="font-bold text-sm text-stone-900 dark:text-stone-100">
+        <header className="h-13 border-b border-[#E5E3DB] dark:border-[#2E2E2A] px-6 flex items-center justify-between gap-3 shrink-0 bg-[#FAF9F5]/90 dark:bg-[#1E1E1C]/90 backdrop-blur-xs">
+          <div className="flex items-center gap-2.5 text-xs min-w-0">
+            <span className="font-bold text-sm text-stone-900 dark:text-stone-100 truncate">
               {activeMode === "chat" &&
                 (activeConversation ? activeConversation.title : "새 채팅")}
               {activeMode === "project" && "프로젝트"}
@@ -1030,24 +1064,25 @@ export default function App() {
             </span>
             {activeMode !== "chat" && activeProject && (
               <>
-                <span className="text-stone-300 dark:text-stone-600">/</span>
-                <span className="font-semibold text-stone-700 dark:text-stone-300">
+                <span className="text-stone-300 dark:text-stone-600 shrink-0">/</span>
+                <span className="font-semibold text-stone-700 dark:text-stone-300 truncate">
                   {activeProject.name}
                 </span>
               </>
             )}
           </div>
 
-          <div className="flex items-center gap-2">
+          {/* 채팅창이 좁아지면 작업 폴더 경로부터 줄인다. 버튼 글자는 줄바꿈하지 않는다. */}
+          <div className="flex items-center gap-2 min-w-0">
             {(activeMode === "project" || activeMode === "code") &&
               activeProject && (
                 <button
                   onClick={handleBrowseFolderForActiveProject}
-                  className="px-3 py-1.5 rounded-lg bg-white dark:bg-[#262624] hover:bg-stone-100 dark:hover:bg-[#30302C] border border-stone-300 dark:border-[#3A3A36] text-xs font-medium text-stone-700 dark:text-stone-200 flex items-center gap-1.5 cursor-pointer transition"
-                  title="작업 폴더 변경"
+                  className="px-3 py-1.5 rounded-lg bg-white dark:bg-[#262624] hover:bg-stone-100 dark:hover:bg-[#30302C] border border-stone-300 dark:border-[#3A3A36] text-xs font-medium text-stone-700 dark:text-stone-200 flex items-center gap-1.5 cursor-pointer transition min-w-0"
+                  title={`작업 폴더 변경 (${activeProject.rootPath})`}
                 >
-                  <FolderOpen className="w-3.5 h-3.5 text-[#A50034] dark:text-[#FF5C8D]" />
-                  <span className="truncate max-w-[240px]">
+                  <FolderOpen className="w-3.5 h-3.5 shrink-0 text-[#A50034] dark:text-[#FF5C8D]" />
+                  <span className="truncate max-w-[240px] min-w-0">
                     {activeProject.rootPath}
                   </span>
                 </button>
@@ -1056,7 +1091,7 @@ export default function App() {
             {activeMode === "project" && (
               <button
                 onClick={() => setShowProjectOverview(!showProjectOverview)}
-                className="px-3 py-1.5 rounded-lg bg-white dark:bg-[#262624] hover:bg-stone-100 dark:hover:bg-[#30302C] border border-stone-300 dark:border-[#3A3A36] text-xs font-semibold text-stone-700 dark:text-stone-200 cursor-pointer transition"
+                className="px-3 py-1.5 rounded-lg bg-white dark:bg-[#262624] hover:bg-stone-100 dark:hover:bg-[#30302C] border border-stone-300 dark:border-[#3A3A36] text-xs font-semibold text-stone-700 dark:text-stone-200 cursor-pointer transition whitespace-nowrap shrink-0"
               >
                 {showProjectOverview ? "대화로 돌아가기" : "프로젝트 관리"}
               </button>
@@ -1064,7 +1099,7 @@ export default function App() {
 
             <button
               onClick={handleOpenDocument}
-              className="px-2.5 py-1.5 rounded-lg bg-stone-200/80 dark:bg-[#2C2C28] hover:bg-stone-300 dark:hover:bg-[#383833] text-xs font-semibold text-stone-700 dark:text-stone-200 flex items-center gap-1 cursor-pointer"
+              className="px-2.5 py-1.5 rounded-lg bg-stone-200/80 dark:bg-[#2C2C28] hover:bg-stone-300 dark:hover:bg-[#383833] text-xs font-semibold text-stone-700 dark:text-stone-200 flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
               title="Markdown, Word, PowerPoint, PDF, HTML, 텍스트 파일을 문서 캔버스에서 엽니다"
             >
               <FileText className="w-3.5 h-3.5" />
@@ -1668,10 +1703,18 @@ export default function App() {
       {/* 문서 캔버스: 형식(Markdown·Word·PowerPoint·PDF·HTML·텍스트)에 맞춘 편집기 */}
       {activeArtifact && (
         <aside
-          className={`${
-            canvasExpanded ? "w-[min(64vw,1180px)]" : "w-[520px]"
-          } bg-white dark:bg-[#232321] border-l border-[#E2E0D8] dark:border-[#2E2E2A] flex flex-col shrink-0 shadow-lg transition-[width] duration-150 min-w-0`}
+          ref={canvasRef}
+          style={{ width: shownCanvasWidth }}
+          className="relative bg-white dark:bg-[#232321] border-l border-[#E2E0D8] dark:border-[#2E2E2A] flex flex-col shrink-0 shadow-lg transition-[width] duration-150 min-w-0"
         >
+          <PanelResizer
+            target={canvasRef}
+            width={shownCanvasWidth}
+            min={CANVAS_MIN_WIDTH}
+            max={canvasMaxWidth}
+            onChange={changeCanvasWidth}
+            onReset={() => changeCanvasWidth(CANVAS_DEFAULT_WIDTH)}
+          />
           <React.Suspense
             fallback={<div className="p-6 text-xs text-stone-500">문서 편집기를 불러오는 중...</div>}
           >
