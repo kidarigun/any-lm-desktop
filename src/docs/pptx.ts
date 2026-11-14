@@ -1069,7 +1069,7 @@ export async function markdownToPptx(md: string, title = "프레젠테이션"): 
   const pptx = new PptxGenJS();
   pptx.layout = "LAYOUT_WIDE";
   pptx.title = title;
-  pptx.author = "EXAONE Desktop";
+  pptx.author = "Desktop App for LG K-EXAONE";
   pptx.theme = { headFontFace: FONT, bodyFontFace: FONT };
 
   specs.forEach((spec, idx) => {

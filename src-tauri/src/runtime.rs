@@ -35,7 +35,7 @@ const MAX_DOWNLOAD: u64 = 200 * 1024 * 1024;
 static ROOT: OnceLock<PathBuf> = OnceLock::new();
 static JOBS: LazyLock<Mutex<HashMap<String, Job>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// 앱 시작 시 한 번: 실행 환경을 둘 폴더 (%LOCALAPPDATA%\ai.exaone.desktop\runtimes)
+/// 앱 시작 시 한 번: 실행 환경을 둘 폴더 (%LOCALAPPDATA%\io.github.kidarigun.kexaone-desktop\runtimes)
 pub fn set_root(dir: PathBuf) {
     let _ = ROOT.set(dir);
 }
@@ -231,7 +231,7 @@ async fn download(kind: &str, label: &str, url: &str, sha256: &str) -> Result<Ve
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(20))
         .timeout(DOWNLOAD_TIMEOUT)
-        .user_agent(concat!("EXAONE-Desktop/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("Desktop-App-for-LG-K-EXAONE/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| e.to_string())?;
     let mut resp = client

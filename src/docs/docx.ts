@@ -354,7 +354,7 @@ export async function htmlToDocx(html: string, title = "문서"): Promise<Uint8A
 
   const document = new Document({
     title,
-    creator: "EXAONE Desktop",
+    creator: "Desktop App for LG K-EXAONE",
     styles: {
       default: {
         document: {

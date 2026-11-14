@@ -26,7 +26,7 @@ async fn fetch_bytes(url: &str, max: usize) -> Result<Vec<u8>, String> {
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(FETCH_TIMEOUT)
-        .user_agent(concat!("EXAONE-Desktop/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("Desktop-App-for-LG-K-EXAONE/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| e.to_string())?;
     let mut resp = client

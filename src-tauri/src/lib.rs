@@ -1664,6 +1664,26 @@ fn doc_bridge_respond(
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// 예전 앱 ID의 데이터 폴더를 새 폴더로 옮긴다. 새 폴더가 이미 있으면 건드리지 않는다.
+fn migrate_old_data_dir(new_dir: &Path) {
+    const OLD_ID: &str = "ai.exaone.desktop";
+    let Some(parent) = new_dir.parent() else { return };
+    let old = parent.join(OLD_ID);
+    if new_dir.exists() || !old.is_dir() || old == new_dir {
+        return;
+    }
+    if let Err(e) = std::fs::rename(&old, new_dir) {
+        eprintln!("이전 데이터 폴더를 옮기지 못했습니다 ({}): {}", old.display(), e);
+        return;
+    }
+    // 앱 전용 Python 가상환경은 기반 Python의 절대 경로를 적어 두므로 새 경로로 고친다.
+    let cfg = new_dir.join("runtimes").join("pyenv").join("pyvenv.cfg");
+    if let Ok(text) = std::fs::read_to_string(&cfg) {
+        let fixed = text.replace(&old.to_string_lossy().to_string(), &new_dir.to_string_lossy());
+        let _ = std::fs::write(&cfg, fixed);
+    }
+}
+
 pub fn run() {
     // 이미 실행 중이면 새로 띄우지 않고 기존 창을 앞으로 가져온다 (저장 파일·로그인 포트 충돌 방지).
     let mut instance = match single_instance::acquire() {
@@ -1687,7 +1707,12 @@ pub fn run() {
             let app_data_dir = app
                 .path()
                 .app_data_dir()
-                .unwrap_or_else(|_| PathBuf::from("c:\\DOCS\\EXAONE\\.exaone_data"));
+                .unwrap_or_else(|_| std::env::temp_dir().join("k-exaone-desktop-data"));
+            // 앱 ID를 바꾸기 전(ai.exaone.desktop) 폴더에 있던 대화·설정·실행 환경을 한 번 옮겨 온다.
+            migrate_old_data_dir(&app_data_dir);
+            if let Ok(local) = app.path().app_local_data_dir() {
+                migrate_old_data_dir(&local);
+            }
             fs_ops::set_blob_dir(app_data_dir.join("blobs"));
             skills::set_user_dir(app_data_dir.join("skills"));
             // 실행 환경(Python·Node.js·uv)은 크므로 로밍되지 않는 로컬 앱 데이터에 둔다.
@@ -1786,7 +1811,7 @@ pub fn run() {
             reveal_saved_path,
         ])
         .build(tauri::generate_context!())
-        .expect("error while running EXAONE Desktop application")
+        .expect("error while running Desktop App for LG K-EXAONE")
         .run(|app, event| {
             // 앱을 끝낼 때 로컬 MCP 서버 프로세스도 함께 끝낸다.
             if let tauri::RunEvent::Exit = event {

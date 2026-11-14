@@ -87,7 +87,7 @@ def main():
     npm = npm_packages()
     text = f"""# 외부 라이브러리 안내 (Third-Party Notices)
 
-EXAONE Desktop은 아래 오픈소스 라이브러리를 사용합니다. 각 라이브러리의 저작권은 해당 저작자에게 있으며,
+Desktop App for LG K-EXAONE은 아래 오픈소스 라이브러리를 사용합니다. 각 라이브러리의 저작권은 해당 저작자에게 있으며,
 각 라이선스 전문은 해당 저장소(또는 설치된 패키지 안의 LICENSE 파일)에서 볼 수 있습니다.
 
 이 파일은 `python scripts/third_party_notices.py`로 만듭니다. 의존성을 바꾸면 다시 실행하세요.

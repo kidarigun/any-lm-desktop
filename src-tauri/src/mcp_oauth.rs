@@ -166,7 +166,7 @@ pub async fn discover(server_url: &str, s: &OAuthSettings) -> Result<Endpoints, 
         .post(server_url)
         .header("Accept", "application/json, text/event-stream")
         .json(&serde_json::json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
-            "protocolVersion": crate::mcp::PROTOCOL_VERSION, "capabilities": {}, "clientInfo": { "name": "EXAONE Desktop", "version": env!("CARGO_PKG_VERSION") } } }))
+            "protocolVersion": crate::mcp::PROTOCOL_VERSION, "capabilities": {}, "clientInfo": { "name": "Desktop App for LG K-EXAONE", "version": env!("CARGO_PKG_VERSION") } } }))
         .send()
         .await
         .ok();
@@ -231,7 +231,7 @@ pub async fn register_client(registration: &str) -> Result<(String, Option<Strin
     let r = http()?
         .post(registration)
         .json(&serde_json::json!({
-            "client_name": "EXAONE Desktop",
+            "client_name": "Desktop App for LG K-EXAONE",
             "redirect_uris": [redirect_uri()],
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
@@ -423,11 +423,11 @@ pub async fn wait_for_code(state: &str, mut cancel: oneshot::Receiver<()>) -> Re
         }
         let q: BTreeMap<String, String> = u.query_pairs().map(|(k, v)| (k.to_string(), v.to_string())).collect();
         if q.get("state").map(String::as_str) != Some(state) {
-            let _ = sock.write_all(page("로그인 확인 실패", "요청 정보가 맞지 않습니다. EXAONE Desktop에서 다시 로그인하세요.").as_bytes()).await;
+            let _ = sock.write_all(page("로그인 확인 실패", "요청 정보가 맞지 않습니다. 앱에서 다시 로그인하세요.").as_bytes()).await;
             continue;
         }
         if let Some(e) = q.get("error") {
-            let _ = sock.write_all(page("로그인하지 않았습니다", "이 창을 닫고 EXAONE Desktop으로 돌아가세요.").as_bytes()).await;
+            let _ = sock.write_all(page("로그인하지 않았습니다", "이 창을 닫고 앱으로 돌아가세요.").as_bytes()).await;
             let desc = q.get("error_description").map(|d| format!(" ({})", d)).unwrap_or_default();
             return Err(if e == "access_denied" {
                 "로그인을 취소했거나 권한을 허락하지 않았습니다.".to_string()
@@ -437,7 +437,7 @@ pub async fn wait_for_code(state: &str, mut cancel: oneshot::Receiver<()>) -> Re
         }
         let Some(code) = q.get("code") else { continue };
         let _ = sock
-            .write_all(page("로그인 완료", "이 창을 닫고 EXAONE Desktop으로 돌아가세요.").as_bytes())
+            .write_all(page("로그인 완료", "이 창을 닫고 앱으로 돌아가세요.").as_bytes())
             .await;
         let _ = sock.shutdown().await;
         return Ok(code.clone());

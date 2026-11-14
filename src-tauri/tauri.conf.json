@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "EXAONE Desktop",
+  "productName": "Desktop App for LG K-EXAONE",
   "version": "0.1.0",
-  "identifier": "ai.exaone.desktop",
+  "identifier": "io.github.kidarigun.kexaone-desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "EXAONE Desktop — K-EXAONE 2.5 Workspace",
+        "title": "Desktop App for LG K-EXAONE",
         "width": 1440,
         "height": 900,
         "minWidth": 1024,
@@ -64,11 +64,11 @@
     "targets": [
       "nsis"
     ],
-    "publisher": "EXAONE Desktop",
-    "copyright": "© 2026 EXAONE Desktop",
+    "publisher": "kidarigun",
+    "copyright": "© 2026 김기군. LG AI연구원의 공식 제품이 아닙니다.",
     "category": "Productivity",
-    "shortDescription": "K-EXAONE 기반 한국어 문서·코딩 데스크톱 도우미",
-    "longDescription": "LG AI연구원의 K-EXAONE 모델로 보고서·문서를 쓰고, 프로젝트 파일을 다루고, Skill과 MCP로 기능을 넓히는 데스크톱 앱입니다.",
+    "shortDescription": "LG K-EXAONE용 비공식 데스크톱 앱",
+    "longDescription": "LG AI연구원의 K-EXAONE 모델 API로 보고서·문서를 쓰고, 프로젝트 파일을 다루고, Skill과 MCP로 기능을 넓히는 비공식 오픈소스 데스크톱 앱입니다. LG AI연구원이 만들거나 보증하지 않았습니다.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

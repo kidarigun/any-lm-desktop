@@ -1048,10 +1048,13 @@ export default function App() {
                   EX
                 </span>
                 <span className="font-bold text-sm text-stone-900 dark:text-stone-100">
-                  EXAONE
+                  K-EXAONE
                 </span>
-                <span className="text-xs px-2 py-0.5 rounded-full bg-stone-200/90 dark:bg-[#2A2A27] text-stone-600 dark:text-stone-300 font-medium">
-                  2.5
+                <span
+                  title="Desktop App for LG K-EXAONE은 LG AI연구원이 만들거나 보증하지 않은 비공식 오픈소스 앱입니다."
+                  className="text-[10px] px-1.5 py-0.5 rounded-full bg-stone-200/90 dark:bg-[#2A2A27] text-stone-600 dark:text-stone-300 font-medium cursor-help"
+                >
+                  비공식
                 </span>
               </div>
 
@@ -1124,7 +1127,7 @@ export default function App() {
                   onClick={() => {
                     setEditingProject({
                       name: "",
-                      rootPath: activeProject?.rootPath || "c:\\DOCS\\EXAONE",
+                      rootPath: activeProject?.rootPath || "",
                       instructions: "",
                     });
                     setShowProjectModal(true);

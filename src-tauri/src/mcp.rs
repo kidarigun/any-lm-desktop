@@ -777,7 +777,7 @@ impl Client {
                 json!({
                     "protocolVersion": PROTOCOL_VERSION,
                     "capabilities": {},
-                    "clientInfo": { "name": "EXAONE Desktop", "version": env!("CARGO_PKG_VERSION") }
+                    "clientInfo": { "name": "Desktop App for LG K-EXAONE", "version": env!("CARGO_PKG_VERSION") }
                 }),
                 CONNECT_TIMEOUT,
             )
