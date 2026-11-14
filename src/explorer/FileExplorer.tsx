@@ -12,7 +12,9 @@ import {
   Search,
   Trash2,
   X,
+  Play,
 } from "lucide-react";
+import { docKindOf, isPreviewOnlyKind, opensInExternalApp } from "../docs/formats";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { FileNode } from "../types";
 import { FileIcon } from "./fileIcons";
@@ -36,6 +38,10 @@ export interface FileExplorerProps {
   /** 캔버스에 열려 있는 파일 (강조 표시) */
   activePath?: string;
   onOpen: (rel: string) => void;
+  /** .py 파일을 Python 실행 창으로 */
+  onRunPython?: (rel: string) => void;
+  /** Windows 기본 앱(Excel·PowerPoint 등)으로 열기 */
+  onOpenExternal?: (rel: string) => void;
   onAttach: (rel: string) => void;
   onRenamed: (from: string, to: string) => void;
   onDeleted: (rel: string) => void;
@@ -85,6 +91,8 @@ export function FileExplorer({
   refreshToken,
   activePath,
   onOpen,
+  onRunPython,
+  onOpenExternal,
   onAttach,
   onRenamed,
   onDeleted,
@@ -513,7 +521,21 @@ export function FileExplorer({
             <>
               {menuNode && !menuNode.isDir && (
                 <>
-                  <MenuItem icon={<FileIcon name={menuNode.name} isDir={false} />} label="캔버스에서 열기" onClick={() => { setMenu(null); onOpen(menuNode.relativePath); }} />
+                  {onRunPython && /\.pyw?$/i.test(menuNode.name) && (
+                    <MenuItem icon={<Play className="w-3.5 h-3.5 text-[#A50034] dark:text-[#FF5C8D]" />} label="Python으로 실행" onClick={() => { setMenu(null); onRunPython(menuNode.relativePath); }} />
+                  )}
+                  <MenuItem
+                    icon={<FileIcon name={menuNode.name} isDir={false} />}
+                    label={opensInExternalApp(menuNode.name) ? "기본 앱으로 열기" : "캔버스에서 열기"}
+                    onClick={() => { setMenu(null); onOpen(menuNode.relativePath); }}
+                  />
+                  {onOpenExternal && !opensInExternalApp(menuNode.name) && isPreviewOnlyKind(docKindOf(menuNode.name)) && (
+                    <MenuItem
+                      icon={<ExternalLink className="w-3.5 h-3.5" />}
+                      label="기본 앱으로 열기"
+                      onClick={() => { setMenu(null); onOpenExternal(menuNode.relativePath); }}
+                    />
+                  )}
                   <MenuItem icon={<Paperclip className="w-3.5 h-3.5" />} label="채팅에 첨부" onClick={() => { setMenu(null); onAttach(menuNode.relativePath); }} />
                   <Separator />
                 </>

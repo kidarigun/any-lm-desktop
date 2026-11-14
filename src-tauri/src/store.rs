@@ -54,6 +54,9 @@ pub struct ToolExecutionRecord {
     /// 에이전트 루프에서 이 도구가 호출된 라운드 번호 (API 히스토리 재구성용)
     #[serde(default)]
     pub round: u32,
+    /// run_python 실행으로 새로 생기거나 바뀐 파일 (화면에서 바로 열 수 있게)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub produced_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,13 +126,20 @@ pub struct AppDatabase {
 
 pub struct StoreManager {
     db_path: PathBuf,
+    /// 처음 실행할 때 기본 프로젝트로 쓸 폴더 (없으면 현재 폴더)
+    default_workspace: Option<PathBuf>,
 }
 
 impl StoreManager {
     pub fn new(base_dir: &Path) -> Self {
         let _ = fs::create_dir_all(base_dir);
         let db_path = base_dir.join("exaone_desktop_store.json");
-        Self { db_path }
+        Self { db_path, default_workspace: None }
+    }
+
+    pub fn with_default_workspace(mut self, dir: PathBuf) -> Self {
+        self.default_workspace = Some(dir);
+        self
     }
 
     pub fn load(&self) -> AppDatabase {
@@ -156,13 +166,18 @@ impl StoreManager {
                 return db;
             }
         }
-        let mut cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("c:\\DOCS\\EXAONE"));
-        if cwd.ends_with("src-tauri") {
-            if let Some(parent) = cwd.parent() {
-                cwd = parent.to_path_buf();
+        let default_root = match &self.default_workspace {
+            Some(dir) if fs::create_dir_all(dir).is_ok() => dir.to_string_lossy().to_string(),
+            _ => {
+                let mut cwd = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
+                if cwd.ends_with("src-tauri") {
+                    if let Some(parent) = cwd.parent() {
+                        cwd = parent.to_path_buf();
+                    }
+                }
+                cwd.to_string_lossy().to_string()
             }
-        }
-        let default_root = cwd.to_string_lossy().to_string();
+        };
 
         let default_project = Project {
             id: "proj-default".to_string(),

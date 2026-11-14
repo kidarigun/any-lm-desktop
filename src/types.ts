@@ -32,6 +32,125 @@ export interface ToolExecutionRecord {
   snapshotId?: string | null;
   /** 에이전트 루프에서 호출된 라운드 번호 */
   round?: number;
+  /** run_python 실행으로 새로 생기거나 바뀐 파일 */
+  producedFiles?: string[];
+}
+
+/** MCP 서버 설정 (환경 변수·헤더 값은 Windows 자격 증명 관리자에 따로 저장) */
+export interface McpServerConfig {
+  id: string;
+  name: string;
+  enabled: boolean;
+  /** stdio = 내 PC에서 실행, http = 원격 URL */
+  transport: "stdio" | "http";
+  command: string;
+  args: string[];
+  cwd: string;
+  url: string;
+  envKeys: string[];
+  headerKeys: string[];
+  disabledTools: string[];
+  autoApprove: string[];
+  /** 찾아보기 목록에서 설치했으면 그 항목 ID */
+  catalogId?: string;
+  /** 원격 서버의 OAuth 로그인 (클라이언트 보안 비밀번호는 따로 저장) */
+  oauth?: McpOAuthSettings | null;
+}
+
+export interface McpOAuthSettings {
+  /** 비우면 서버에 자동 등록을 시도 */
+  clientId: string;
+  scopes: string[];
+  /** 비우면 서버에서 찾는다 */
+  authorizationEndpoint: string;
+  tokenEndpoint: string;
+  extraParams: Record<string, string>;
+  /** 같은 묶음·같은 클라이언트 ID인 서버끼리 로그인을 함께 쓴다 */
+  group: string;
+}
+
+export interface McpRemoteTool {
+  name: string;
+  description: string;
+  inputSchema: unknown;
+}
+
+export interface McpServerState {
+  status: "off" | "connecting" | "connected" | "error" | "needs_login";
+  error?: string | null;
+  serverInfo: string;
+  tools: McpRemoteTool[];
+  /** 로컬 서버가 남긴 마지막 출력 */
+  log: string;
+  /** 로그인(OAuth)을 쓰는 서버에서 로그인되어 있는지 */
+  signedIn?: boolean;
+  /** 브라우저 로그인을 기다리는 중인지 */
+  signingIn?: boolean;
+}
+
+export interface McpServerView {
+  config: McpServerConfig;
+  state: McpServerState;
+}
+
+/** 앱이 설치·관리하는 실행 환경 */
+export type RuntimeKind = "python" | "node" | "uv";
+
+export interface RuntimeInfo {
+  id: RuntimeKind;
+  label: string;
+  purpose: string;
+  /** 앱이 설치한 것이 있는지 */
+  appInstalled: boolean;
+  /** PC에 따로 설치된 것이 있는지 */
+  system: boolean;
+  version: string;
+  sizeHint: string;
+  job: { running: boolean; message: string; percent?: number | null; error?: string | null };
+}
+
+/** 설치된 Skill (작업 지침 묶음) */
+export interface SkillInfo {
+  /** 켜고 끄기·삭제에 쓰는 ID (`user:<폴더>` 또는 `project:<프로젝트ID>:<경로>`) */
+  id: string;
+  name: string;
+  description: string;
+  /** user = 모든 대화, project = 이 프로젝트 */
+  scope: "user" | "project";
+  /** 표시용 위치 */
+  location: string;
+  enabled: boolean;
+  /** SKILL.md에 문제가 있으면 그 내용 (엑사원에게 알려 주지 않음) */
+  error?: string | null;
+  /** 같은 이름의 프로젝트 Skill에 가려졌는지 */
+  shadowed: boolean;
+  /** SKILL.md 말고 함께 든 파일 */
+  files: string[];
+}
+
+/** 이 프로젝트에서 쓸 Python */
+export interface PythonInfo {
+  path: string;
+  version: string;
+  inVenv: boolean;
+  /** 프로젝트 폴더의 .venv / venv */
+  projectVenv: boolean;
+}
+
+/** Python 스크립트 실행 결과 */
+export interface PythonRunOutcome {
+  script: string;
+  python: PythonInfo;
+  /** 시간 초과로 중단되면 null */
+  exitCode: number | null;
+  timedOut: boolean;
+  durationMs: number;
+  stdout: string;
+  stderr: string;
+  created: string[];
+  modified: string[];
+  missingModule: string | null;
+  suggestedPackage: string | null;
 }
 
 export interface ChatMessage {

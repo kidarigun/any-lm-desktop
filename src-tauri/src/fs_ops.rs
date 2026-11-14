@@ -75,7 +75,7 @@ fn is_reserved_device_name(part: &str) -> bool {
 
 /// 에이전트가 쓰면 다른 프로그램이 자동으로 실행할 수 있는 설정 폴더.
 /// (git hook, VS Code 작업, CI 워크플로, Claude Code hook 등)
-const AGENT_SENSITIVE_DIRS: &[&str] = &[".git", ".vscode", ".idea", ".github", ".claude", ".husky"];
+const AGENT_SENSITIVE_DIRS: &[&str] = &[".git", ".vscode", ".idea", ".github", ".claude", ".husky", ".skills"];
 
 /// 에이전트의 파일 쓰기에 사용자 승인이 필요한 경로인지 확인한다.
 pub fn is_sensitive_for_agent(relative: &str) -> bool {
@@ -565,11 +565,135 @@ fn search_recursive(
 
 /// 셸 명령을 비동기로 실행한다. UI 스레드와 앱 상태 잠금을 막지 않으며,
 /// `timeout`을 넘기면 프로세스를 종료하고 오류를 돌려준다.
+/// 따옴표 밖의 `;`·`&&`로 명령을 나눈다. (구분자, 문장) — 첫 문장의 구분자는 빈 문자열.
+fn split_statements(command: &str) -> Vec<(&'static str, String)> {
+    let mut out: Vec<(&'static str, String)> = Vec::new();
+    let mut cur = String::new();
+    let mut sep: &'static str = "";
+    let mut quote: Option<char> = None;
+    let chars: Vec<char> = command.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) => {}
+            None if ch == '"' || ch == '\'' => quote = Some(ch),
+            None if ch == ';' || (ch == '&' && chars.get(i + 1) == Some(&'&')) => {
+                out.push((sep, cur.trim().to_string()));
+                cur.clear();
+                sep = if ch == ';' { ";" } else { "&&" };
+                i += if ch == ';' { 1 } else { 2 };
+                continue;
+            }
+            None => {}
+        }
+        cur.push(ch);
+        i += 1;
+    }
+    out.push((sep, cur.trim().to_string()));
+    out.into_iter().filter(|(_, s)| !s.is_empty()).collect()
+}
+
+/// `cd /d "C:\x"`, `cd C:\x`, `chdir x` → 이동할 경로
+fn cd_target(statement: &str) -> Option<String> {
+    let lower = statement.to_ascii_lowercase();
+    let rest = ["cd ", "chdir ", "cd\t"].iter().find_map(|p| lower.starts_with(p).then(|| &statement[p.len()..]))?;
+    let mut rest = rest.trim();
+    if rest.len() >= 2 && rest[..2].eq_ignore_ascii_case("/d") {
+        rest = rest[2..].trim();
+    }
+    let path = rest.trim_matches(|c| c == '"' || c == '\'');
+    // 경로 뒤에 다른 인자가 붙어 있으면 cd 한 문장이 아니다.
+    if path.is_empty() || (path.contains(' ') && !(rest.starts_with('"') || rest.starts_with('\''))) {
+        return None;
+    }
+    Some(path.to_string())
+}
+
+fn is_same_dir(root: &Path, target: &str) -> bool {
+    if target == "." {
+        return true;
+    }
+    let norm = |p: &Path| {
+        std::fs::canonicalize(p)
+            .unwrap_or_else(|_| p.to_path_buf())
+            .to_string_lossy()
+            .trim_end_matches(['\\', '/'])
+            .replace('/', "\\")
+            .to_lowercase()
+    };
+    let t = Path::new(target);
+    let t = if t.is_absolute() { t.to_path_buf() } else { root.join(t) };
+    norm(root) == norm(&t)
+}
+
+/// AI가 cmd.exe 문법으로 쓴 명령을 Windows PowerShell 5.1에서 그대로 돌도록 고친다.
+/// - 프로젝트 폴더로 가는 `cd /d <루트>`는 이미 그 위치에서 실행되므로 뺀다.
+/// - 다른 곳으로 가는 `cd /d X`는 `Set-Location -LiteralPath 'X'`로 바꾼다.
+/// - `a && b`는 `a; if ($?) { b }`로 바꾼다 (5.1에는 &&가 없다).
+/// 돌려주는 두 번째 값은 바꾼 내용 설명 (바꾸지 않았으면 비어 있음).
+pub fn adapt_cmd_syntax(command: &str, root: &Path) -> (String, Vec<String>) {
+    let statements = split_statements(command);
+    let mut notes = Vec::new();
+    let mut kept: Vec<(&'static str, String)> = Vec::new();
+    let mut carry: Option<&'static str> = None;
+    for (sep, stmt) in statements {
+        let sep = carry.take().unwrap_or(sep);
+        if let Some(target) = cd_target(&stmt) {
+            if is_same_dir(root, &target) {
+                notes.push(format!("이미 프로젝트 폴더에서 실행되므로 '{}'는 빼고 실행했습니다.", stmt));
+                // 뺀 문장 다음 문장이 뺀 문장의 구분자를 이어받는다.
+                carry = Some(if kept.is_empty() { "" } else { sep });
+                continue;
+            }
+            if stmt.to_ascii_lowercase().contains("/d") {
+                notes.push(format!("cmd 문법 '{}'를 PowerShell의 Set-Location으로 바꿨습니다.", stmt));
+                kept.push((sep, format!("Set-Location -LiteralPath '{}'", target.replace('\'', "''"))));
+                continue;
+            }
+        }
+        kept.push((if kept.is_empty() { "" } else { sep }, stmt));
+    }
+    if kept.iter().any(|(s, _)| *s == "&&") {
+        notes.push("PowerShell 5.1에는 '&&'가 없어 'if ($?) { … }'로 바꿨습니다.".to_string());
+    }
+    if notes.is_empty() {
+        return (command.to_string(), notes);
+    }
+    let mut out = String::new();
+    let mut open = 0;
+    for (sep, stmt) in kept {
+        match sep {
+            "&&" => {
+                out.push_str("; if ($?) { ");
+                open += 1;
+            }
+            ";" => {
+                out.push_str(&" }".repeat(open));
+                open = 0;
+                out.push_str("; ");
+            }
+            _ => {}
+        }
+        out.push_str(&stmt);
+    }
+    out.push_str(&" }".repeat(open));
+    (out, notes)
+}
+
 pub async fn execute_shell_command(
     root: &Path,
     command_line: &str,
     timeout: Duration,
 ) -> Result<String, String> {
+    let (adapted, notes) = adapt_cmd_syntax(command_line, root);
+    let command_line = adapted.as_str();
+    let note_text = if notes.is_empty() {
+        String::new()
+    } else {
+        format!("[참고] {}\n[실제 실행] {}\n", notes.join(" "), command_line)
+    };
     #[cfg(target_os = "windows")]
     let mut cmd = {
         // 한글 출력이 깨지지 않도록 PowerShell 출력 인코딩을 UTF-8로 고정한다.
@@ -617,7 +741,8 @@ pub async fn execute_shell_command(
     let status_code = output.status.code().unwrap_or(-1);
 
     Ok(format!(
-        "[Exit Code: {}]\n{}{}",
+        "{}[Exit Code: {}]\n{}{}",
+        note_text,
         status_code,
         stdout,
         if stderr.is_empty() {
@@ -721,6 +846,48 @@ mod tests {
                 let _ = fs::remove_dir(&link);
             }
         }
+    }
+
+    #[test]
+    fn cmd_style_commands_are_adapted_for_powershell() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let r = root.to_string_lossy().to_string();
+
+        // 실제로 실패했던 형태: 프로젝트 폴더로 가는 cd /d는 뺀다.
+        let (c, n) = adapt_cmd_syntax(&format!("cd /d {}; python a.py 2>&1 | Select-Object -First 5", r), root);
+        assert_eq!(c, "python a.py 2>&1 | Select-Object -First 5");
+        assert_eq!(n.len(), 1);
+
+        let (c, _) = adapt_cmd_syntax(&format!("cd /d \"{}\\\" && python a.py && echo ok", r), root);
+        assert_eq!(c, "python a.py; if ($?) { echo ok }");
+
+        // 다른 폴더는 Set-Location으로, 따옴표 안의 &&는 그대로, ;에서 if 블록을 닫는다.
+        let (c, _) = adapt_cmd_syntax("cd /d C:\\Other && dir; echo 'a && b'", root);
+        assert_eq!(c, "Set-Location -LiteralPath 'C:\\Other'; if ($?) { dir }; echo 'a && b'");
+
+        let (c, _) = adapt_cmd_syntax("cd .; npm test", root);
+        assert_eq!(c, "npm test");
+
+        // PowerShell에서 문제없는 명령은 건드리지 않는다.
+        for ok in ["Get-ChildItem; python -V", "cd src", "echo \"x;y\"", "git log --oneline -3"] {
+            let (c, n) = adapt_cmd_syntax(ok, root);
+            assert_eq!(c, ok);
+            assert!(n.is_empty(), "{}", ok);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn cmd_style_command_runs_in_powershell() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let cmd = format!("cd /d {} && Write-Output 첫째 && Write-Output 둘째", root.display());
+        let out = execute_shell_command(root, &cmd, Duration::from_secs(60)).await.unwrap();
+        assert!(out.contains("[참고]"), "{}", out);
+        assert!(out.contains("[Exit Code: 0]"), "{}", out);
+        assert!(out.contains("첫째") && out.contains("둘째"), "{}", out);
+        assert!(!out.contains("Set-Location :"), "{}", out);
     }
 
     #[test]

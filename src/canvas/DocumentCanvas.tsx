@@ -2,11 +2,13 @@ import {
   Check,
   ChevronDown,
   Copy,
+  ExternalLink,
   History,
   Info,
   Maximize2,
   Minimize2,
   Paperclip,
+  Play,
   Save,
   SaveAll,
   X,
@@ -19,17 +21,20 @@ import {
   KIND_EXTENSION,
   KIND_LABEL,
   SAVE_AS_TARGETS,
+  isPreviewOnlyKind,
   replaceExtension,
   type DocKind,
 } from "../docs/formats";
 import { extractBodyHtml, htmlToMarkdown, markdownToHtml, wrapHtmlDocument } from "../docs/markdown";
 import { extractPdfText } from "../docs/pdf";
-import { applyPptxEdits, deckToMarkdown, markdownToPptx, parsePptx, type PptxSession } from "../docs/pptx";
+import { deckToMarkdown, markdownToPptx, parsePptx, type PptxSession } from "../docs/pptx";
+import { markdownToXlsx, xlsxToMarkdown } from "../docs/xlsx";
 import type { FileSnapshot } from "../types";
 import type { CanvasDoc, CanvasSavedInfo } from "./canvasDoc";
 import { PdfViewer } from "./PdfViewer";
-import { PptxEditor } from "./PptxEditor";
+import { PptxViewer } from "./PptxViewer";
 import { RichTextEditor } from "./RichTextEditor";
+import { XlsxViewer } from "./XlsxViewer";
 
 export interface DocumentCanvasProps {
   doc: CanvasDoc;
@@ -44,6 +49,10 @@ export interface DocumentCanvasProps {
   /** 이 파일의 변경 기록 수 (AI 도구·직접 저장 모두) */
   historyCount?: number;
   onShowHistory?: () => void;
+  /** .py 파일일 때: Python 실행 창 열기 */
+  onRunPython?: () => void;
+  /** 미리보기 전용 문서(Excel·PowerPoint 등)를 Windows 기본 앱으로 열기 */
+  onOpenExternal?: () => void;
 }
 
 type Mode = "rich" | "source" | "preview";
@@ -69,7 +78,11 @@ export default function DocumentCanvas({
   onError,
   historyCount = 0,
   onShowHistory,
+  onRunPython,
+  onOpenExternal,
 }: DocumentCanvasProps) {
+  /** PowerPoint·Excel·PDF는 미리보기만 한다 (저장·편집 없음). */
+  const previewOnly = isPreviewOnlyKind(doc.kind);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>("rich");
@@ -88,7 +101,6 @@ export default function DocumentCanvas({
   const [initialHtml, setInitialHtml] = useState("");
   const [sourceText, setSourceText] = useState("");
   const [pptx, setPptx] = useState<PptxSession | null>(null);
-  const editsRef = useRef(new Map<string, string>());
 
   // 문서 불러오기
   useEffect(() => {
@@ -99,7 +111,6 @@ export default function DocumentCanvas({
     setConfirmClose(false);
     setNoticeHidden(false);
     setPptx(null);
-    editsRef.current = new Map();
     (async () => {
       try {
         switch (doc.kind) {
@@ -136,6 +147,7 @@ export default function DocumentCanvas({
             setMode("source");
             break;
           }
+          case "xlsx":
           case "pdf":
             break;
         }
@@ -182,7 +194,9 @@ export default function DocumentCanvas({
       case "html":
         return htmlToMarkdown(extractBodyHtml(textRef.current));
       case "pptx":
-        return pptx ? deckToMarkdown(pptx.deck, editsRef.current) : "";
+        return pptx ? deckToMarkdown(pptx.deck) : "";
+      case "xlsx":
+        return xlsxToMarkdown(doc.bytes ?? new Uint8Array());
       case "pdf":
         return extractPdfText(doc.bytes ?? new Uint8Array());
       default:
@@ -216,8 +230,11 @@ export default function DocumentCanvas({
       case "docx":
         return htmlToDocx(currentHtml(), baseTitle);
       case "pptx":
-        if (doc.kind === "pptx" && pptx) return applyPptxEdits(pptx, editsRef.current);
+        if (doc.kind === "pptx") return (doc.bytes ?? new Uint8Array()).slice();
         return markdownToPptx(await currentMarkdown(), baseTitle);
+      case "xlsx":
+        if (doc.kind === "xlsx") return (doc.bytes ?? new Uint8Array()).slice();
+        return markdownToXlsx(await currentMarkdown(), baseTitle);
       case "pdf":
         return (doc.bytes ?? new Uint8Array()).slice();
     }
@@ -233,7 +250,7 @@ export default function DocumentCanvas({
   }
 
   async function save() {
-    if (saving || loading || doc.kind === "pdf") return;
+    if (saving || loading || previewOnly) return;
     if (!doc.filePath && !doc.absolutePath) return saveAs(doc.kind);
     setSaving(true);
     try {
@@ -336,10 +353,12 @@ export default function DocumentCanvas({
     doc.kind === "docx"
       ? "Word 문서를 서식 편집기로 열었습니다. 저장하면 글꼴·색상·머리글/바닥글 같은 복잡한 서식은 단순화됩니다. 저장 전 상태는 위의 [변경 기록]에서 비교하고 되돌릴 수 있습니다."
       : doc.kind === "pptx"
-        ? "슬라이드의 글자를 클릭해 바로 고칠 수 있습니다. 디자인과 서식은 그대로 유지됩니다."
-        : doc.kind === "pdf"
-          ? "PDF는 읽기 전용입니다. [다른 이름으로 저장]에서 Markdown 텍스트로 내보낼 수 있습니다."
-          : null;
+        ? `PowerPoint 파일은 미리보기만 합니다. 고치려면 ${onOpenExternal ? "[PowerPoint에서 열기]를 누르거나 " : ""}엑사원에게 바꿀 내용을 요청하세요.`
+        : doc.kind === "xlsx"
+          ? `Excel 파일은 미리보기만 합니다. 고치려면 ${onOpenExternal ? "[Excel에서 열기]를 누르거나 " : ""}엑사원에게 바꿀 내용을 요청하세요.`
+          : doc.kind === "pdf"
+            ? "PDF는 읽기 전용입니다. [다른 이름으로 저장]에서 Markdown 텍스트로 내보낼 수 있습니다."
+            : null;
 
   const modeOptions: { value: Mode; label: string }[] =
     doc.kind === "markdown"
@@ -392,7 +411,19 @@ export default function DocumentCanvas({
         )}
 
         <div className="flex items-center gap-0.5 shrink-0 text-stone-600 dark:text-stone-300">
-          {doc.kind !== "pdf" && (
+          {previewOnly && onOpenExternal && (
+            <button
+              onClick={onOpenExternal}
+              className="px-2 py-1 rounded-lg hover:bg-stone-200 dark:hover:bg-[#32322F] cursor-pointer flex items-center gap-1 text-xs font-semibold"
+              title={`${doc.kind === "xlsx" ? "Excel" : doc.kind === "pptx" ? "PowerPoint" : "기본 앱"}에서 열어 고치기`}
+            >
+              <ExternalLink className="w-4 h-4" />
+              <span className="hidden xl:inline">
+                {doc.kind === "xlsx" ? "Excel에서 열기" : doc.kind === "pptx" ? "PowerPoint에서 열기" : "기본 앱으로 열기"}
+              </span>
+            </button>
+          )}
+          {!previewOnly && (
             <button
               onClick={save}
               disabled={saving || loading}
@@ -428,6 +459,21 @@ export default function DocumentCanvas({
               </div>
             )}
           </div>
+          {onRunPython && (
+            <button
+              onClick={async () => {
+                // 고친 내용이 있으면 저장한 뒤 실행한다.
+                if (dirty) await save();
+                onRunPython();
+              }}
+              disabled={saving || loading}
+              className="px-2 py-1 rounded-lg bg-[#A50034] hover:bg-[#8A002B] text-white cursor-pointer disabled:opacity-40 flex items-center gap-1 text-xs font-semibold"
+              title="Python으로 실행"
+            >
+              <Play className="w-3.5 h-3.5" />
+              <span className="hidden xl:inline">실행</span>
+            </button>
+          )}
           {onShowHistory && historyCount > 0 && (
             <button
               onClick={onShowHistory}
@@ -496,14 +542,9 @@ export default function DocumentCanvas({
         ) : doc.kind === "pdf" ? (
           <PdfViewer bytes={doc.bytes ?? new Uint8Array()} onError={onError} />
         ) : doc.kind === "pptx" && pptx ? (
-          <PptxEditor
-            deck={pptx.deck}
-            edits={editsRef.current}
-            onEdit={(key, text) => {
-              editsRef.current.set(key, text);
-              markDirty();
-            }}
-          />
+          <PptxViewer deck={pptx.deck} />
+        ) : doc.kind === "xlsx" ? (
+          <XlsxViewer bytes={doc.bytes ?? new Uint8Array()} onError={onError} />
         ) : (doc.kind === "markdown" || doc.kind === "docx") && mode === "rich" ? (
           <RichTextEditor
             key={`${doc.id}:${editorKey}`}

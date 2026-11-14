@@ -1,17 +1,24 @@
+pub mod catalog;
 pub mod doc_bridge;
 pub mod exaone;
 pub mod fs_ops;
+pub mod mcp;
+pub mod mcp_oauth;
+pub mod python_runner;
+pub mod runs;
+pub mod runtime;
+pub mod skills;
 pub mod secrets;
+pub mod single_instance;
 pub mod snapshot_diff;
 pub mod store;
 
 use exaone::TurnRequest;
 use fs_ops::FileNode;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use store::{
@@ -28,7 +35,8 @@ const SHELL_TIMEOUT: Duration = Duration::from_secs(120);
 pub struct AppState {
     pub store: StoreManager,
     pub db: Mutex<AppDatabase>,
-    pub cancel_flag: Arc<AtomicBool>,
+    /// 대화별 실행 (서로 다른 대화는 동시에 진행된다)
+    pub runs: runs::RunRegistry,
 }
 
 /// 대화가 속한 프로젝트를 찾는다. 일반 채팅이면 `None`(도구 비활성).
@@ -229,7 +237,11 @@ fn not_granted(path: &str) -> String {
 /// 사용자 입력(경로·파일 이름)은 스크립트에 끼워 넣지 않고 환경 변수로 넘겨 명령 주입을 막는다.
 #[cfg(target_os = "windows")]
 fn run_dialog_script(script: &str, env: &[(&str, &str)]) -> Result<String, String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let mut cmd = Command::new("powershell");
+    // 설치판(콘솔 없는 앱)에서 검은 창이 잠깐 뜨지 않게 한다. 대화상자 자체는 그대로 보인다.
+    cmd.creation_flags(CREATE_NO_WINDOW);
     cmd.args(["-NoProfile", "-STA", "-WindowStyle", "Hidden", "-Command", script]);
     for (k, v) in env {
         cmd.env(k, v);
@@ -312,10 +324,22 @@ async fn pick_files_dialog(
     Ok(files)
 }
 
+/// 답변 생성을 멈춘다. 대화를 지정하지 않으면 실행 중인 모든 대화를 멈춘다.
 #[tauri::command]
-fn cancel_generation(state: State<'_, AppState>) -> Result<(), String> {
-    state.cancel_flag.store(true, Ordering::Relaxed);
+fn cancel_generation(state: State<'_, AppState>, conversation_id: Option<String>) -> Result<(), String> {
+    match conversation_id {
+        Some(id) => {
+            state.runs.cancel(&id);
+        }
+        None => state.runs.cancel_all(),
+    }
     Ok(())
+}
+
+/// 지금 답변을 만들고 있는 대화 ID들 (화면을 새로 고쳤을 때 상태를 되살린다)
+#[tauri::command]
+fn running_conversations(state: State<'_, AppState>) -> Vec<String> {
+    state.runs.running()
 }
 
 #[tauri::command]
@@ -568,6 +592,7 @@ fn delete_conversation(
     state: State<'_, AppState>,
     conversation_id: String,
 ) -> Result<(), String> {
+    state.runs.cancel(&conversation_id);
     let mut db = state.db.lock().map_err(|e| e.to_string())?;
     db.conversations.retain(|c| c.id != conversation_id);
     state.store.save(&db)?;
@@ -582,8 +607,8 @@ async fn send_chat_message(
     user_content: String,
     attached_files: Vec<String>,
 ) -> Result<Conversation, String> {
-    state.cancel_flag.store(false, Ordering::Relaxed);
-    let cancel_flag = state.cancel_flag.clone();
+    let run = state.runs.begin(&conversation_id)?;
+    let cancel_flag = run.cancel_flag();
 
     // 첨부 파일은 잠금 밖에서 읽는다 (PDF/DOCX/PPTX는 웹뷰 변환기를 거친다).
     let attach_project = {
@@ -684,8 +709,8 @@ async fn edit_and_resend_message(
     message_id: String,
     new_content: String,
 ) -> Result<Conversation, String> {
-    state.cancel_flag.store(false, Ordering::Relaxed);
-    let cancel_flag = state.cancel_flag.clone();
+    let run = state.runs.begin(&conversation_id)?;
+    let cancel_flag = run.cancel_flag();
 
     let (settings, project, history_for_api, backup_messages) = {
         let mut db = state.db.lock().map_err(|e| e.to_string())?;
@@ -776,7 +801,9 @@ async fn resolve_tool_approval(
     message_id: String,
     tool_id: String,
     approve: bool,
+    always: Option<bool>,
 ) -> Result<Conversation, String> {
+    let run = state.runs.begin(&conversation_id)?;
     // 1) 대상 기록 확인 (잠금은 짧게만 잡는다)
     let (project, tool_name, args) = {
         let mut db = state.db.lock().map_err(|e| e.to_string())?;
@@ -785,8 +812,7 @@ async fn resolve_tool_approval(
             .iter()
             .find(|c| c.id == conversation_id)
             .ok_or_else(|| "대화를 찾을 수 없습니다.".to_string())?;
-        let project = conversation_project(&db, conv)?
-            .ok_or_else(|| "일반 채팅에서는 도구 승인을 처리할 수 없습니다.".to_string())?;
+        let project = conversation_project(&db, conv)?;
         let conv = find_conv_mut(&mut db, &conversation_id)?;
         let rec = conv
             .messages
@@ -800,6 +826,9 @@ async fn resolve_tool_approval(
         if rec.status != "pending_approval" {
             return Err("이미 처리된 작업입니다.".to_string());
         }
+        if project.is_none() && !rec.tool_name.starts_with(mcp::TOOL_PREFIX) {
+            return Err("일반 채팅에서는 이 도구 승인을 처리할 수 없습니다.".to_string());
+        }
         // 실행 중 중복 클릭을 막기 위해 바로 상태를 바꿔 둔다.
         rec.status = "running".to_string();
         let args: Value = serde_json::from_str(&rec.arguments_json).unwrap_or_default();
@@ -807,15 +836,33 @@ async fn resolve_tool_approval(
     };
 
     // 2) 잠금 밖에서 실제 작업 실행
-    let root = PathBuf::from(&project.root_path);
+    let project_id = project.as_ref().map(|p| p.id.clone()).unwrap_or_default();
+    let root = project.as_ref().map(|p| PathBuf::from(&p.root_path)).unwrap_or_default();
     let mut new_snap: Option<FileSnapshot> = None;
+    let mut produced: Vec<String> = Vec::new();
     let (status, output) = if !approve {
         ("rejected", "사용자가 실행을 거부했습니다.".to_string())
     } else {
         match tool_name.as_str() {
+            name if name.starts_with(mcp::TOOL_PREFIX) => {
+                let mgr = app.state::<Arc<mcp::McpManager>>().inner().clone();
+                match mgr.tool_specs().await.into_iter().find(|t| t.exposed == name) {
+                    Some(spec) => {
+                        if always == Some(true) {
+                            let _ = mgr.set_tool(&spec.server_id, &spec.tool, None, Some(true));
+                        }
+                        match mgr.call(&spec.server_id, &spec.tool, &args).await {
+                            Ok((text, false)) => ("completed", text),
+                            Ok((text, true)) => ("error", text),
+                            Err(e) => ("error", e),
+                        }
+                    }
+                    None => ("error", format!("'{}' 도구는 지금 연결된 MCP 서버에 없습니다.", name)),
+                }
+            }
             "delete_path" => {
                 let rel = args.get("relative_path").and_then(|v| v.as_str()).unwrap_or("");
-                match fs_ops::delete_path_with_snapshot(&root, &project.id, rel) {
+                match fs_ops::delete_path_with_snapshot(&root, &project_id, rel) {
                     Ok(snap) => {
                         new_snap = Some(snap.with_source("agent"));
                         ("completed", format!("승인 완료: '{}' 삭제됨", rel))
@@ -830,10 +877,37 @@ async fn resolve_tool_approval(
                     Err(e) => ("error", e),
                 }
             }
+            "run_python" => {
+                let rel = args.get("relative_path").and_then(|v| v.as_str()).unwrap_or("");
+                let skill = args.get("skill").and_then(|v| v.as_str()).unwrap_or("").trim();
+                let run = if skill.is_empty() {
+                    python_runner::run_script(&root, rel, python_runner::RUN_TIMEOUT).await
+                } else {
+                    // Skill 폴더의 스크립트: 실행 위치는 프로젝트 루트
+                    let ctx = Some((project_id.as_str(), root.as_path()));
+                    match skills::find_available(ctx, skill)
+                        .ok_or_else(|| format!("'{}' Skill이 없거나 꺼져 있습니다.", skill))
+                        .and_then(|s| skills::resolve_in_skill(&s, rel))
+                    {
+                        Ok(script) => {
+                            let display = format!("[Skill {}] {}", skill, rel.replace('\\', "/"));
+                            python_runner::run_script_at(&root, &script, &display, python_runner::RUN_TIMEOUT).await
+                        }
+                        Err(e) => Err(e),
+                    }
+                };
+                match run {
+                    Ok(outcome) => {
+                        produced = outcome.produced_files();
+                        (if outcome.succeeded() { "completed" } else { "error" }, outcome.summary())
+                    }
+                    Err(e) => ("error", e),
+                }
+            }
             // 보호된 설정 폴더(.git, .vscode 등)에 대한 쓰기
             "write_file" | "modify_file" => {
                 let (rec, snap, _) =
-                    exaone::execute_tool_now(&app, &root, &project.id, &tool_id, &tool_name, &args).await;
+                    exaone::execute_tool_now(&app, &root, &project_id, &tool_id, &tool_name, &args).await;
                 new_snap = snap;
                 if rec.status == "completed" {
                     ("completed", format!("승인 완료: {}", rec.output))
@@ -864,6 +938,7 @@ async fn resolve_tool_approval(
                 rec.status = status.to_string();
                 rec.output = output;
                 rec.snapshot_id = new_snap.as_ref().map(|s| s.id.clone());
+                rec.produced_files = produced;
             }
         }
         let msg = &conv.messages[msg_idx];
@@ -888,17 +963,16 @@ async fn resolve_tool_approval(
 
     // 4) 도구 결과를 모델에 전달해 같은 메시지에 이어서 답변을 받는다.
     let (settings, history, assistant_msg) = continuation;
-    state.cancel_flag.store(false, Ordering::Relaxed);
     let (updated_msg, new_snapshots) = exaone::run_exaone_turn(
         &app,
         TurnRequest {
             settings: &settings,
-            project: Some(&project),
+            project: project.as_ref(),
             conversation_id: &conversation_id,
             history: &history,
             continue_from: Some(assistant_msg),
         },
-        state.cancel_flag.clone(),
+        run.cancel_flag(),
     )
     .await?;
 
@@ -1178,6 +1252,367 @@ fn reveal_project_path(
     Ok(())
 }
 
+/// 저장 창에서 고른(허용된) 파일을 탐색기에서 선택한 상태로 연다.
+#[tauri::command]
+fn reveal_saved_path(grants: State<'_, PathGrants>, path: String) -> Result<(), String> {
+    let target = PathBuf::from(&path);
+    if !grants.is_granted(&target) {
+        return Err(not_granted(&path));
+    }
+    if !target.is_file() {
+        return Err(format!("파일을 찾을 수 없습니다: {}", path));
+    }
+    #[cfg(target_os = "windows")]
+    Command::new("explorer")
+        .arg(format!("/select,{}", target.to_string_lossy()))
+        .spawn()
+        .map_err(|e| format!("탐색기를 열 수 없습니다: {}", e))?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 실행 환경 (Python·Node.js·uv)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn runtime_status() -> Vec<runtime::RuntimeInfo> {
+    runtime::status().await
+}
+
+/// 공식 배포본을 내려받아 앱 전용으로 설치한다 (끝날 때까지 기다린다. 진행 상황은 runtime_status로).
+#[tauri::command]
+async fn runtime_install(kind: String) -> Result<(), String> {
+    runtime::install(&kind).await
+}
+
+#[tauri::command]
+async fn runtime_remove(kind: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || runtime::remove(&kind)).await.map_err(|e| e.to_string())?
+}
+
+// ---------------------------------------------------------------------------
+// 찾아보기 목록
+// ---------------------------------------------------------------------------
+
+/// 찾아보기 목록을 불러온다. 주소를 주지 않으면 기본 목록.
+#[tauri::command]
+async fn catalog_load(app: AppHandle, url: Option<String>) -> Result<catalog::CatalogResult, String> {
+    let url = url.filter(|u| !u.trim().is_empty()).unwrap_or_else(|| catalog::DEFAULT_CATALOG_URL.to_string());
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    catalog::load(url.trim(), &dir).await
+}
+
+#[tauri::command]
+fn catalog_default_url() -> String {
+    catalog::DEFAULT_CATALOG_URL.to_string()
+}
+
+/// 목록의 Skill을 받아 sha256을 확인하고 설치한다.
+#[tauri::command]
+async fn catalog_install_skill(url: String, sha256: String, overwrite: bool) -> Result<skills::SkillInfo, String> {
+    catalog::install_skill(&url, &sha256, overwrite).await
+}
+
+/// Node.js·uv·Python·Docker가 이 PC에 있는지
+#[tauri::command]
+async fn catalog_runtimes() -> catalog::Runtimes {
+    catalog::runtimes().await
+}
+
+// ---------------------------------------------------------------------------
+// MCP 서버 관리
+// ---------------------------------------------------------------------------
+
+type McpState<'a> = State<'a, Arc<mcp::McpManager>>;
+
+#[tauri::command]
+fn mcp_list_servers(mcp: McpState<'_>) -> Vec<mcp::ServerView> {
+    mcp.list()
+}
+
+/// 서버를 추가하거나 고친다. `env`·`headers`의 빈 값은 저장된 값을 유지한다.
+#[tauri::command]
+fn mcp_save_server(
+    mcp: McpState<'_>,
+    config: mcp::McpServerConfig,
+    env: HashMap<String, String>,
+    headers: HashMap<String, String>,
+    oauth_client_secret: Option<String>,
+) -> Result<mcp::McpServerConfig, String> {
+    mcp.save(config, env, headers, oauth_client_secret)
+}
+
+/// 브라우저로 로그인한다 (끝날 때까지 기다린다, 최대 5분).
+#[tauri::command]
+async fn mcp_oauth_login(mcp: McpState<'_>, id: String) -> Result<(), String> {
+    let m = mcp.inner().clone();
+    m.login(&id).await
+}
+
+#[tauri::command]
+fn mcp_oauth_cancel(mcp: McpState<'_>) {
+    mcp.cancel_login()
+}
+
+#[tauri::command]
+fn mcp_oauth_logout(mcp: McpState<'_>, id: String) -> Result<(), String> {
+    mcp.logout(&id)
+}
+
+#[tauri::command]
+fn mcp_delete_server(mcp: McpState<'_>, id: String) -> Result<(), String> {
+    mcp.delete(&id)
+}
+
+#[tauri::command]
+fn mcp_set_server_enabled(mcp: McpState<'_>, id: String, enabled: bool) -> Result<(), String> {
+    mcp.set_enabled(&id, enabled)
+}
+
+#[tauri::command]
+fn mcp_restart_server(mcp: McpState<'_>, id: String) {
+    mcp.restart(&id)
+}
+
+#[tauri::command]
+fn mcp_set_tool(
+    mcp: McpState<'_>,
+    id: String,
+    tool: String,
+    enabled: Option<bool>,
+    auto_approve: Option<bool>,
+) -> Result<(), String> {
+    mcp.set_tool(&id, &tool, enabled, auto_approve)
+}
+
+// ---------------------------------------------------------------------------
+// Skill 관리
+// ---------------------------------------------------------------------------
+
+/// 프로젝트 ID가 있으면 (ID, 루트)를 돌려준다.
+fn skill_project(state: &AppState, project_id: Option<&str>) -> Result<Option<(String, PathBuf)>, String> {
+    match project_id {
+        Some(pid) if !pid.is_empty() && pid != GENERAL_CHAT_ID => {
+            let (root, id) = project_root(state, pid)?;
+            Ok(Some((id, root)))
+        }
+        _ => Ok(None),
+    }
+}
+
+#[tauri::command]
+async fn list_skills(state: State<'_, AppState>, project_id: Option<String>) -> Result<Vec<skills::SkillInfo>, String> {
+    let proj = skill_project(&state, project_id.as_deref())?;
+    tokio::task::spawn_blocking(move || skills::discover(proj.as_ref().map(|(id, root)| (id.as_str(), root.as_path()))))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_skill_enabled(id: String, enabled: bool) -> Result<(), String> {
+    skills::set_enabled(&id, enabled)
+}
+
+/// Skill로 설치할 폴더 또는 zip(.skill) 파일을 고른다. 고른 경로만 설치할 수 있게 허용한다.
+#[tauri::command]
+async fn pick_skill_source(grants: State<'_, PathGrants>, kind: String) -> Result<Option<String>, String> {
+    let picked: Option<String> = tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
+        #[cfg(target_os = "windows")]
+        {
+            const FOLDER: &str = r#"
+                Add-Type -AssemblyName System.Windows.Forms
+                $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+                $dlg.Description = 'SKILL.md가 든 Skill 폴더를 선택하세요'
+                $dlg.UseDescriptionForTitle = $true
+                $dlg.AutoUpgradeEnabled = $true
+                if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+                    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+                    Write-Output $dlg.SelectedPath
+                }
+            "#;
+            const ZIP: &str = r#"
+                Add-Type -AssemblyName System.Windows.Forms
+                $dlg = New-Object System.Windows.Forms.OpenFileDialog
+                $dlg.Title = 'Skill 파일(.zip, .skill)을 선택하세요'
+                $dlg.Filter = 'Skill 파일 (*.zip;*.skill)|*.zip;*.skill'
+                if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+                    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+                    Write-Output $dlg.FileName
+                }
+            "#;
+            let script = if kind == "folder" { FOLDER } else { ZIP };
+            let path = run_dialog_script(script, &[])?.trim().to_string();
+            Ok((!path.is_empty()).then_some(path))
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = kind;
+            Ok(None)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    if let Some(p) = &picked {
+        grants.grant(p);
+    }
+    Ok(picked)
+}
+
+/// 고른 폴더나 zip 파일을 모든 대화용 Skill로 설치한다.
+/// 같은 Skill이 있으면 `ALREADY_EXISTS:<이름>` 오류를 돌려주고, `overwrite`면 기존 것을 휴지통으로 옮긴다.
+#[tauri::command]
+async fn install_skill(
+    grants: State<'_, PathGrants>,
+    source_path: String,
+    overwrite: bool,
+) -> Result<skills::SkillInfo, String> {
+    let src = PathBuf::from(&source_path);
+    if !grants.is_granted(&src) {
+        return Err(not_granted(&source_path));
+    }
+    tokio::task::spawn_blocking(move || {
+        if src.is_dir() {
+            skills::install_from_folder(&src, overwrite)
+        } else {
+            skills::install_from_zip(&src, overwrite)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn delete_skill(id: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || skills::delete_user_skill(&id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn create_skill(name: String) -> Result<skills::SkillInfo, String> {
+    skills::create_user_skill(&name)
+}
+
+/// SKILL.md 원문 (미리보기)
+#[tauri::command]
+fn skill_text(state: State<'_, AppState>, id: String, project_id: Option<String>) -> Result<String, String> {
+    let proj = skill_project(&state, project_id.as_deref())?;
+    skills::skill_md_text(&id, proj.as_ref().map(|(i, r)| (i.as_str(), r.as_path())))
+}
+
+/// Skill 폴더를 탐색기로 열거나(`target`="folder"), SKILL.md를 메모장으로 연다(`target`="edit").
+/// 아무 Skill도 고르지 않으면(`id`가 비면) 모든 대화용 Skill 폴더를 연다.
+#[tauri::command]
+fn open_skill_location(
+    state: State<'_, AppState>,
+    id: Option<String>,
+    project_id: Option<String>,
+    target: String,
+) -> Result<(), String> {
+    let dir = match id.as_deref() {
+        Some(id) if !id.is_empty() => {
+            let proj = skill_project(&state, project_id.as_deref())?;
+            skills::dir_of(id, proj.as_ref().map(|(i, r)| (i.as_str(), r.as_path())))
+                .ok_or_else(|| "Skill을 찾을 수 없습니다.".to_string())?
+        }
+        _ => {
+            let d = skills::user_dir();
+            std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+            d
+        }
+    };
+    #[cfg(target_os = "windows")]
+    {
+        if target == "edit" {
+            let file = std::fs::read_dir(&dir)
+                .map_err(|e| e.to_string())?
+                .flatten()
+                .map(|e| e.path())
+                .find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("SKILL.md")))
+                .ok_or_else(|| "SKILL.md가 없습니다.".to_string())?;
+            Command::new("notepad.exe")
+                .arg(&file)
+                .spawn()
+                .map_err(|e| format!("메모장을 열 수 없습니다: {}", e))?;
+        } else {
+            Command::new("explorer")
+                .arg(&dir)
+                .spawn()
+                .map_err(|e| format!("탐색기를 열 수 없습니다: {}", e))?;
+        }
+    }
+    let _ = (dir, target);
+    Ok(())
+}
+
+/// 이 프로젝트에서 쓸 Python (없으면 null)
+#[tauri::command]
+async fn python_status(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<Option<python_runner::PythonInfo>, String> {
+    let (root, _) = project_root(&state, &project_id)?;
+    Ok(python_runner::find_python(Some(&root)).await)
+}
+
+/// 사용자가 실행 창에서 [실행]을 눌렀을 때: 프로젝트 안의 .py를 프로젝트 루트에서 실행한다.
+#[tauri::command]
+async fn run_python_script(
+    state: State<'_, AppState>,
+    project_id: String,
+    relative_path: String,
+) -> Result<python_runner::RunOutcome, String> {
+    let (root, _) = project_root(&state, &project_id)?;
+    python_runner::run_script(&root, &relative_path, python_runner::RUN_TIMEOUT).await
+}
+
+/// 실행에 필요한 패키지를 pip으로 설치한다 (사용자가 버튼을 눌렀을 때만).
+#[tauri::command]
+async fn install_python_package(
+    state: State<'_, AppState>,
+    project_id: String,
+    package: String,
+) -> Result<String, String> {
+    let (root, _) = project_root(&state, &project_id)?;
+    python_runner::install_package(Some(&root), &package).await
+}
+
+/// 기본 앱으로 열어도 되는 파일 (실행 파일·스크립트는 제외)
+const OPENABLE_EXTENSIONS: &[&str] = &[
+    "xlsx", "xls", "csv", "tsv", "docx", "doc", "pptx", "ppt", "pdf", "hwp", "hwpx", "txt", "md", "json", "xml",
+    "png", "jpg", "jpeg", "gif", "bmp", "webp", "svg", "mp3", "wav", "mp4", "zip",
+];
+
+pub fn is_openable_with_default_app(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .is_some_and(|e| OPENABLE_EXTENSIONS.contains(&e.as_str()))
+}
+
+/// 프로젝트 파일을 Windows 기본 앱(엑셀 등)으로 연다. 문서·이미지·데이터 파일만 허용한다.
+#[tauri::command]
+fn open_project_file_external(
+    state: State<'_, AppState>,
+    project_id: String,
+    relative_path: String,
+) -> Result<(), String> {
+    let (root, _) = project_root(&state, &project_id)?;
+    let target = fs_ops::resolve_safe_path(&root, &relative_path)?;
+    if !target.is_file() {
+        return Err(format!("파일을 찾을 수 없습니다: {}", relative_path));
+    }
+    if !is_openable_with_default_app(&target) {
+        return Err("이 형식은 기본 앱으로 열 수 없습니다. 탐색기에서 직접 여세요.".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    Command::new("explorer")
+        .arg(&target)
+        .spawn()
+        .map_err(|e| format!("파일을 열 수 없습니다: {}", e))?;
+    Ok(())
+}
+
 /// 채팅 답변의 링크를 기본 브라우저로 연다. http(s)·mailto만 허용한다.
 #[tauri::command]
 fn open_external_url(url: String) -> Result<(), String> {
@@ -1230,21 +1665,54 @@ fn doc_bridge_respond(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 이미 실행 중이면 새로 띄우지 않고 기존 창을 앞으로 가져온다 (저장 파일·로그인 포트 충돌 방지).
+    let mut instance = match single_instance::acquire() {
+        single_instance::Instance::AlreadyRunning => return,
+        single_instance::Instance::First(l) => Some(l),
+        single_instance::Instance::Unknown => None,
+    };
     tauri::Builder::default()
         .plugin(navigation_guard())
-        .setup(|app| {
+        .setup(move |app| {
+            if let Some(listener) = instance.take() {
+                let handle = app.handle().clone();
+                single_instance::listen(listener, move || {
+                    if let Some(w) = handle.get_webview_window("main") {
+                        let _ = w.unminimize();
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                    }
+                });
+            }
             let app_data_dir = app
                 .path()
                 .app_data_dir()
                 .unwrap_or_else(|_| PathBuf::from("c:\\DOCS\\EXAONE\\.exaone_data"));
             fs_ops::set_blob_dir(app_data_dir.join("blobs"));
-            let store = StoreManager::new(&app_data_dir);
+            skills::set_user_dir(app_data_dir.join("skills"));
+            // 실행 환경(Python·Node.js·uv)은 크므로 로밍되지 않는 로컬 앱 데이터에 둔다.
+            runtime::set_root(
+                app.path()
+                    .app_local_data_dir()
+                    .unwrap_or_else(|_| app_data_dir.clone())
+                    .join("runtimes"),
+            );
+            let mcp_manager = mcp::McpManager::new(app_data_dir.join("mcp_servers.json"), Box::new(mcp::KeyringSecrets));
+            mcp_manager.start_all();
+            app.manage(mcp_manager);
+            // 처음 실행할 때 만드는 기본 작업 폴더: 문서\EXAONE (설치 폴더는 쓸 수 없는 곳일 수 있다)
+            let default_workspace = app
+                .path()
+                .document_dir()
+                .map(|d| d.join("EXAONE"))
+                .unwrap_or_else(|_| app_data_dir.join("workspace"));
+            let store = StoreManager::new(&app_data_dir).with_default_workspace(default_workspace);
             let mut initial_db = store.load();
             load_api_key_into(&store, &mut initial_db);
             app.manage(AppState {
                 store,
                 db: Mutex::new(initial_db),
-                cancel_flag: Arc::new(AtomicBool::new(false)),
+                runs: runs::RunRegistry::default(),
             });
             app.manage(doc_bridge::DocBridge::default());
             app.manage(PathGrants::default());
@@ -1258,6 +1726,7 @@ pub fn run() {
             pick_folder_dialog,
             pick_files_dialog,
             cancel_generation,
+            running_conversations,
             create_or_update_project,
             delete_project,
             list_project_files,
@@ -1268,6 +1737,34 @@ pub fn run() {
             delete_project_path,
             undo_file_snapshot,
             get_snapshot_diff,
+            python_status,
+            run_python_script,
+            install_python_package,
+            list_skills,
+            set_skill_enabled,
+            pick_skill_source,
+            install_skill,
+            delete_skill,
+            create_skill,
+            skill_text,
+            open_skill_location,
+            runtime_status,
+            runtime_install,
+            runtime_remove,
+            catalog_load,
+            catalog_default_url,
+            catalog_install_skill,
+            catalog_runtimes,
+            mcp_list_servers,
+            mcp_save_server,
+            mcp_delete_server,
+            mcp_set_server_enabled,
+            mcp_restart_server,
+            mcp_set_tool,
+            mcp_oauth_login,
+            mcp_oauth_cancel,
+            mcp_oauth_logout,
+            open_project_file_external,
             create_conversation,
             delete_conversation,
             send_chat_message,
@@ -1286,14 +1783,33 @@ pub fn run() {
             trash_project_path,
             find_project_files,
             reveal_project_path,
+            reveal_saved_path,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running EXAONE Desktop application");
+        .build(tauri::generate_context!())
+        .expect("error while running EXAONE Desktop application")
+        .run(|app, event| {
+            // 앱을 끝낼 때 로컬 MCP 서버 프로세스도 함께 끝낸다.
+            if let tauri::RunEvent::Exit = event {
+                if let Some(m) = app.try_state::<Arc<mcp::McpManager>>() {
+                    m.shutdown_all();
+                }
+            }
+        });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_documents_open_with_the_default_app() {
+        for ok in ["out/report.xlsx", "a.CSV", "chart.png", "보고서.docx"] {
+            assert!(is_openable_with_default_app(Path::new(ok)), "{}", ok);
+        }
+        for bad in ["make.py", "run.bat", "x.exe", "a.ps1", "b.vbs", "c.lnk", "d.js", "e.cmd", "f.html", "noext"] {
+            assert!(!is_openable_with_default_app(Path::new(bad)), "{}", bad);
+        }
+    }
 
     #[test]
     fn navigation_is_limited_to_the_app() {

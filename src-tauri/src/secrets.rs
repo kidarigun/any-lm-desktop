@@ -29,6 +29,32 @@ pub fn delete_api_key() -> Result<(), String> {
     }
 }
 
+/// MCP 서버의 환경 변수·헤더 값처럼 이름(account)별로 나눠 두는 비밀 값
+fn named_entry(account: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(SERVICE, account).map_err(|e| format!("자격 증명 저장소를 열 수 없습니다: {}", e))
+}
+
+pub fn load_secret(account: &str) -> Result<Option<String>, String> {
+    match named_entry(account)?.get_password() {
+        Ok(v) => Ok(Some(v)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(format!("저장된 값을 읽지 못했습니다: {}", e)),
+    }
+}
+
+pub fn store_secret(account: &str, value: &str) -> Result<(), String> {
+    named_entry(account)?
+        .set_password(value)
+        .map_err(|e| format!("값을 Windows 자격 증명 관리자에 저장하지 못했습니다: {}", e))
+}
+
+pub fn delete_secret(account: &str) -> Result<(), String> {
+    match named_entry(account)?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(format!("저장된 값을 지우지 못했습니다: {}", e)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// 실제 Windows 자격 증명 관리자를 쓰므로 직접 실행할 때만: cargo test -- --ignored

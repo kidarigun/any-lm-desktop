@@ -1,8 +1,30 @@
 /** 캔버스와 AI 도구가 다루는 문서 종류 */
-export type DocKind = "markdown" | "docx" | "pptx" | "pdf" | "html" | "text";
+export type DocKind = "markdown" | "docx" | "pptx" | "xlsx" | "pdf" | "html" | "text";
 
 /** 바이너리로 읽고 써야 하는 문서 종류 */
-export const BINARY_KINDS: readonly DocKind[] = ["docx", "pptx", "pdf"];
+export const BINARY_KINDS: readonly DocKind[] = ["docx", "pptx", "xlsx", "pdf"];
+
+/** 캔버스에서 미리보기만 하는 문서 종류 (고치기는 원래 앱이나 엑사원에게 맡긴다) */
+export const PREVIEW_ONLY_KINDS: readonly DocKind[] = ["pptx", "xlsx", "pdf"];
+
+export function isPreviewOnlyKind(kind: DocKind): boolean {
+  return PREVIEW_ONLY_KINDS.includes(kind);
+}
+
+/** 캔버스로 열 수 없어 Windows 기본 앱(엑셀 등)으로 여는 파일 */
+const EXTERNAL_APP_EXTENSIONS = new Set([
+  "xls", "doc", "ppt", "hwp", "hwpx",
+  "png", "jpg", "jpeg", "gif", "bmp", "webp", "mp3", "wav", "mp4", "zip",
+]);
+
+export function opensInExternalApp(path: string): boolean {
+  return EXTERNAL_APP_EXTENSIONS.has(extensionOf(path));
+}
+
+export function isPythonScript(path: string): boolean {
+  const ext = extensionOf(path);
+  return ext === "py" || ext === "pyw";
+}
 
 export function extensionOf(path: string): string {
   const name = path.split(/[\\/]/).pop() || "";
@@ -19,6 +41,8 @@ export function docKindOf(path: string): DocKind {
       return "docx";
     case "pptx":
       return "pptx";
+    case "xlsx":
+      return "xlsx";
     case "pdf":
       return "pdf";
     case "html":
@@ -45,6 +69,7 @@ export const KIND_LABEL: Record<DocKind, string> = {
   markdown: "Markdown",
   docx: "Word 문서",
   pptx: "PowerPoint",
+  xlsx: "Excel",
   pdf: "PDF",
   html: "HTML",
   text: "텍스트",
@@ -54,6 +79,7 @@ export const KIND_EXTENSION: Record<DocKind, string> = {
   markdown: "md",
   docx: "docx",
   pptx: "pptx",
+  xlsx: "xlsx",
   pdf: "pdf",
   html: "html",
   text: "txt",
@@ -64,6 +90,7 @@ export const SAVE_AS_TARGETS: Record<DocKind, DocKind[]> = {
   markdown: ["markdown", "docx", "pptx", "html"],
   docx: ["docx", "markdown", "html"],
   pptx: ["pptx", "markdown"],
+  xlsx: ["xlsx", "markdown"],
   pdf: ["pdf", "markdown"],
   html: ["html", "markdown", "docx"],
   text: ["text"],

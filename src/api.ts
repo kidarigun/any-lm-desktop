@@ -9,10 +9,17 @@ import {
   Project,
   SaveResult,
   SnapshotDiff,
+  PythonInfo,
+  PythonRunOutcome,
+  McpServerConfig,
+  McpServerView,
+  RuntimeInfo,
+  RuntimeKind,
+  SkillInfo,
   StreamChunkPayload,
 } from "./types";
 
-const isTauri = () =>
+export const isTauri = () =>
   typeof window !== "undefined" &&
   ("__TAURI_INTERNALS__" in window || "__TAURI__" in window);
 
@@ -110,10 +117,19 @@ export const BackendAPI = {
     return [];
   },
 
-  async cancelGeneration(): Promise<void> {
+  /** 한 대화의 답변 생성을 멈춘다 (지정하지 않으면 모두). */
+  async cancelGeneration(conversationId?: string): Promise<void> {
     if (isTauri()) {
-      await invoke("cancel_generation");
+      await invoke("cancel_generation", { conversationId: conversationId ?? null });
     }
+  },
+
+  /** 백엔드에서 지금 답변을 만들고 있는 대화 ID들 */
+  async runningConversations(): Promise<string[]> {
+    if (isTauri()) {
+      return await invoke<string[]>("running_conversations");
+    }
+    return [];
   },
 
   async createOrUpdateProject(params: {
@@ -355,6 +371,184 @@ export const BackendAPI = {
     throw new Error("Tauri 데스크톱 창에서만 저장할 수 있습니다.");
   },
 
+  /** 저장 창에서 고른 파일을 탐색기에서 보여 준다. */
+  async revealSavedPath(path: string): Promise<void> {
+    if (isTauri()) {
+      await invoke("reveal_saved_path", { path });
+    }
+  },
+
+  /** 이 프로젝트에서 쓸 Python (없으면 null) */
+  async pythonStatus(projectId: string): Promise<PythonInfo | null> {
+    if (isTauri()) {
+      return await invoke<PythonInfo | null>("python_status", { projectId });
+    }
+    return null;
+  },
+
+  /** 프로젝트 안의 .py 스크립트를 프로젝트 루트에서 실행한다. */
+  async runPythonScript(projectId: string, relativePath: string): Promise<PythonRunOutcome> {
+    if (isTauri()) {
+      return await invoke<PythonRunOutcome>("run_python_script", { projectId, relativePath });
+    }
+    throw new Error("Tauri 데스크톱 창에서만 Python을 실행할 수 있습니다.");
+  },
+
+  async installPythonPackage(projectId: string, pkg: string): Promise<string> {
+    if (isTauri()) {
+      return await invoke<string>("install_python_package", { projectId, package: pkg });
+    }
+    throw new Error("Tauri 데스크톱 창에서만 패키지를 설치할 수 있습니다.");
+  },
+
+  // ---- 실행 환경 (Python·Node.js·uv) ----
+
+  async runtimeStatus(): Promise<RuntimeInfo[]> {
+    if (isTauri()) return await invoke<RuntimeInfo[]>("runtime_status");
+    return [];
+  },
+
+  /** 공식 배포본을 내려받아 앱 전용으로 설치한다. 끝날 때까지 기다린다. */
+  async runtimeInstall(kind: RuntimeKind): Promise<void> {
+    if (isTauri()) return await invoke("runtime_install", { kind });
+    throw new Error("Tauri 데스크톱 창에서만 설치할 수 있습니다.");
+  },
+
+  async runtimeRemove(kind: RuntimeKind): Promise<void> {
+    if (isTauri()) await invoke("runtime_remove", { kind });
+  },
+
+  // ---- 찾아보기 목록 ----
+
+  /** 목록을 불러온다 (주소가 없으면 기본 목록). 인터넷이 안 되면 마지막 저장본. */
+  async catalogLoad(url?: string): Promise<{ url: string; catalog: unknown; fromCache: boolean; error?: string | null }> {
+    if (isTauri()) return await invoke("catalog_load", { url: url ?? null });
+    throw new Error("Tauri 데스크톱 창에서만 목록을 불러올 수 있습니다.");
+  },
+
+  async catalogDefaultUrl(): Promise<string> {
+    if (isTauri()) return await invoke<string>("catalog_default_url");
+    return "https://raw.githubusercontent.com/kidarigun/exaone-catalog/main/catalog.json";
+  },
+
+  /** 목록의 Skill zip을 받아 sha256 확인 후 설치. 같은 Skill이 있으면 ALREADY_EXISTS:<이름> 오류. */
+  async catalogInstallSkill(url: string, sha256: string, overwrite = false): Promise<SkillInfo> {
+    return await invoke<SkillInfo>("catalog_install_skill", { url, sha256, overwrite });
+  },
+
+  async catalogRuntimes(): Promise<{ node: boolean; uv: boolean; python: boolean; docker: boolean } | null> {
+    if (isTauri()) return await invoke("catalog_runtimes");
+    return null;
+  },
+
+  // ---- MCP ----
+
+  async mcpListServers(): Promise<McpServerView[]> {
+    if (isTauri()) return await invoke<McpServerView[]>("mcp_list_servers");
+    return [];
+  },
+
+  /** 서버 추가·수정. env·headers의 빈 값은 저장된 값을 유지한다. */
+  async mcpSaveServer(
+    config: McpServerConfig,
+    env: Record<string, string>,
+    headers: Record<string, string>,
+    /** OAuth 클라이언트 보안 비밀번호 (비우면 저장된 값 유지) */
+    oauthClientSecret?: string
+  ): Promise<McpServerConfig> {
+    if (isTauri())
+      return await invoke<McpServerConfig>("mcp_save_server", { config, env, headers, oauthClientSecret: oauthClientSecret || null });
+    throw new Error("Tauri 데스크톱 창에서만 MCP 서버를 추가할 수 있습니다.");
+  },
+
+  /** 브라우저로 로그인한다. 로그인이 끝나거나 실패할 때까지(최대 5분) 기다린다. */
+  async mcpOauthLogin(id: string): Promise<void> {
+    if (isTauri()) return await invoke("mcp_oauth_login", { id });
+    throw new Error("Tauri 데스크톱 창에서만 로그인할 수 있습니다.");
+  },
+
+  async mcpOauthCancel(): Promise<void> {
+    if (isTauri()) await invoke("mcp_oauth_cancel");
+  },
+
+  async mcpOauthLogout(id: string): Promise<void> {
+    if (isTauri()) await invoke("mcp_oauth_logout", { id });
+  },
+
+  async mcpDeleteServer(id: string): Promise<void> {
+    if (isTauri()) await invoke("mcp_delete_server", { id });
+  },
+
+  async mcpSetServerEnabled(id: string, enabled: boolean): Promise<void> {
+    if (isTauri()) await invoke("mcp_set_server_enabled", { id, enabled });
+  },
+
+  async mcpRestartServer(id: string): Promise<void> {
+    if (isTauri()) await invoke("mcp_restart_server", { id });
+  },
+
+  async mcpSetTool(id: string, tool: string, opts: { enabled?: boolean; autoApprove?: boolean }): Promise<void> {
+    if (isTauri())
+      await invoke("mcp_set_tool", { id, tool, enabled: opts.enabled ?? null, autoApprove: opts.autoApprove ?? null });
+  },
+
+  // ---- Skill ----
+
+  /** 설치된 Skill 목록 (프로젝트를 주면 그 프로젝트의 Skill도) */
+  async listSkills(projectId?: string): Promise<SkillInfo[]> {
+    if (isTauri()) {
+      return await invoke<SkillInfo[]>("list_skills", { projectId: projectId ?? null });
+    }
+    return [];
+  },
+
+  async setSkillEnabled(id: string, enabled: boolean): Promise<void> {
+    if (isTauri()) await invoke("set_skill_enabled", { id, enabled });
+  },
+
+  /** 설치할 Skill 폴더 또는 .zip/.skill 파일을 고른다 (취소하면 null) */
+  async pickSkillSource(kind: "folder" | "zip"): Promise<string | null> {
+    if (isTauri()) return await invoke<string | null>("pick_skill_source", { kind });
+    throw new Error("Tauri 데스크톱 창에서만 Skill을 설치할 수 있습니다.");
+  },
+
+  /** 같은 Skill이 있으면 `ALREADY_EXISTS:<이름>` 오류를 낸다. */
+  async installSkill(sourcePath: string, overwrite = false): Promise<SkillInfo> {
+    return await invoke<SkillInfo>("install_skill", { sourcePath, overwrite });
+  },
+
+  async deleteSkill(id: string): Promise<void> {
+    await invoke("delete_skill", { id });
+  },
+
+  async createSkill(name: string): Promise<SkillInfo> {
+    if (isTauri()) return await invoke<SkillInfo>("create_skill", { name });
+    throw new Error("Tauri 데스크톱 창에서만 Skill을 만들 수 있습니다.");
+  },
+
+  async skillText(id: string, projectId?: string): Promise<string> {
+    if (isTauri()) return await invoke<string>("skill_text", { id, projectId: projectId ?? null });
+    return "";
+  },
+
+  /** Skill 폴더를 탐색기로(folder), SKILL.md를 메모장으로(edit) 연다. id가 없으면 Skill 폴더 전체를 연다. */
+  async openSkillLocation(target: "folder" | "edit", id?: string, projectId?: string): Promise<void> {
+    if (isTauri()) {
+      await invoke("open_skill_location", { id: id ?? null, projectId: projectId ?? null, target });
+      return;
+    }
+    throw new Error("Tauri 데스크톱 창에서만 폴더를 열 수 있습니다.");
+  },
+
+  /** 엑셀·이미지 등 캔버스로 열 수 없는 파일을 Windows 기본 앱으로 연다. */
+  async openProjectFileExternal(projectId: string, relativePath: string): Promise<void> {
+    if (isTauri()) {
+      await invoke("open_project_file_external", { projectId, relativePath });
+      return;
+    }
+    throw new Error("Tauri 데스크톱 창에서만 기본 앱으로 열 수 있습니다.");
+  },
+
   /** 변경 보기용: 스냅샷의 이전·이후 내용 (docx·pptx는 Markdown으로 변환됨) */
   async getSnapshotDiff(snapshotId: string): Promise<SnapshotDiff> {
     if (isTauri()) {
@@ -458,7 +652,9 @@ export const BackendAPI = {
     conversationId: string,
     messageId: string,
     toolId: string,
-    approve: boolean
+    approve: boolean,
+    /** MCP 도구: 앞으로 이 도구는 승인 없이 실행 */
+    always = false
   ): Promise<Conversation> {
     if (isTauri()) {
       return await invoke<Conversation>("resolve_tool_approval", {
@@ -466,6 +662,7 @@ export const BackendAPI = {
         messageId,
         toolId,
         approve,
+        always,
       });
     }
     throw new Error("Tauri 환경에서만 지원됩니다.");

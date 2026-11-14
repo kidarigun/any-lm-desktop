@@ -3,12 +3,13 @@ import { docxToMarkdown, markdownToDocx } from "./docx";
 import { stripInlineMarkdown } from "./markdown";
 import { extractPdfText } from "./pdf";
 import { markdownToPptx, pptxToMarkdown, replaceTextInOoxml } from "./pptx";
+import { markdownToXlsx, replaceTextInXlsx, xlsxToMarkdown } from "./xlsx";
 
 /** Rust 백엔드가 보내는 문서 변환 요청 (src-tauri/src/doc_bridge.rs와 형식이 같아야 한다) */
 export interface DocBridgeRequest {
   requestId: string;
   op: "extract" | "generate" | "replace";
-  kind: "docx" | "pptx" | "pdf";
+  kind: "docx" | "pptx" | "pdf" | "xlsx";
   dataBase64?: string | null;
   markdown?: string | null;
   title?: string | null;
@@ -33,14 +34,21 @@ export async function handleDocBridgeRequest(req: DocBridgeRequest): Promise<Doc
             ? await docxToMarkdown(bytes)
             : req.kind === "pptx"
               ? await pptxToMarkdown(bytes)
-              : await extractPdfText(bytes);
+              : req.kind === "xlsx"
+                ? await xlsxToMarkdown(bytes)
+                : await extractPdfText(bytes);
         return { ok: true, text };
       }
       case "generate": {
         const md = req.markdown ?? "";
         const title = req.title || "문서";
         if (req.kind === "pdf") throw new Error("PDF 생성은 지원하지 않습니다. .docx 또는 .md로 작성하세요.");
-        const bytes = req.kind === "docx" ? await markdownToDocx(md, title) : await markdownToPptx(md, title);
+        const bytes =
+          req.kind === "docx"
+            ? await markdownToDocx(md, title)
+            : req.kind === "xlsx"
+              ? await markdownToXlsx(md, title)
+              : await markdownToPptx(md, title);
         return { ok: true, dataBase64: bytesToBase64(bytes) };
       }
       case "replace": {
@@ -48,6 +56,10 @@ export async function handleDocBridgeRequest(req: DocBridgeRequest): Promise<Doc
         const bytes = base64ToBytes(req.dataBase64 ?? "");
         const target = req.target ?? "";
         const replacement = req.replacement ?? "";
+        if (req.kind === "xlsx") {
+          // 엑셀 칸 값에는 Markdown 기호가 없으므로 그대로 찾는다.
+          return { ok: true, dataBase64: bytesToBase64(await replaceTextInXlsx(bytes, target, replacement)) };
+        }
         let out: Uint8Array;
         try {
           out = await replaceTextInOoxml(bytes, req.kind, target, replacement);

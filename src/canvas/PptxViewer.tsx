@@ -4,14 +4,12 @@ import type { PptxDeck, PptxParagraph, PptxRun, PptxShape, PptxSlide } from "../
 
 const EMU_PER_PT = 12700;
 
-export interface PptxEditorProps {
+export interface PptxViewerProps {
   deck: PptxDeck;
-  edits: Map<string, string>;
-  onEdit: (key: string, text: string) => void;
 }
 
-/** 슬라이드를 원래 배치대로 그리고, 텍스트 상자를 직접 클릭해 고칠 수 있게 한다. */
-export function PptxEditor({ deck, edits, onEdit }: PptxEditorProps) {
+/** 슬라이드를 원래 배치대로 그린다 (미리보기 전용). */
+export function PptxViewer({ deck }: PptxViewerProps) {
   const [current, setCurrent] = useState(0);
   const mainRef = useRef<HTMLDivElement | null>(null);
   const [mainWidth, setMainWidth] = useState(640);
@@ -19,7 +17,7 @@ export function PptxEditor({ deck, edits, onEdit }: PptxEditorProps) {
   useLayoutEffect(() => {
     const el = mainRef.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => setMainWidth(Math.max(240, el.clientWidth - 40)));
+    const ro = new ResizeObserver(() => setMainWidth(Math.max(120, el.clientWidth - 40)));
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
@@ -45,7 +43,7 @@ export function PptxEditor({ deck, edits, onEdit }: PptxEditorProps) {
             }`}
           >
             <div className="text-[10px] text-stone-500 dark:text-stone-400 mb-0.5">{i + 1}</div>
-            <SlideView deck={deck} slide={s} width={108} edits={edits} editable={false} />
+            <SlideView deck={deck} slide={s} width={108} />
           </button>
         ))}
       </div>
@@ -74,7 +72,7 @@ export function PptxEditor({ deck, edits, onEdit }: PptxEditorProps) {
         </div>
 
         <div className="mx-auto shadow-lg" style={{ width: mainWidth }}>
-          <SlideView key={slide.path} deck={deck} slide={slide} width={mainWidth} edits={edits} editable onEdit={onEdit} />
+          <SlideView key={slide.path} deck={deck} slide={slide} width={mainWidth} />
         </div>
 
         {slide.notes && (
@@ -90,21 +88,7 @@ export function PptxEditor({ deck, edits, onEdit }: PptxEditorProps) {
   );
 }
 
-function SlideView({
-  deck,
-  slide,
-  width,
-  edits,
-  editable,
-  onEdit,
-}: {
-  deck: PptxDeck;
-  slide: PptxSlide;
-  width: number;
-  edits: Map<string, string>;
-  editable: boolean;
-  onEdit?: (key: string, text: string) => void;
-}) {
+function SlideView({ deck, slide, width }: { deck: PptxDeck; slide: PptxSlide; width: number }) {
   const scale = width / deck.width;
   return (
     <div
@@ -112,25 +96,13 @@ function SlideView({
       style={{ width, height: deck.height * scale, background: slide.background }}
     >
       {slide.shapes.map((shape) => (
-        <ShapeView key={shape.key} shape={shape} scale={scale} edits={edits} editable={editable} onEdit={onEdit} />
+        <ShapeView key={shape.key} shape={shape} scale={scale} />
       ))}
     </div>
   );
 }
 
-function ShapeView({
-  shape,
-  scale,
-  edits,
-  editable,
-  onEdit,
-}: {
-  shape: PptxShape;
-  scale: number;
-  edits: Map<string, string>;
-  editable: boolean;
-  onEdit?: (key: string, text: string) => void;
-}) {
+function ShapeView({ shape, scale }: { shape: PptxShape; scale: number }) {
   const style: CSSProperties = {
     position: "absolute",
     left: shape.x * scale,
@@ -199,7 +171,7 @@ function ShapeView({
       }}
     >
       {shape.paragraphs.map((p) => (
-        <ParagraphView key={p.key} p={p} scale={scale} value={edits.get(p.key)} editable={editable} onEdit={onEdit} />
+        <ParagraphView key={p.key} p={p} scale={scale} />
       ))}
     </div>
   );
@@ -233,32 +205,16 @@ function runsHtml(runs: PptxRun[], scale: number): string {
     .join("");
 }
 
-function ParagraphView({
-  p,
-  scale,
-  value,
-  editable,
-  onEdit,
-}: {
-  p: PptxParagraph;
-  scale: number;
-  value: string | undefined;
-  editable: boolean;
-  onEdit?: (key: string, text: string) => void;
-}) {
+function ParagraphView({ p, scale }: { p: PptxParagraph; scale: number }) {
   const ref = useRef<HTMLDivElement | null>(null);
-  editable = editable && !p.readOnly;
   const first = p.runs.find((r) => r.text !== "\n");
   const sizePx = Math.max(3, (first?.sizePt ?? p.sizePt) * EMU_PER_PT * scale);
   const color = first?.color ?? "#1F1E1D";
 
-  // 편집 중 React가 내용을 덮어쓰지 않도록 처음 한 번만 내용을 채운다.
+  // 글자 조각(크기·굵기·색)을 그대로 그린다. 내용은 모두 escapeHtml을 거친다.
   useLayoutEffect(() => {
-    if (!ref.current) return;
-    ref.current.innerHTML =
-      value !== undefined ? escapeHtml(value).replace(/\n/g, "<br>") : runsHtml(p.runs, scale) || "";
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [p.key, scale]);
+    if (ref.current) ref.current.innerHTML = runsHtml(p.runs, scale) || "";
+  }, [p, scale]);
 
   const align = p.align === "center" ? "center" : p.align === "right" ? "right" : p.align === "justify" ? "justify" : "left";
   return (
@@ -276,17 +232,7 @@ function ParagraphView({
       }}
     >
       {p.bullet && <span style={{ flexShrink: 0 }}>{p.bullet}</span>}
-      <div
-        ref={ref}
-        contentEditable={editable ? "plaintext-only" : false}
-        suppressContentEditableWarning
-        spellCheck={false}
-        onInput={(e) => onEdit?.(p.key, (e.currentTarget as HTMLDivElement).innerText.replace(/\n$/, ""))}
-        className={`flex-1 min-w-0 whitespace-pre-wrap break-words outline-none ${
-          editable ? "rounded-sm hover:bg-[#A50034]/5 focus:bg-[#A50034]/5 focus:ring-1 focus:ring-[#A50034]/40 cursor-text" : ""
-        }`}
-        style={{ textAlign: align }}
-      />
+      <div ref={ref} className="flex-1 min-w-0 whitespace-pre-wrap break-words" style={{ textAlign: align }} />
     </div>
   );
 }

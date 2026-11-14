@@ -13,22 +13,28 @@ import {
   MessageSquare,
   Moon,
   Paperclip,
+  Plug,
   PanelRightClose,
   PanelRightOpen,
   Plus,
   RefreshCw,
   RotateCcw,
   FileDiff,
+  Play,
   Save,
   Search,
   Send,
   Settings,
+  Sparkles,
   Square,
   Sun,
   Trash2,
   X,
 } from "lucide-react";
-import { BackendAPI } from "./api";
+import { BackendAPI, isTauri } from "./api";
+import { bytesToBase64 } from "./docs/base64";
+import { applyChunk, countByMode, countRunning, endRun, startRun, type RunMode, type Runs } from "./chat/runs";
+import type { AnswerFormat } from "./docs/answerExport";
 import {
   canvasDocFromBase64,
   type CanvasDoc,
@@ -38,11 +44,15 @@ import {
 // 문서 편집 라이브러리(TipTap, docx, pptxgenjs, pdf.js)는 캔버스를 처음 열 때 불러온다.
 const DocumentCanvas = React.lazy(() => import("./canvas/DocumentCanvas"));
 const DiffViewer = React.lazy(() => import("./diff/DiffViewer"));
+const PythonRunDialog = React.lazy(() => import("./python/PythonRunDialog"));
 import { startDocBridge } from "./docs/bridge";
 import { DRAG_MIME, FileExplorer, type ExplorerApi } from "./explorer/FileExplorer";
 import { useFileMention } from "./explorer/FileMention";
 import { fileHistory } from "./diff/history";
 import { PanelResizer } from "./ui/PanelResizer";
+import { SkillsDialog } from "./skills/SkillsDialog";
+import { McpDialog } from "./mcp/McpDialog";
+import { RuntimePanel } from "./runtime/RuntimePanel";
 import {
   CANVAS_DEFAULT_WIDTH,
   CANVAS_MIN_WIDTH,
@@ -53,7 +63,7 @@ import {
   saveCanvasWidth,
   wideCanvasWidth,
 } from "./ui/panelWidth";
-import { docKindOf, docKindOfLanguage, isBinaryKind } from "./docs/formats";
+import { docKindOf, docKindOfLanguage, isBinaryKind, isPythonScript, opensInExternalApp } from "./docs/formats";
 import {
   AppSettings,
   ChatMessage,
@@ -123,6 +133,25 @@ function isInsideRoot(root: string, absolute: string): string | null {
   return a.slice(r.length + 1).replace(/\\/g, "/");
 }
 
+/** 마지막 답변에 승인을 기다리는 작업이 있는가 */
+function waitsForApproval(conv: Conversation): boolean {
+  const last = conv.messages[conv.messages.length - 1];
+  return !!last && last.role === "assistant" && last.toolRecords.some((r) => r.status === "pending_approval");
+}
+
+/** 탭에 표시하는 진행 중인 대화 수 */
+function RunBadge({ count }: { count: number }) {
+  if (count <= 0) return null;
+  return (
+    <span
+      className="ml-0.5 min-w-[15px] h-[15px] px-1 rounded-full bg-[#A50034] text-white text-[10px] leading-[15px] font-bold text-center"
+      title={`진행 중인 대화 ${count}개`}
+    >
+      {count}
+    </span>
+  );
+}
+
 export default function App() {
   const [isDark, setIsDark] = useState<boolean>(() => {
     return localStorage.getItem("exaone_theme") === "dark";
@@ -162,19 +191,27 @@ export default function App() {
   // Composer & Streaming State
   const [inputPrompt, setInputPrompt] = useState<string>("");
   const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
-  const [isStreaming, setIsStreaming] = useState<boolean>(false);
-  const [streamingReasoning, setStreamingReasoning] = useState<string>("");
-  const [streamingContent, setStreamingContent] = useState<string>("");
-  const [streamingTools, setStreamingTools] = useState<ToolExecutionRecord[]>(
-    []
-  );
-  const [retryNotice, setRetryNotice] = useState<string>("");
+  /** 대화별로 진행 중인 답변 생성 (다른 대화로 옮겨도 백그라운드에서 계속된다) */
+  const [runs, setRuns] = useState<Runs>({});
+  /** 대화별 마지막 실행 오류 */
+  const [runErrors, setRunErrors] = useState<Record<string, string>>({});
+  /** 다른 대화를 보는 사이 끝난 대화 (사이드바 표시) */
+  const [unseenDone, setUnseenDone] = useState<Record<string, true>>({});
+  /** 실패해서 돌려줄 입력 (그 대화로 돌아오면 입력창에 채운다) */
+  const failedDrafts = useRef<Record<string, string>>({});
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
 
   // Inline prompt editing
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingMessageText, setEditingMessageText] = useState<string>("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  /** 저장 형식 메뉴를 연 답변 */
+  const [answerSaveMenu, setAnswerSaveMenu] = useState<string | null>(null);
+  /** 아래 공간이 모자라면 메뉴를 위로 연다. */
+  const [answerSaveMenuUp, setAnswerSaveMenuUp] = useState(false);
+  const [savingAnswerId, setSavingAnswerId] = useState<string | null>(null);
+  /** 방금 저장한 답변 파일 */
+  const [savedAnswer, setSavedAnswer] = useState<{ name: string; absolutePath: string; relativePath: string | null } | null>(null);
 
   // Collapsible Claude-style Right Artifact Drawer
   const [canvasExpanded, setCanvasExpanded] = useState<boolean>(false);
@@ -192,8 +229,12 @@ export default function App() {
   );
   // Modals
   const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
+  const [showSkills, setShowSkills] = useState(false);
+  const [showMcp, setShowMcp] = useState(false);
   /** 변경 보기 창: 함께 볼 변경 기록들과 처음 보여 줄 기록 */
   const [diffView, setDiffView] = useState<{ ids: string[]; initial: string; variant?: "files" | "history" } | null>(null);
+  /** Python 실행 창에 띄운 스크립트 (프로젝트 기준 상대 경로) */
+  const [pythonRun, setPythonRun] = useState<string | null>(null);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   /** 저장하지 않고 닫으면 입력하던 키는 버린다. */
   function closeSettingsModal() {
@@ -244,6 +285,65 @@ export default function App() {
       null,
     [filteredConversations, activeConvId]
   );
+
+  // 지금 보고 있는 대화의 실행 상태
+  const shownConvId = activeConversation?.id ?? "";
+  const shownConvIdRef = useRef(shownConvId);
+  shownConvIdRef.current = shownConvId;
+  const activeRun = shownConvId ? runs[shownConvId] : undefined;
+  const isStreaming = !!activeRun;
+  const streamingReasoning = activeRun?.reasoning ?? "";
+  const streamingContent = activeRun?.content ?? "";
+  const streamingTools = activeRun?.tools ?? [];
+  const retryNotice = activeRun?.notice ?? "";
+  const runCounts = useMemo(() => countByMode(runs), [runs]);
+  const runningByProject = useMemo(() => {
+    const ids: Record<string, string[]> = {};
+    for (const c of conversations) (ids[c.projectId] ??= []).push(c.id);
+    const out: Record<string, number> = {};
+    for (const [pid, list] of Object.entries(ids)) out[pid] = countRunning(runs, list);
+    return out;
+  }, [conversations, runs]);
+
+  // 대화를 열면 '끝남' 표시를 지우고, 실패해서 돌려줄 입력이 있으면 채운다.
+  useEffect(() => {
+    if (!shownConvId) return;
+    setUnseenDone((prev) => {
+      if (!prev[shownConvId]) return prev;
+      const next = { ...prev };
+      delete next[shownConvId];
+      return next;
+    });
+    const draft = failedDrafts.current[shownConvId];
+    if (draft) {
+      delete failedDrafts.current[shownConvId];
+      setInputPrompt((prev) => (prev.trim() ? prev : draft));
+    }
+  }, [shownConvId]);
+
+  /** 실행 하나를 마친다. 다른 대화를 보고 있었다면 사이드바에 표시한다. */
+  function finishRun(convId: string, failure?: { error: string; text?: string }) {
+    setRuns((prev) => endRun(prev, convId));
+    setFileTreeVersion((v) => v + 1);
+    const shown = shownConvIdRef.current === convId;
+    if (!shown) setUnseenDone((prev) => ({ ...prev, [convId]: true }));
+    setRunErrors((prev) => {
+      if (!failure && !(convId in prev)) return prev;
+      const next = { ...prev };
+      if (failure) next[convId] = failure.error;
+      else delete next[convId];
+      return next;
+    });
+    if (failure?.text) {
+      const text = failure.text;
+      if (shown) setInputPrompt((prev) => (prev.trim() ? prev : text));
+      else failedDrafts.current[convId] = text;
+    }
+  }
+
+  function modeOfConversation(conv: Conversation): RunMode {
+    return conv.projectId === "general-chat" ? "chat" : activeMode === "code" ? "code" : "project";
+  }
 
   // 프로젝트 파일 탐색기 (일반 채팅에서는 사용하지 않음)
   const explorerProjectId = currentScopeId !== "general-chat" ? activeProject?.id : undefined;
@@ -321,6 +421,20 @@ export default function App() {
         if (firstGeneralConv) {
           setActiveConvId(firstGeneralConv.id);
         }
+        // 화면을 새로 고쳐도 백엔드에서 진행 중인 대화는 계속 표시한다.
+        const running = await BackendAPI.runningConversations();
+        if (running.length > 0) {
+          setRuns((prev) => {
+            let next = prev;
+            for (const id of running) {
+              if (next[id]) continue;
+              const conv = db.conversations.find((c) => c.id === id);
+              const mode: RunMode = !conv || conv.projectId === "general-chat" ? "chat" : "project";
+              next = startRun(next, id, mode, { notice: "백그라운드에서 진행 중입니다...", restored: true });
+            }
+            return next;
+          });
+        }
       } catch (err: any) {
         setErrorBanner(err?.message || String(err));
       }
@@ -334,14 +448,8 @@ export default function App() {
 
     BackendAPI.onExaoneStream((payload) => {
       if (cancelled) return;
-      if (payload.deltaReasoning) {
-        setStreamingReasoning((prev) => prev + payload.deltaReasoning);
-      }
-      if (payload.deltaContent) {
-        setStreamingContent((prev) => prev + payload.deltaContent);
-      }
+      setRuns((prev) => applyChunk(prev, payload));
       if (payload.toolRecord) {
-        setStreamingTools((prev) => [...prev, payload.toolRecord!]);
         const r = payload.toolRecord;
         if (r.status === "completed" && ["write_file", "modify_file", "delete_path"].includes(r.toolName)) {
           setFileTreeVersion((v) => v + 1);
@@ -349,9 +457,6 @@ export default function App() {
       }
       if (payload.snapshot) {
         setSnapshots((prev) => [...prev, payload.snapshot!]);
-      }
-      if (payload.statusNotice !== undefined && payload.statusNotice !== null) {
-        setRetryNotice(payload.statusNotice);
       }
     }).then((fn) => {
       if (cancelled) {
@@ -366,6 +471,30 @@ export default function App() {
       if (unlistenFn) unlistenFn();
     };
   }, []);
+
+  // 새로 고침 뒤 되살린 실행은 응답을 직접 받지 못하므로, 끝났는지 확인해 저장된 결과를 읽는다.
+  const runsRef = useRef(runs);
+  runsRef.current = runs;
+  const hasRestoredRuns = Object.values(runs).some((r) => r.restored);
+  useEffect(() => {
+    if (!hasRestoredRuns) return;
+    const timer = setInterval(async () => {
+      try {
+        const running = new Set(await BackendAPI.runningConversations());
+        const finished = Object.values(runsRef.current)
+          .filter((r) => r.restored && !running.has(r.conversationId))
+          .map((r) => r.conversationId);
+        if (finished.length === 0) return;
+        const db = await BackendAPI.getInitialState();
+        setConversations(db.conversations);
+        setSnapshots(db.snapshots);
+        finished.forEach((id) => finishRun(id));
+      } catch {
+        // 다음 확인 때 다시 시도
+      }
+    }, 1500);
+    return () => clearInterval(timer);
+  }, [hasRestoredRuns]);
 
   // AI가 DOCX/PPTX/PDF를 읽고 쓸 때 쓰는 문서 변환기 (웹뷰에서 실행)
   useEffect(() => {
@@ -478,6 +607,15 @@ export default function App() {
     }
   }
 
+  /** 프로젝트 파일 열기: 이미지·옛 Office 형식처럼 캔버스로 못 여는 파일은 Windows 기본 앱으로 연다. */
+  function openAnyProjectFile(filePath: string) {
+    if (opensInExternalApp(filePath) && activeProject) {
+      BackendAPI.openProjectFileExternal(activeProject.id, filePath).catch((err) => setErrorBanner(String(err)));
+    } else {
+      openFileInArtifact(filePath);
+    }
+  }
+
   /** 파일 열기 창에서 문서를 골라 캔버스로 연다 (프로젝트 밖 파일도 가능). */
   async function handleOpenDocument() {
     const root = activeProject?.rootPath;
@@ -533,6 +671,8 @@ export default function App() {
     const text = (overrideText ?? inputPrompt).trim();
     if (!text || !currentScopeId || isStreaming) return;
 
+    let convId: string | null = null;
+    let failure: { error: string; text?: string } | undefined;
     try {
       setShowProjectOverview(false);
       setErrorBanner(null);
@@ -545,23 +685,28 @@ export default function App() {
         setConversations((prev) => [targetConv!, ...prev]);
         setActiveConvId(targetConv.id);
       }
+      const id = targetConv.id;
+      convId = id;
 
       const filesToSend = [...attachedFiles];
       if (!overrideText) {
         setInputPrompt("");
       }
       setAttachedFiles([]);
-      setIsStreaming(true);
-      setRetryNotice("");
-      setStreamingReasoning("");
-      setStreamingContent("");
-      setStreamingTools([]);
+      setRunErrors((prev) => {
+        if (!(id in prev)) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      setRuns((prev) => startRun(prev, id, modeOfConversation(targetConv!), { question: text }));
+      // 첫 질문이면 사이드바 제목을 바로 바꿔 동시에 진행 중인 대화를 구분할 수 있게 한다 (백엔드도 같은 제목을 저장).
+      if (targetConv.messages.length === 0) {
+        const title = text.slice(0, 28) || "새 대화";
+        setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, title } : c)));
+      }
 
-      const updatedConv = await BackendAPI.sendChatMessage(
-        targetConv.id,
-        text,
-        filesToSend
-      );
+      const updatedConv = await BackendAPI.sendChatMessage(id, text, filesToSend);
 
       setConversations((prev) => {
         const exists = prev.some((c) => c.id === updatedConv.id);
@@ -569,27 +714,25 @@ export default function App() {
         return prev.map((c) => (c.id === updatedConv.id ? updatedConv : c));
       });
 
+      // 결과 문서는 그 대화를 보고 있을 때만 캔버스에 연다 (다른 작업을 가리지 않도록).
       const lastMsg = updatedConv.messages[updatedConv.messages.length - 1];
-      if (lastMsg && lastMsg.role === "assistant") {
+      if (lastMsg && lastMsg.role === "assistant" && shownConvIdRef.current === id) {
         const art = extractArtifactFromMessage(lastMsg);
         if (art) openArtifactRef(art);
       }
     } catch (err: any) {
       const msg = String(err);
-      if (!overrideText) {
-        setInputPrompt(text);
+      if (convId) {
+        failure = { error: msg, text: overrideText ? undefined : text };
+      } else {
+        if (!overrideText) setInputPrompt(text);
+        setErrorBanner(msg);
       }
-      setErrorBanner(msg);
       if (msg.includes("API 키")) {
         setShowSettingsModal(true);
       }
     } finally {
-      bumpFileTree();
-      setIsStreaming(false);
-      setRetryNotice("");
-      setStreamingReasoning("");
-      setStreamingContent("");
-      setStreamingTools([]);
+      if (convId) finishRun(convId, failure);
     }
   }
 
@@ -617,12 +760,9 @@ export default function App() {
     setEditingMessageId(null);
     setEditingMessageText("");
     setErrorBanner(null);
-    setIsStreaming(true);
-    setRetryNotice("");
-    setStreamingReasoning("");
-    setStreamingContent("");
-    setStreamingTools([]);
+    setRuns((prev) => startRun(prev, convId, modeOfConversation(activeConversation)));
 
+    let failure: { error: string } | undefined;
     try {
       const updatedConv = await BackendAPI.editAndResendMessage(
         convId,
@@ -638,14 +778,9 @@ export default function App() {
           c.id === convId ? { ...c, messages: previousMessages } : c
         )
       );
-      setErrorBanner(String(err));
+      failure = { error: String(err) };
     } finally {
-      bumpFileTree();
-      setIsStreaming(false);
-      setRetryNotice("");
-      setStreamingReasoning("");
-      setStreamingContent("");
-      setStreamingTools([]);
+      finishRun(convId, failure);
     }
   }
 
@@ -660,14 +795,16 @@ export default function App() {
     }
   }
 
+  /** 보고 있는 대화의 답변 생성만 멈춘다 (다른 대화는 계속된다). */
   async function handleStopGeneration() {
-    await BackendAPI.cancelGeneration();
+    if (shownConvId) await BackendAPI.cancelGeneration(shownConvId);
   }
 
   async function handleToolApproval(
     messageId: string,
     toolId: string,
-    approve: boolean
+    approve: boolean,
+    always = false
   ) {
     if (!activeConversation || isStreaming) return;
     const convId = activeConversation.id;
@@ -702,39 +839,37 @@ export default function App() {
     );
 
     setErrorBanner(null);
-    setIsStreaming(true);
-    setRetryNotice(approve ? "승인된 작업을 실행하고 있습니다..." : "");
-    setStreamingReasoning("");
-    setStreamingContent("");
-    setStreamingTools([]);
+    setRuns((prev) =>
+      startRun(prev, convId, modeOfConversation(activeConversation), {
+        notice: approve ? "승인된 작업을 실행하고 있습니다..." : "",
+      })
+    );
 
+    let failure: { error: string } | undefined;
     try {
       const updated = await BackendAPI.resolveToolApproval(
         convId,
         messageId,
         toolId,
-        approve
+        approve,
+        always
       );
       setConversations((prev) =>
         prev.map((c) => (c.id === updated.id ? updated : c))
       );
     } catch (err: any) {
-      setErrorBanner(String(err));
-      // 도구 결과는 저장됐지만 이어가기가 실패했을 수 있으므로 저장된 상태로 다시 맞춘다.
+      failure = { error: String(err) };
+      // 도구 결과는 저장됐지만 이어가기가 실패했을 수 있으므로 이 대화만 저장된 상태로 다시 맞춘다.
       try {
         const db = await BackendAPI.getInitialState();
-        setConversations(db.conversations);
+        const saved = db.conversations.find((c) => c.id === convId);
+        if (saved) setConversations((prev) => prev.map((c) => (c.id === convId ? saved : c)));
         setSnapshots(db.snapshots);
       } catch {
         // ignore
       }
     } finally {
-      bumpFileTree();
-      setIsStreaming(false);
-      setRetryNotice("");
-      setStreamingReasoning("");
-      setStreamingContent("");
-      setStreamingTools([]);
+      finishRun(convId, failure);
     }
   }
 
@@ -791,6 +926,107 @@ export default function App() {
     navigator.clipboard.writeText(text);
     setCopiedId(id);
     setTimeout(() => setCopiedId(null), 1800);
+  }
+
+  /** 답변을 .md 또는 .docx 파일로 저장한다 (엑사원을 거치지 않고 앱이 직접 변환). */
+  async function handleSaveAnswer(msgIndex: number, format: AnswerFormat) {
+    setAnswerSaveMenu(null);
+    const messages = activeConversation?.messages ?? [];
+    const msg = messages[msgIndex];
+    if (!msg?.content.trim() || savingAnswerId) return;
+    const question = messages
+      .slice(0, msgIndex)
+      .reverse()
+      .find((m) => m.role === "user")?.content;
+    const dirKey = `exaone_answer_save_dir:${currentScopeId || "general-chat"}`;
+    try {
+      const { ANSWER_FORMATS, exportAnswer, parentDir, suggestAnswerFileName } = await import("./docs/answerExport");
+      const spec = ANSWER_FORMATS[format];
+      const baseName = suggestAnswerFileName(msg.content, question);
+      const fileName = `${baseName}.${spec.ext}`;
+
+      if (!isTauri()) {
+        // 브라우저 미리보기: 내려받기로 대신한다.
+        const bytes = await exportAnswer(msg.content, format, baseName);
+        const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: spec.mime }));
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = fileName;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        setSavedAnswer({ name: fileName, absolutePath: fileName, relativePath: null });
+        return;
+      }
+
+      let lastDir: string | null = null;
+      try {
+        lastDir = localStorage.getItem(dirKey);
+      } catch {
+        /* 저장소를 못 써도 저장은 된다 */
+      }
+      const projectRoot = currentScopeId !== "general-chat" ? activeProject?.rootPath : undefined;
+      const picked = await BackendAPI.pickSavePath(lastDir || projectRoot, fileName, spec.filter);
+      if (!picked) return;
+      setSavingAnswerId(msg.id);
+      const title = (picked.split(/[\\/]/).pop() || baseName).replace(/\.[^.]+$/, "");
+      const bytes = await exportAnswer(msg.content, format, title);
+      const projectId = currentScopeId !== "general-chat" ? activeProject?.id ?? null : null;
+      const res = await BackendAPI.saveFileToPath(projectId, picked, bytesToBase64(bytes));
+      if (res.snapshot) setSnapshots((prev) => [...prev, res.snapshot!]);
+      if (res.relativePath) bumpFileTree();
+      const dir = parentDir(res.absolutePath);
+      try {
+        if (dir) localStorage.setItem(dirKey, dir);
+      } catch {
+        /* 무시 */
+      }
+      setErrorBanner(null);
+      setSavedAnswer({
+        name: res.absolutePath.split(/[\\/]/).pop() || res.absolutePath,
+        absolutePath: res.absolutePath,
+        relativePath: res.relativePath ?? null,
+      });
+    } catch (err: any) {
+      setErrorBanner(`답변을 저장하지 못했습니다: ${err?.message || String(err)}`);
+    } finally {
+      setSavingAnswerId(null);
+    }
+  }
+
+  // 다른 프로젝트·대화로 옮기면 저장 알림을 닫는다. 그대로 두어도 15초 뒤 사라진다.
+  useEffect(() => {
+    setSavedAnswer(null);
+    setAnswerSaveMenu(null);
+  }, [currentScopeId, activeConversation?.id]);
+  useEffect(() => {
+    if (!savedAnswer) return;
+    const t = setTimeout(() => setSavedAnswer(null), 15000);
+    return () => clearTimeout(t);
+  }, [savedAnswer]);
+
+  function openSavedAnswer() {
+    if (!savedAnswer || !isTauri()) return;
+    if (savedAnswer.relativePath) {
+      openFileInArtifact(savedAnswer.relativePath);
+      return;
+    }
+    const path = savedAnswer.absolutePath;
+    const kind = docKindOf(path);
+    BackendAPI.readAbsoluteFileBase64(path)
+      .then((b64) =>
+        setActiveArtifact(
+          canvasDocFromBase64({ title: savedAnswer.name, kind, absolutePath: path }, b64, isBinaryKind(kind))
+        )
+      )
+      .catch((err) => setErrorBanner(String(err)));
+  }
+
+  function revealSavedAnswer() {
+    if (!savedAnswer || !isTauri()) return;
+    const p = savedAnswer.relativePath && activeProject
+      ? BackendAPI.revealProjectPath(activeProject.id, savedAnswer.relativePath)
+      : BackendAPI.revealSavedPath(savedAnswer.absolutePath);
+    p.catch((err) => setErrorBanner(String(err)));
   }
 
   return (
@@ -851,6 +1087,7 @@ export default function App() {
               }`}
             >
               <MessageSquare className="w-3.5 h-3.5" /> 채팅
+              <RunBadge count={runCounts.chat} />
             </button>
             <button
               onClick={() => handleSwitchMode("project")}
@@ -861,6 +1098,7 @@ export default function App() {
               }`}
             >
               <FolderOpen className="w-3.5 h-3.5" /> 프로젝트
+              <RunBadge count={runCounts.project} />
             </button>
             <button
               onClick={() => handleSwitchMode("code")}
@@ -871,6 +1109,7 @@ export default function App() {
               }`}
             >
               <Code2 className="w-3.5 h-3.5" /> 코딩
+              <RunBadge count={runCounts.code} />
             </button>
           </div>
 
@@ -918,6 +1157,15 @@ export default function App() {
                       <span className="truncate flex items-center gap-1.5">
                         <FolderOpen className="w-3.5 h-3.5 text-[#A50034] dark:text-[#FF5C8D] shrink-0" />
                         <span className="truncate">{p.name}</span>
+                        {(runningByProject[p.id] ?? 0) > 0 && (
+                          <span
+                            className="shrink-0 flex items-center gap-0.5 text-[10px] font-semibold text-[#A50034] dark:text-[#FF5C8D]"
+                            title={`진행 중인 대화 ${runningByProject[p.id]}개`}
+                          >
+                            <RefreshCw className="w-2.5 h-2.5 animate-spin" />
+                            {runningByProject[p.id]}
+                          </span>
+                        )}
                       </span>
                       <button
                         onClick={(e) => {
@@ -974,7 +1222,12 @@ export default function App() {
                 rootName={activeProject?.name ?? "프로젝트"}
                 refreshToken={fileTreeVersion}
                 activePath={activeArtifact?.filePath}
-                onOpen={openFileInArtifact}
+                onOpen={openAnyProjectFile}
+                onRunPython={(rel) => setPythonRun(rel)}
+                onOpenExternal={(rel) =>
+                  activeProject &&
+                  BackendAPI.openProjectFileExternal(activeProject.id, rel).catch((err) => setErrorBanner(String(err)))
+                }
                 onAttach={attachFile}
                 onRenamed={handleExplorerRenamed}
                 onDeleted={handleExplorerDeleted}
@@ -1007,7 +1260,25 @@ export default function App() {
                       : "text-stone-700 dark:text-stone-300 hover:bg-stone-200/60 dark:hover:bg-[#232320]"
                   }`}
                 >
-                  <span className="truncate pr-2">{c.title}</span>
+                  <span className="truncate pr-2 flex items-center gap-1.5 min-w-0">
+                    {runs[c.id] ? (
+                      <RefreshCw
+                        className="w-3 h-3 shrink-0 animate-spin text-[#A50034] dark:text-[#FF5C8D]"
+                        aria-label="답변 작성 중"
+                      />
+                    ) : waitsForApproval(c) ? (
+                      <span
+                        className="w-1.5 h-1.5 rounded-full shrink-0 bg-amber-500"
+                        title="승인을 기다리는 작업이 있습니다"
+                      />
+                    ) : unseenDone[c.id] ? (
+                      <span
+                        className={`w-1.5 h-1.5 rounded-full shrink-0 ${runErrors[c.id] ? "bg-red-500" : "bg-emerald-500"}`}
+                        title={runErrors[c.id] ? "오류로 멈춤" : "새 답변"}
+                      />
+                    ) : null}
+                    <span className="truncate">{c.title}</span>
+                  </span>
                   <button
                     onClick={async (e) => {
                       e.stopPropagation();
@@ -1029,7 +1300,21 @@ export default function App() {
         </div>
 
         {/* Bottom Settings Button */}
-        <div className="p-3 border-t border-[#E2E0D8] dark:border-[#2C2C29]">
+        <div className="p-3 border-t border-[#E2E0D8] dark:border-[#2C2C29] space-y-1.5">
+          <button
+            onClick={() => setShowSkills(true)}
+            className="w-full py-2 px-3 rounded-xl bg-white dark:bg-[#242421] hover:bg-stone-100 dark:hover:bg-[#2E2E2A] border border-stone-300/80 dark:border-[#383834] text-xs font-medium text-stone-700 dark:text-stone-200 flex items-center gap-1.5 cursor-pointer transition"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-stone-500 dark:text-stone-400" />
+            Skill
+          </button>
+          <button
+            onClick={() => setShowMcp(true)}
+            className="w-full py-2 px-3 rounded-xl bg-white dark:bg-[#242421] hover:bg-stone-100 dark:hover:bg-[#2E2E2A] border border-stone-300/80 dark:border-[#383834] text-xs font-medium text-stone-700 dark:text-stone-200 flex items-center gap-1.5 cursor-pointer transition"
+          >
+            <Plug className="w-3.5 h-3.5 text-stone-500 dark:text-stone-400" />
+            MCP 서버
+          </button>
           <button
             onClick={() => setShowSettingsModal(true)}
             className="w-full py-2 px-3 rounded-xl bg-white dark:bg-[#242421] hover:bg-stone-100 dark:hover:bg-[#2E2E2A] border border-stone-300/80 dark:border-[#383834] text-xs font-medium text-stone-700 dark:text-stone-200 flex items-center justify-between cursor-pointer transition"
@@ -1107,6 +1392,53 @@ export default function App() {
             </button>
           </div>
         </header>
+
+        {savedAnswer && (
+          <div className="bg-emerald-50 dark:bg-emerald-950/50 border-b border-emerald-200 dark:border-emerald-900 px-6 py-2 text-xs text-emerald-800 dark:text-emerald-200 flex items-center gap-3">
+            <Check className="w-3.5 h-3.5 shrink-0" />
+            <span className="min-w-0 truncate" title={savedAnswer.absolutePath}>
+              답변을 저장했습니다: <span className="font-semibold">{savedAnswer.name}</span>
+            </span>
+            {isTauri() && (
+              <>
+                <button
+                  onClick={openSavedAnswer}
+                  className="shrink-0 font-semibold hover:underline cursor-pointer"
+                >
+                  캔버스에서 열기
+                </button>
+                <button
+                  onClick={revealSavedAnswer}
+                  className="shrink-0 font-semibold hover:underline cursor-pointer"
+                >
+                  폴더에서 보기
+                </button>
+              </>
+            )}
+            <button onClick={() => setSavedAnswer(null)} className="ml-auto shrink-0 cursor-pointer" aria-label="닫기">
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
+        {shownConvId && runErrors[shownConvId] && !isStreaming && (
+          <div className="bg-red-50 dark:bg-red-950/60 border-b border-red-200 dark:border-red-900 px-6 py-2 text-xs text-red-700 dark:text-red-300 flex items-center justify-between gap-3">
+            <span className="min-w-0 break-words">{runErrors[shownConvId]}</span>
+            <button
+              onClick={() =>
+                setRunErrors((prev) => {
+                  const next = { ...prev };
+                  delete next[shownConvId];
+                  return next;
+                })
+              }
+              className="shrink-0 cursor-pointer"
+              aria-label="닫기"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
 
         {errorBanner && (
           <div className="bg-red-50 dark:bg-red-950/60 border-b border-red-200 dark:border-red-900 px-6 py-2 text-xs text-red-700 dark:text-red-300 flex items-center justify-between">
@@ -1452,8 +1784,10 @@ export default function App() {
                                   onOpenFile={openFileInArtifact}
                                   onUndo={handleUndoSnapshot}
                                   onViewDiff={(id) => openDiffView(msg.toolRecords, id)}
-                                  onApprove={(approve) =>
-                                    handleToolApproval(msg.id, tr.id, approve)
+                                  onRunPython={(rel) => setPythonRun(rel)}
+                                  onOpenProduced={openAnyProjectFile}
+                                  onApprove={(approve, always) =>
+                                    handleToolApproval(msg.id, tr.id, approve, always)
                                   }
                                   approvalDisabled={isStreaming}
                                 />
@@ -1504,9 +1838,15 @@ export default function App() {
                             </div>
                           )}
 
-                          {/* Assistant Action Bar (Copy, Regenerate) */}
+                          {/* Assistant Action Bar (Copy, Save, Regenerate) */}
                           {!isStreaming && (
-                            <div className="pt-1 flex items-center gap-2 opacity-0 group-hover:opacity-100 transition">
+                            <div
+                              className={`pt-1 flex items-center gap-2 transition ${
+                                answerSaveMenu === msg.id || savingAnswerId === msg.id
+                                  ? "opacity-100"
+                                  : "opacity-0 group-hover:opacity-100 focus-within:opacity-100"
+                              }`}
+                            >
                               <button
                                 onClick={() =>
                                   handleCopyText(msg.id, msg.content)
@@ -1520,6 +1860,67 @@ export default function App() {
                                 )}
                                 <span>복사</span>
                               </button>
+                              {msg.content.trim() && (
+                                <div className="relative">
+                                  <button
+                                    onClick={(e) => {
+                                      if (answerSaveMenu === msg.id) {
+                                        setAnswerSaveMenu(null);
+                                        return;
+                                      }
+                                      const btn = e.currentTarget.getBoundingClientRect();
+                                      const scroller = e.currentTarget.closest(".overflow-y-auto");
+                                      const bottom = scroller ? scroller.getBoundingClientRect().bottom : window.innerHeight;
+                                      setAnswerSaveMenuUp(bottom - btn.bottom < 120);
+                                      setAnswerSaveMenu(msg.id);
+                                    }}
+                                    disabled={savingAnswerId !== null}
+                                    aria-haspopup="menu"
+                                    aria-expanded={answerSaveMenu === msg.id}
+                                    title="이 답변을 파일로 저장"
+                                    className="text-xs text-stone-500 dark:text-stone-400 hover:text-stone-900 dark:hover:text-stone-100 disabled:opacity-50 flex items-center gap-1 px-2 py-1 rounded-lg hover:bg-stone-100 dark:hover:bg-[#32322F] cursor-pointer"
+                                  >
+                                    {savingAnswerId === msg.id ? (
+                                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                    ) : (
+                                      <Download className="w-3.5 h-3.5" />
+                                    )}
+                                    <span>{savingAnswerId === msg.id ? "저장 중..." : "저장"}</span>
+                                    <ChevronDown className="w-3 h-3" />
+                                  </button>
+                                  {answerSaveMenu === msg.id && (
+                                    <>
+                                      <div
+                                        className="fixed inset-0 z-30"
+                                        onClick={() => setAnswerSaveMenu(null)}
+                                      />
+                                      <div
+                                        role="menu"
+                                        onKeyDown={(e) => {
+                                          if (e.key === "Escape") setAnswerSaveMenu(null);
+                                        }}
+                                        className={`absolute left-0 z-40 w-52 ${answerSaveMenuUp ? "bottom-full mb-1" : "top-full mt-1"} py-1 rounded-xl bg-white dark:bg-[#2A2A27] border border-stone-200 dark:border-[#3A3A36] shadow-lg`}
+                                      >
+                                        {([
+                                          ["markdown", "Markdown (.md)", "서식 기호 그대로 텍스트로"],
+                                          ["docx", "Word 문서 (.docx)", "제목·표·목록을 Word 서식으로"],
+                                        ] as const).map(([fmt, label, hint], i) => (
+                                          <button
+                                            key={fmt}
+                                            role="menuitem"
+                                            autoFocus={i === 0}
+                                            onClick={() => handleSaveAnswer(idx, fmt)}
+                                            className="w-full text-left px-3 py-1.5 hover:bg-stone-100 dark:hover:bg-[#34342F] focus:bg-stone-100 dark:focus:bg-[#34342F] focus:outline-none cursor-pointer"
+                                          >
+                                            <div className="text-xs font-semibold text-stone-800 dark:text-stone-100">{label}</div>
+                                            <div className="text-[11px] text-stone-500 dark:text-stone-400">{hint}</div>
+                                          </button>
+                                        ))}
+                                      </div>
+                                    </>
+                                  )}
+                                </div>
+                              )}
                               <button
                                 onClick={() =>
                                   handleRegenerateFromAssistantIndex(idx)
@@ -1536,6 +1937,15 @@ export default function App() {
                     </div>
                   );
                 })}
+
+                {/* 답변을 기다리는 질문 (끝나면 대화 기록으로 옮겨진다) */}
+                {activeRun?.question && (
+                  <div className="flex flex-col items-end">
+                    <div className="max-w-2xl bg-[#EFECE6] dark:bg-[#2D2D2A] text-stone-900 dark:text-stone-100 rounded-2xl px-4 py-3 text-sm whitespace-pre-wrap leading-relaxed">
+                      {activeRun.question}
+                    </div>
+                  </div>
+                )}
 
                 {/* Active Streaming Message */}
                 {isStreaming && (
@@ -1568,6 +1978,7 @@ export default function App() {
                         onOpenFile={openFileInArtifact}
                         onUndo={handleUndoSnapshot}
                         onViewDiff={(id) => openDiffView(streamingTools, id)}
+                        onOpenProduced={openAnyProjectFile}
                         onApprove={() => {}}
                         approvalDisabled
                       />
@@ -1658,9 +2069,11 @@ export default function App() {
                   onClick={() => mention.sync()}
                   onBlur={() => mention.close()}
                   placeholder={
-                    explorerApi
-                      ? "메시지를 입력하세요... (@로 프로젝트 파일 첨부)"
-                      : "메시지를 입력하세요..."
+                    isStreaming
+                      ? "이 대화는 답변을 작성하고 있습니다. 다른 작업은 [새 채팅]이나 다른 대화에서 동시에 요청할 수 있습니다."
+                      : explorerApi
+                        ? "메시지를 입력하세요... (@로 프로젝트 파일 첨부)"
+                        : "메시지를 입력하세요..."
                   }
                   className="w-full text-sm text-stone-800 dark:text-stone-100 bg-transparent placeholder:text-stone-400 dark:placeholder:text-stone-500 resize-none focus:outline-none leading-relaxed"
                 />
@@ -1730,6 +2143,19 @@ export default function App() {
               setAttachedFiles((prev) => Array.from(new Set([...prev, abs])))
             }
             onError={(msg) => setErrorBanner(msg)}
+            onRunPython={
+              activeArtifact.filePath && isPythonScript(activeArtifact.filePath) && activeProject && currentScopeId !== "general-chat"
+                ? () => setPythonRun(activeArtifact.filePath!)
+                : undefined
+            }
+            onOpenExternal={
+              activeArtifact.filePath && activeProject && currentScopeId !== "general-chat"
+                ? () =>
+                    BackendAPI.openProjectFileExternal(activeProject.id, activeArtifact.filePath!).catch((err) =>
+                      setErrorBanner(String(err))
+                    )
+                : undefined
+            }
             historyCount={activeFileHistory.length}
             onShowHistory={() =>
               activeFileHistory.length > 0 &&
@@ -1742,6 +2168,41 @@ export default function App() {
           />
           </React.Suspense>
         </aside>
+      )}
+
+      {pythonRun && activeProject && (
+        <React.Suspense fallback={null}>
+          <PythonRunDialog
+            projectId={activeProject.id}
+            projectRoot={activeProject.rootPath}
+            relativePath={pythonRun}
+            onClose={() => setPythonRun(null)}
+            onOpenFile={(rel) => {
+              if (!opensInExternalApp(rel)) setPythonRun(null);
+              openAnyProjectFile(rel);
+            }}
+            onReveal={(rel) =>
+              BackendAPI.revealProjectPath(activeProject.id, rel).catch((err) => setErrorBanner(String(err)))
+            }
+            onViewScript={(rel) => {
+              setPythonRun(null);
+              openFileInArtifact(rel);
+            }}
+            onFilesChanged={bumpFileTree}
+            onAskFix={(prompt) => {
+              // 바로 보내지 않고 입력창에 넣어, 사용자가 확인·보완한 뒤 보내게 한다.
+              setPythonRun(null);
+              setShowProjectOverview(false);
+              setInputPrompt(prompt);
+              requestAnimationFrame(() => {
+                const el = composerRef.current;
+                if (!el) return;
+                el.focus();
+                el.setSelectionRange(el.value.length, el.value.length);
+              });
+            }}
+          />
+        </React.Suspense>
       )}
 
       {diffView && (
@@ -1757,13 +2218,23 @@ export default function App() {
         </React.Suspense>
       )}
 
+      {showSkills && (
+        <SkillsDialog
+          projectId={activeMode !== "chat" ? activeProject?.id : undefined}
+          projectName={activeMode !== "chat" ? activeProject?.name : undefined}
+          onClose={() => setShowSkills(false)}
+        />
+      )}
+
+      {showMcp && <McpDialog onClose={() => setShowMcp(false)} />}
+
       {/* Modal 1: API & Model Settings */}
       {showSettingsModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-white dark:bg-[#262624] border border-stone-200 dark:border-[#3A3A36] rounded-2xl w-full max-w-md p-6 shadow-xl space-y-4">
+          <div className="bg-white dark:bg-[#262624] border border-stone-200 dark:border-[#3A3A36] rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-6 shadow-xl space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-bold text-stone-900 dark:text-stone-100">
-                API 설정
+                API 및 모델 설정
               </h3>
               <button onClick={closeSettingsModal}>
                 <X className="w-4 h-4 text-stone-400" />
@@ -1837,6 +2308,11 @@ export default function App() {
                   className="w-full bg-white dark:bg-[#1E1E1C] border border-stone-300 dark:border-[#3A3A36] rounded-xl px-3 py-2 font-mono text-stone-900 dark:text-stone-100 focus:outline-none focus:border-[#A50034]"
                 />
               </div>
+            </div>
+
+            <div className="pt-3 border-t border-stone-200 dark:border-[#34342F] text-xs space-y-2">
+              <h4 className="font-bold text-stone-900 dark:text-stone-100">실행 환경</h4>
+              <RuntimePanel />
             </div>
 
             {settingsError && (
@@ -2018,11 +2494,16 @@ function approvalPreview(record: ToolExecutionRecord): string {
       return `> ${str("command")}`;
     case "delete_path":
       return `삭제: ${str("relative_path")}`;
+    case "run_python":
+      if (str("skill"))
+        return `Skill '${str("skill")}'의 Python 스크립트 실행: ${str("relative_path")}\n(실행 위치: 프로젝트 폴더, 최대 3분. 믿을 수 있는 Skill인지 확인하세요.)`;
+      return `Python 스크립트 실행: ${str("relative_path")}\n(실행 위치: 프로젝트 폴더, 최대 3분. 실행 전에 파일 이름을 눌러 내용을 확인할 수 있습니다.)`;
     case "write_file":
       return `파일: ${str("relative_path")}\n\n${str("content")}`;
     case "modify_file":
       return `파일: ${str("relative_path")}\n\n- 바꿀 원문:\n${str("target")}\n\n+ 새 내용:\n${str("replacement")}`;
     default:
+      if (record.toolName.startsWith("mcp__")) return "보낼 값:\n" + JSON.stringify(args, null, 2);
       return JSON.stringify(args, null, 2);
   }
 }
@@ -2032,6 +2513,8 @@ function ToolCallBox({
   onOpenFile,
   onUndo,
   onViewDiff,
+  onRunPython,
+  onOpenProduced,
   onApprove,
   approvalDisabled = false,
 }: {
@@ -2039,11 +2522,26 @@ function ToolCallBox({
   onOpenFile: (rel: string) => void;
   onUndo: (snapId: string) => void;
   onViewDiff?: (snapId: string) => void;
-  onApprove: (approve: boolean) => void;
+  /** .py 스크립트를 실행 창으로 */
+  onRunPython?: (rel: string) => void;
+  /** run_python이 만든 파일 열기 */
+  onOpenProduced?: (rel: string) => void;
+  /** always: MCP 도구를 앞으로 승인 없이 실행 */
+  onApprove: (approve: boolean, always?: boolean) => void;
   approvalDisabled?: boolean;
 }) {
+  const isMcp = record.toolName.startsWith("mcp__");
   const isPending = record.status === "pending_approval";
   const isRunning = record.status === "running";
+  // AI가 작성했거나 실행한 Python 스크립트는 카드에서 바로 (다시) 실행할 수 있다.
+  const runnableScript =
+    onRunPython &&
+    record.filePath &&
+    isPythonScript(record.filePath) &&
+    ((record.toolName === "run_python" && (record.status === "completed" || record.status === "error")) ||
+      ((record.toolName === "write_file" || record.toolName === "modify_file") && record.status === "completed"))
+      ? record.filePath
+      : null;
 
   return (
     <div className="rounded-xl border border-stone-200 dark:border-[#383834] bg-[#FAF9F5] dark:bg-[#1E1E1C] px-3 py-2 text-xs space-y-1">
@@ -2062,6 +2560,15 @@ function ToolCallBox({
           )}
         </div>
         <div className="flex items-center gap-2">
+          {runnableScript && (
+            <button
+              onClick={() => onRunPython!(runnableScript)}
+              title="이 스크립트를 앱 안에서 실행해 결과 파일을 만듭니다"
+              className="px-2 py-0.5 rounded bg-[#A50034] hover:bg-[#8A002B] text-white font-medium flex items-center gap-1 cursor-pointer"
+            >
+              <Play className="w-3 h-3" /> {record.toolName === "run_python" ? "다시 실행" : "실행"}
+            </button>
+          )}
           {record.snapshotId && onViewDiff && (
             <button
               onClick={() => onViewDiff(record.snapshotId!)}
@@ -2109,6 +2616,16 @@ function ToolCallBox({
             >
               승인
             </button>
+            {isMcp && (
+              <button
+                onClick={() => onApprove(true, true)}
+                disabled={approvalDisabled}
+                title="이 도구는 앞으로 묻지 않고 실행합니다 (MCP 서버 설정에서 되돌릴 수 있음)"
+                className="px-2.5 py-1 rounded bg-emerald-600/15 text-emerald-800 dark:text-emerald-300 font-semibold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                항상 허용
+              </button>
+            )}
             <button
               onClick={() => onApprove(false)}
               disabled={approvalDisabled}
@@ -2119,8 +2636,24 @@ function ToolCallBox({
           </div>
         </div>
       ) : (
-        <div className="text-stone-500 dark:text-stone-400 font-mono truncate">
+        <div className="text-stone-500 dark:text-stone-400 font-mono truncate" title={record.output}>
           {record.output}
+        </div>
+      )}
+
+      {record.producedFiles && record.producedFiles.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+          <span className="text-stone-500 dark:text-stone-400">만든 파일:</span>
+          {record.producedFiles.map((f) => (
+            <button
+              key={f}
+              onClick={() => (onOpenProduced ?? onOpenFile)(f)}
+              title={`${f} 열기`}
+              className="px-2 py-0.5 rounded-md border border-[#A50034]/30 dark:border-[#FF5C8D]/30 bg-white dark:bg-[#262624] hover:bg-[#A50034]/5 dark:hover:bg-[#FF5C8D]/10 text-[#A50034] dark:text-[#FF5C8D] font-mono font-semibold cursor-pointer"
+            >
+              {f}
+            </button>
+          ))}
         </div>
       )}
     </div>
