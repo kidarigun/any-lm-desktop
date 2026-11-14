@@ -227,3 +227,88 @@
   height: 0;
   pointer-events: none;
 }
+
+/* ---------------------------------------------------------------------------
+ * 스크롤바: 얇은 오버레이 스타일. 스크롤하는 동안만 나타났다가 부드럽게 사라진다.
+ * (WebView2/Chromium의 ::-webkit-scrollbar 사용. scrollbar-width/scrollbar-color를
+ *  지정하면 Chromium이 아래 스타일을 무시하므로 쓰지 않는다.)
+ * 스크롤 중 표시는 src/ui/scrollbars.ts가 data-scrolling 속성으로 알린다.
+ * ------------------------------------------------------------------------- */
+
+/* 썸 색을 애니메이션할 수 있게 등록한다. 상속하지 않아 바깥 영역을 스크롤해도 안쪽 스크롤바는 그대로 숨는다. */
+@property --sb-thumb {
+  syntax: "<color>";
+  inherits: false;
+  initial-value: transparent;
+}
+
+:root {
+  --sb-color: rgb(87 83 78 / 0.38);
+  --sb-color-hover: rgb(87 83 78 / 0.55);
+  --sb-color-active: rgb(87 83 78 / 0.7);
+}
+
+:root.dark {
+  --sb-color: rgb(231 229 228 / 0.28);
+  --sb-color-hover: rgb(231 229 228 / 0.45);
+  --sb-color-active: rgb(231 229 228 / 0.6);
+}
+
+@layer base {
+  /* 사라질 때는 천천히 */
+  * {
+    transition: --sb-thumb 0.6s ease 0.1s;
+  }
+
+  /* 나타날 때는 빠르게 */
+  [data-scrolling] {
+    --sb-thumb: var(--sb-color);
+    transition: --sb-thumb 0.12s ease;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+  background: transparent;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+/* 10px 영역 안에 투명 테두리를 두어 실제로 보이는 막대는 4px */
+::-webkit-scrollbar-thumb {
+  --sb-thumb: inherit;
+  background-color: var(--sb-thumb);
+  background-clip: padding-box;
+  border: 3px solid transparent;
+  border-radius: 999px;
+  min-height: 36px;
+  min-width: 36px;
+}
+
+/* 마우스를 올리거나 끌 때는 조금 두꺼워지고 항상 보인다 */
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--sb-color-hover);
+  border-width: 2px;
+}
+
+::-webkit-scrollbar-thumb:active {
+  background-color: var(--sb-color-active);
+  border-width: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * ,
+  [data-scrolling] {
+    transition-duration: 0s;
+  }
+}
