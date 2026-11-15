@@ -23,3 +23,6 @@ Thumbs.db
 # Test harness output (real API transcripts)
 harness/runs/
 harness/scenarios*.json
+
+# Files gathered for a release (installer + latest.json)
+release/

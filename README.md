@@ -30,6 +30,8 @@ Skill과 MCP로 기능을 넓히는 Windows 데스크톱 앱입니다. (Tauri v2
 설치 파일은 [릴리스 페이지](https://github.com/kidarigun/k-exaone-desktop/releases/latest)에서 내려받습니다.
 서명되지 않은 설치 파일이라 Windows가 "PC 보호" 경고를 보여 줄 수 있습니다. **추가 정보 → 실행**을 누르면 설치됩니다.
 
+0.3.0부터는 새 버전이 나오면 앱이 알려 주고, **[업데이트]**를 누르면 내려받아 설치합니다. (0.2.0 이하를 쓰고 있다면 한 번은 직접 설치해야 합니다.)
+
 소스에서 직접 빌드하려면 아래 "개발"을 보세요.
 
 ## 개발
@@ -43,6 +45,26 @@ npm test               # 프런트엔드 테스트
 cd src-tauri && cargo test --lib   # Rust 테스트
 npm run tauri build    # 설치 파일(NSIS) 만들기
 ```
+
+`npm run tauri build`는 자동 업데이트용 서명까지 만들기 때문에 서명 키가 필요합니다.
+키 없이 설치 파일만 만들려면 서명을 끄고 빌드하세요.
+
+```bash
+npm run tauri build -- --config "{\"bundle\":{\"createUpdaterArtifacts\":false}}"
+```
+
+### 릴리스 (관리자용)
+
+자동 업데이트는 깃허브 릴리스에 올린 `latest.json`을 읽어 동작합니다. 설치 파일은 서명 키로 서명되어야 앱이 받아들입니다.
+
+```bash
+TAURI_SIGNING_PRIVATE_KEY="$HOME/.tauri/k-exaone-desktop.key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" npm run tauri build
+python scripts/make_latest_json.py --notes "바뀐 점 요약"
+gh release create v<버전> release/K-EXAONE-Desktop_<버전>_x64-setup.exe release/latest.json --title "<버전>" --notes-file <노트 파일>
+```
+
+- 서명 개인 키는 저장소에 넣지 않습니다. 잃어버리면 이미 설치된 앱에 업데이트를 보낼 수 없으니 따로 보관하세요.
+- 공개 키는 `src-tauri/tauri.conf.json`의 `plugins.updater.pubkey`에 있습니다.
 
 ### 실제 API로 시험하기
 
@@ -65,7 +87,7 @@ python ../harness/report.py ../harness/runs/내이름    # 결과 요약
 - 대화·설정은 `%APPDATA%\io.github.kidarigun.kexaone-desktop`, 실행 환경은 `%LOCALAPPDATA%\…\runtimes`에 저장됩니다.
 - API 키, MCP 서버의 비밀 값, OAuth 토큰은 설정 파일이 아니라 **Windows 자격 증명 관리자**에 저장됩니다.
 - 엑사원이 파일을 지우거나 명령·스크립트를 실행하거나 MCP 도구를 쓸 때는 기본적으로 사용자 승인을 받습니다.
-- 앱이 직접 접속하는 곳: 설정한 K-EXAONE API 주소, 사용자가 추가한 MCP 서버, 찾아보기 카탈로그, 실행 환경 공식 배포처(github.com/astral-sh/uv, nodejs.org, PyPI).
+- 앱이 직접 접속하는 곳: 설정한 K-EXAONE API 주소, 사용자가 추가한 MCP 서버, 찾아보기 카탈로그, 실행 환경 공식 배포처(github.com/astral-sh/uv, nodejs.org, PyPI), 새 버전 확인(github.com의 이 저장소 릴리스 — 설정에서 끌 수 있음).
 
 ## 라이선스
 
