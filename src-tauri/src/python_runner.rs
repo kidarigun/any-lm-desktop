@@ -358,9 +358,9 @@ pub async fn run_script_at(root: &Path, script: &Path, display: &str, timeout: D
         .env("PYTHONDONTWRITEBYTECODE", "1")
         // matplotlib 등이 창을 띄우지 않고 파일로만 저장하게 한다.
         .env("MPLBACKEND", "Agg");
-    // 앱 전용 Python이면 한글 글꼴(맑은 고딕) 설정을 쓴다.
-    if Path::new(&python.path).starts_with(crate::runtime::pyenv_dir()) {
-        c.env("MPLCONFIGDIR", crate::runtime::mpl_dir());
+    // 어떤 Python으로 실행하든 차트의 한글이 깨지지 않게 한글 글꼴(맑은 고딕) 설정을 쓴다.
+    if let Some(dir) = crate::runtime::ensure_mpl_dir() {
+        c.env("MPLCONFIGDIR", dir);
     }
     let started = Instant::now();
     let child = c.spawn().map_err(|e| format!("Python을 실행할 수 없습니다: {}", e))?;
@@ -403,6 +403,20 @@ const SYNTAX_CHECK_CODE: &str = "import ast,sys\nsrc=open(sys.argv[1],encoding='
 
 /// .py 파일의 문법만 검사한다 (실행하지 않음). 문법 오류가 있으면 설명을 돌려준다.
 /// Python이 없거나 검사 자체가 실패하면 None (쓰기 결과를 막지 않는다).
+/// `python tests/test_calc.py`처럼 스크립트 하나만 실행하는 명령이면 그 스크립트 경로를 돌려준다.
+/// 모델이 run_python 대신 run_command를 쓴 경우에도 앱의 Python(시스템에 Python이 없어도 동작)으로 실행하기 위함이다.
+pub fn simple_script_command(command: &str) -> Option<String> {
+    let mut parts = command.split_whitespace();
+    let program = parts.next()?.to_lowercase();
+    let script = parts.next()?;
+    if parts.next().is_some() {
+        return None; // 인자·파이프가 붙은 명령은 그대로 셸에서 실행한다
+    }
+    let is_python = matches!(program.as_str(), "python" | "python3" | "py" | "python.exe" | "py.exe");
+    let script = script.trim_matches(|c| c == '"' || c == '\'');
+    (is_python && script.to_lowercase().ends_with(".py")).then(|| script.to_string())
+}
+
 pub async fn check_syntax(root: &Path, relative_path: &str) -> Option<String> {
     let script = fs_ops::resolve_safe_path(root, relative_path).ok()?;
     if !is_python_script(&script) || !script.is_file() {

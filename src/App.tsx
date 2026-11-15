@@ -70,6 +70,7 @@ import {
   Conversation,
   FileSnapshot,
   Project,
+  RateInfo,
   ToolExecutionRecord,
 } from "./types";
 
@@ -152,6 +153,36 @@ function RunBadge({ count }: { count: number }) {
   );
 }
 
+/** 오늘 남은 API 호출 수. 도구를 한 번 쓸 때마다 호출이 한 번씩 들기 때문에 입력란 옆에 늘 보여 준다. */
+function RateBadge({ info }: { info: RateInfo | null }) {
+  // 받은 지 하루가 넘은 값은 이미 바뀌었을 테니 보이지 않는다.
+  if (!info || info.dayRemaining == null) return null;
+  if (Date.now() - new Date(info.updatedAt).getTime() > 24 * 60 * 60 * 1000) return null;
+  const left = info.dayRemaining;
+  const tone =
+    left <= 5
+      ? "text-red-600 dark:text-red-400"
+      : left <= 20
+        ? "text-amber-600 dark:text-amber-400"
+        : "text-stone-400 dark:text-stone-500";
+  return (
+    <span
+      className={`text-[11px] tabular-nums select-none ${tone}`}
+      title="K-EXAONE API가 알려 준 오늘 남은 호출 수입니다. 질문 한 번에 한 번, 파일 읽기·쓰기 같은 도구를 쓸 때마다 한 번씩 더 듭니다."
+    >
+      오늘 남은 호출 {left}
+      {info.dayLimit != null ? `/${info.dayLimit}` : ""}
+    </span>
+  );
+}
+
+/** K-EXAONE 2.5가 받는 추론 강도 (공식 문서: low / high / max, 서버 기본값은 max) */
+const REASONING_EFFORTS: { value: AppSettings["reasoningEffort"]; label: string; hint: string }[] = [
+  { value: "low", label: "낮음", hint: "추론을 짧게 합니다. 간단한 질문에 빠르게 답할 때 고르세요." },
+  { value: "high", label: "높음", hint: "더 깊게 추론합니다. 보고서·코드·여러 단계 작업에 알맞습니다." },
+  { value: "max", label: "최대", hint: "가장 길게 추론합니다. 정확도가 중요한 어려운 문제용이며 가장 느립니다." },
+];
+
 export default function App() {
   const [isDark, setIsDark] = useState<boolean>(() => {
     return localStorage.getItem("exaone_theme") === "dark";
@@ -224,6 +255,22 @@ export default function App() {
   const [fileTreeVersion, setFileTreeVersion] = useState(0);
   const bumpFileTree = () => setFileTreeVersion((v) => v + 1);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // 입력란 높이를 내용에 맞춘다: 기본 3줄, 늘어나면 화면 높이의 40%까지 커지고 그 뒤로는 스크롤.
+  const fitComposer = React.useCallback(() => {
+    const el = composerRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const max = Math.round(window.innerHeight * 0.4);
+    const next = Math.min(el.scrollHeight, max);
+    el.style.height = `${next}px`;
+    el.style.overflowY = el.scrollHeight > max ? "auto" : "hidden";
+  }, []);
+  React.useLayoutEffect(fitComposer, [inputPrompt, fitComposer]);
+  useEffect(() => {
+    window.addEventListener("resize", fitComposer);
+    return () => window.removeEventListener("resize", fitComposer);
+  }, [fitComposer]);
   const [activeArtifact, setActiveArtifact] = useState<CanvasDoc | null>(
     null
   );
@@ -441,6 +488,14 @@ export default function App() {
     })();
   }, []);
 
+  // 서버가 알려 준 호출 한도 (오늘 남은 호출 수 표시용)
+  const [rateInfo, setRateInfo] = useState<RateInfo | null>(null);
+  useEffect(() => {
+    BackendAPI.getRateInfo()
+      .then((info) => info && setRateInfo(info))
+      .catch(() => {});
+  }, []);
+
   // Safe single event listener registration
   useEffect(() => {
     let cancelled = false;
@@ -448,6 +503,7 @@ export default function App() {
 
     BackendAPI.onExaoneStream((payload) => {
       if (cancelled) return;
+      if (payload.rateInfo) setRateInfo(payload.rateInfo);
       setRuns((prev) => applyChunk(prev, payload));
       if (payload.toolRecord) {
         const r = payload.toolRecord;
@@ -539,6 +595,18 @@ export default function App() {
       await BackendAPI.saveSettings(nextSettings);
     } catch {
       // ignore
+    }
+  }
+
+  /** 입력란에서 고른 추론 강도를 저장한다. 다음에 보내는 메시지부터 적용된다. */
+  async function changeReasoningEffort(effort: AppSettings["reasoningEffort"]) {
+    if (effort === settings.reasoningEffort) return;
+    setSettings((prev) => ({ ...prev, reasoningEffort: effort }));
+    try {
+      // 키는 보내지 않는다 (비어 있으면 저장된 키를 그대로 둔다).
+      await BackendAPI.saveSettings({ ...settings, apiKey: "", reasoningEffort: effort });
+    } catch (err) {
+      setErrorBanner(String(err));
     }
   }
 
@@ -2091,8 +2159,37 @@ export default function App() {
                       <Paperclip className="w-3.5 h-3.5" />
                       <span>파일 첨부</span>
                     </button>
+                    <div
+                      role="radiogroup"
+                      aria-label="추론 강도"
+                      className="flex items-center gap-0.5 pl-1.5 ml-0.5 border-l border-stone-200 dark:border-[#383834]"
+                    >
+                      <span className="px-1 text-[11px] text-stone-400 dark:text-stone-500 select-none">추론</span>
+                      {REASONING_EFFORTS.map((opt) => {
+                        const selected = settings.reasoningEffort === opt.value;
+                        return (
+                          <button
+                            key={opt.value}
+                            type="button"
+                            role="radio"
+                            aria-checked={selected}
+                            title={opt.hint}
+                            onClick={() => changeReasoningEffort(opt.value)}
+                            className={`px-2 py-1 rounded-md text-xs font-medium cursor-pointer transition ${
+                              selected
+                                ? "bg-[#A50034]/10 text-[#A50034] dark:bg-[#FF5C8D]/15 dark:text-[#FF5C8D]"
+                                : "text-stone-500 dark:text-stone-400 hover:bg-stone-100 dark:hover:bg-[#32322F]"
+                            }`}
+                          >
+                            {opt.label}
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
 
+                  <div className="flex items-center gap-2.5">
+                    <RateBadge info={rateInfo} />
                   {isStreaming ? (
                     <button
                       onClick={handleStopGeneration}
@@ -2109,6 +2206,7 @@ export default function App() {
                       <Send className="w-3.5 h-3.5" /> 전송
                     </button>
                   )}
+                  </div>
                 </div>
               </div>
             </div>
@@ -2500,6 +2598,9 @@ function approvalPreview(record: ToolExecutionRecord): string {
     case "run_python":
       if (str("skill"))
         return `Skill '${str("skill")}'의 Python 스크립트 실행: ${str("relative_path")}\n(실행 위치: 프로젝트 폴더, 최대 3분. 믿을 수 있는 Skill인지 확인하세요.)`;
+      // 스크립트 내용을 함께 받은 경우(방금 저장됨)에는 실행할 내용을 바로 보여 준다.
+      if (str("code"))
+        return `Python 스크립트 실행: ${str("relative_path")}\n(실행 위치: 프로젝트 폴더, 최대 3분. 아래 내용으로 방금 저장했습니다.)\n\n${str("code")}`;
       return `Python 스크립트 실행: ${str("relative_path")}\n(실행 위치: 프로젝트 폴더, 최대 3분. 실행 전에 파일 이름을 눌러 내용을 확인할 수 있습니다.)`;
     case "write_file":
       return `파일: ${str("relative_path")}\n\n${str("content")}`;

@@ -71,6 +71,9 @@ pub struct ChatMessage {
     /// 라운드별 어시스턴트 텍스트. `content`는 이 값들을 합친 표시용 문자열이다.
     #[serde(default)]
     pub round_contents: Vec<String>,
+    /// 라운드별 추론 내용. 이전 추론을 모델에 돌려보낼 때만 채운다 (`round_contents`와 같은 순서).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub round_reasonings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

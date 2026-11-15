@@ -13,6 +13,9 @@ pub mod single_instance;
 pub mod snapshot_diff;
 pub mod store;
 
+#[cfg(test)]
+mod harness;
+
 use exaone::TurnRequest;
 use fs_ops::FileNode;
 use serde_json::Value;
@@ -642,6 +645,7 @@ async fn send_chat_message(
             tool_records: Vec::new(),
             created_at: chrono::Local::now().to_rfc3339(),
             round_contents: Vec::new(),
+            round_reasonings: Vec::new(),
         };
 
         let conv = &mut db.conversations[conv_idx];
@@ -742,6 +746,7 @@ async fn edit_and_resend_message(
             tool_records: Vec::new(),
             created_at: chrono::Local::now().to_rfc3339(),
             round_contents: Vec::new(),
+            round_reasonings: Vec::new(),
         };
 
         if conv.messages.is_empty() {
@@ -793,6 +798,124 @@ async fn edit_and_resend_message(
 
 /// 승인 대기 중인 삭제/명령 실행을 승인하거나 거부한다.
 /// 같은 메시지에 남은 승인 대기가 없으면, 실행 결과를 모델에 전달해 에이전트 루프를 이어서 진행한다.
+/// 사용자가 승인한 도구를 실행한 결과
+pub(crate) struct ApprovedRun {
+    pub status: &'static str,
+    pub output: String,
+    pub snapshot: Option<FileSnapshot>,
+    pub produced: Vec<String>,
+}
+
+/// 승인 대기 중이던 도구(삭제, 명령·스크립트 실행, 보호 경로 쓰기, MCP 도구)를 실제로 실행한다.
+pub(crate) async fn run_approved_tool<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    project: Option<&Project>,
+    tool_id: &str,
+    tool_name: &str,
+    args: &Value,
+    always: bool,
+) -> ApprovedRun {
+    let project_id = project.map(|p| p.id.clone()).unwrap_or_default();
+    let root = project.map(|p| PathBuf::from(&p.root_path)).unwrap_or_default();
+    let mut new_snap: Option<FileSnapshot> = None;
+    let mut produced: Vec<String> = Vec::new();
+    let (status, output) = match tool_name {
+        name if name.starts_with(mcp::TOOL_PREFIX) => match app.try_state::<Arc<mcp::McpManager>>() {
+            Some(state) => {
+                let mgr = state.inner().clone();
+                match mgr.tool_specs().await.into_iter().find(|t| t.exposed == name) {
+                    Some(spec) => {
+                        if always {
+                            let _ = mgr.set_tool(&spec.server_id, &spec.tool, None, Some(true));
+                        }
+                        match mgr.call(&spec.server_id, &spec.tool, args).await {
+                            Ok((text, false)) => ("completed", text),
+                            Ok((text, true)) => ("error", text),
+                            Err(e) => ("error", e),
+                        }
+                    }
+                    None => ("error", format!("'{}' 도구는 지금 연결된 MCP 서버에 없습니다.", name)),
+                }
+            }
+            None => ("error", "MCP 서버 관리자가 준비되지 않았습니다.".to_string()),
+        },
+        "delete_path" => {
+            let rel = args.get("relative_path").and_then(|v| v.as_str()).unwrap_or("");
+            match fs_ops::delete_path_with_snapshot(&root, &project_id, rel) {
+                Ok(snap) => {
+                    new_snap = Some(snap.with_source("agent"));
+                    ("completed", format!("승인 완료: '{}' 삭제됨", rel))
+                }
+                Err(e) => ("error", e),
+            }
+        }
+        "run_command" => {
+            let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            // `python x.py` 한 줄이면 앱의 Python 실행기로 돌린다 (PC에 Python이 따로 없어도 되고, 만든 파일도 알려 준다).
+            let script = python_runner::simple_script_command(cmd)
+                .filter(|rel| fs_ops::resolve_safe_path(&root, rel).is_ok_and(|p| p.is_file()));
+            match script {
+                Some(rel) => match python_runner::run_script(&root, &rel, python_runner::RUN_TIMEOUT).await {
+                    Ok(outcome) => {
+                        produced = outcome.produced_files();
+                        (if outcome.succeeded() { "completed" } else { "error" }, outcome.summary())
+                    }
+                    Err(e) => ("error", e),
+                },
+                None => match fs_ops::execute_shell_command(&root, cmd, SHELL_TIMEOUT).await {
+                    Ok(out) => ("completed", out),
+                    Err(e) => ("error", e),
+                },
+            }
+        }
+        "run_python" => {
+            let rel = args.get("relative_path").and_then(|v| v.as_str()).unwrap_or("");
+            let skill = args.get("skill").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let run = if skill.is_empty() {
+                python_runner::run_script(&root, rel, python_runner::RUN_TIMEOUT).await
+            } else {
+                // Skill 폴더의 스크립트: 실행 위치는 프로젝트 루트
+                let ctx = Some((project_id.as_str(), root.as_path()));
+                match skills::find_available(ctx, skill)
+                    .ok_or_else(|| format!("'{}' Skill이 없거나 꺼져 있습니다.", skill))
+                    .and_then(|s| skills::resolve_in_skill(&s, rel))
+                {
+                    Ok(script) => {
+                        let display = format!("[Skill {}] {}", skill, rel.replace('\\', "/"));
+                        python_runner::run_script_at(&root, &script, &display, python_runner::RUN_TIMEOUT).await
+                    }
+                    Err(e) => Err(e),
+                }
+            };
+            match run {
+                Ok(outcome) => {
+                    produced = outcome.produced_files();
+                    (if outcome.succeeded() { "completed" } else { "error" }, outcome.summary())
+                }
+                Err(e) => ("error", e),
+            }
+        }
+        // 보호된 설정 폴더(.git, .vscode 등)에 대한 쓰기
+        "write_file" | "modify_file" => {
+            let (rec, snap, _) = exaone::execute_tool_now(app, &root, &project_id, tool_id, tool_name, args).await;
+            new_snap = snap;
+            if rec.status == "completed" {
+                ("completed", format!("승인 완료: {}", rec.output))
+            } else {
+                ("error", rec.output)
+            }
+        }
+        other => ("error", format!("승인이 필요 없는 도구입니다: {}", other)),
+    };
+    ApprovedRun { status, output, snapshot: new_snap, produced }
+}
+
+/// 가장 최근 API 응답에서 받은 호출 한도 (아직 호출 전이면 null)
+#[tauri::command]
+fn rate_info() -> Option<exaone::RateInfo> {
+    exaone::last_rate_info()
+}
+
 #[tauri::command]
 async fn resolve_tool_approval(
     app: AppHandle,
@@ -836,86 +959,14 @@ async fn resolve_tool_approval(
     };
 
     // 2) 잠금 밖에서 실제 작업 실행
-    let project_id = project.as_ref().map(|p| p.id.clone()).unwrap_or_default();
-    let root = project.as_ref().map(|p| PathBuf::from(&p.root_path)).unwrap_or_default();
-    let mut new_snap: Option<FileSnapshot> = None;
-    let mut produced: Vec<String> = Vec::new();
-    let (status, output) = if !approve {
-        ("rejected", "사용자가 실행을 거부했습니다.".to_string())
+    let ApprovedRun { status, output, snapshot: new_snap, produced } = if approve {
+        run_approved_tool(&app, project.as_ref(), &tool_id, &tool_name, &args, always == Some(true)).await
     } else {
-        match tool_name.as_str() {
-            name if name.starts_with(mcp::TOOL_PREFIX) => {
-                let mgr = app.state::<Arc<mcp::McpManager>>().inner().clone();
-                match mgr.tool_specs().await.into_iter().find(|t| t.exposed == name) {
-                    Some(spec) => {
-                        if always == Some(true) {
-                            let _ = mgr.set_tool(&spec.server_id, &spec.tool, None, Some(true));
-                        }
-                        match mgr.call(&spec.server_id, &spec.tool, &args).await {
-                            Ok((text, false)) => ("completed", text),
-                            Ok((text, true)) => ("error", text),
-                            Err(e) => ("error", e),
-                        }
-                    }
-                    None => ("error", format!("'{}' 도구는 지금 연결된 MCP 서버에 없습니다.", name)),
-                }
-            }
-            "delete_path" => {
-                let rel = args.get("relative_path").and_then(|v| v.as_str()).unwrap_or("");
-                match fs_ops::delete_path_with_snapshot(&root, &project_id, rel) {
-                    Ok(snap) => {
-                        new_snap = Some(snap.with_source("agent"));
-                        ("completed", format!("승인 완료: '{}' 삭제됨", rel))
-                    }
-                    Err(e) => ("error", e),
-                }
-            }
-            "run_command" => {
-                let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-                match fs_ops::execute_shell_command(&root, cmd, SHELL_TIMEOUT).await {
-                    Ok(out) => ("completed", out),
-                    Err(e) => ("error", e),
-                }
-            }
-            "run_python" => {
-                let rel = args.get("relative_path").and_then(|v| v.as_str()).unwrap_or("");
-                let skill = args.get("skill").and_then(|v| v.as_str()).unwrap_or("").trim();
-                let run = if skill.is_empty() {
-                    python_runner::run_script(&root, rel, python_runner::RUN_TIMEOUT).await
-                } else {
-                    // Skill 폴더의 스크립트: 실행 위치는 프로젝트 루트
-                    let ctx = Some((project_id.as_str(), root.as_path()));
-                    match skills::find_available(ctx, skill)
-                        .ok_or_else(|| format!("'{}' Skill이 없거나 꺼져 있습니다.", skill))
-                        .and_then(|s| skills::resolve_in_skill(&s, rel))
-                    {
-                        Ok(script) => {
-                            let display = format!("[Skill {}] {}", skill, rel.replace('\\', "/"));
-                            python_runner::run_script_at(&root, &script, &display, python_runner::RUN_TIMEOUT).await
-                        }
-                        Err(e) => Err(e),
-                    }
-                };
-                match run {
-                    Ok(outcome) => {
-                        produced = outcome.produced_files();
-                        (if outcome.succeeded() { "completed" } else { "error" }, outcome.summary())
-                    }
-                    Err(e) => ("error", e),
-                }
-            }
-            // 보호된 설정 폴더(.git, .vscode 등)에 대한 쓰기
-            "write_file" | "modify_file" => {
-                let (rec, snap, _) =
-                    exaone::execute_tool_now(&app, &root, &project_id, &tool_id, &tool_name, &args).await;
-                new_snap = snap;
-                if rec.status == "completed" {
-                    ("completed", format!("승인 완료: {}", rec.output))
-                } else {
-                    ("error", rec.output)
-                }
-            }
-            other => ("error", format!("승인이 필요 없는 도구입니다: {}", other)),
+        ApprovedRun {
+            status: "rejected",
+            output: "사용자가 실행을 거부했습니다.".to_string(),
+            snapshot: None,
+            produced: Vec::new(),
         }
     };
 
@@ -1773,6 +1824,7 @@ pub fn run() {
             create_skill,
             skill_text,
             open_skill_location,
+            rate_info,
             runtime_status,
             runtime_install,
             runtime_remove,

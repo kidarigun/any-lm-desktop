@@ -19,3 +19,7 @@ src-tauri/gen/schemas/
 .DS_Store
 Thumbs.db
 *.log
+
+# Test harness output (real API transcripts)
+harness/runs/
+harness/scenarios*.json

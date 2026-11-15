@@ -17,6 +17,7 @@ import {
   RuntimeKind,
   SkillInfo,
   StreamChunkPayload,
+  RateInfo,
 } from "./types";
 
 export const isTauri = () =>
@@ -679,6 +680,14 @@ export const BackendAPI = {
       });
     }
     return "$ " + command + "\n(Tauri 네이티브 모드에서 실행됩니다.)";
+  },
+
+  /** 가장 최근 응답에서 받은 호출 한도 (이번 실행에서 아직 호출 전이면 null) */
+  async getRateInfo(): Promise<RateInfo | null> {
+    if (isTauri()) {
+      return await invoke<RateInfo | null>("rate_info");
+    }
+    return null;
   },
 
   async onExaoneStream(

@@ -368,6 +368,15 @@ fn write_matplotlibrc() -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+/// 한글 글꼴 설정 폴더를 준비해 돌려준다 (없으면 만든다). 앱 전용 Python뿐 아니라
+/// 시스템·가상환경 Python으로 실행할 때도 쓴다: 글꼴 경고가 나오면 모델이 글꼴을 고치느라 호출을 여러 번 쓴다.
+pub fn ensure_mpl_dir() -> Option<PathBuf> {
+    if !mpl_dir().join("matplotlibrc").is_file() {
+        write_matplotlibrc().ok()?;
+    }
+    Some(mpl_dir())
+}
+
 async fn install_python() -> Result<(), String> {
     if !uv_installed() {
         install_uv().await.map_err(|e| format!("uv: {}", e))?;

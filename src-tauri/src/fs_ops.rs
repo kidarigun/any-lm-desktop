@@ -418,14 +418,20 @@ pub fn modify_file_with_snapshot(
         return Err(format!("수정할 파일이 존재하지 않습니다: {}", relative_path));
     }
     let previous_content = fs::read_to_string(&target).map_err(|e| e.to_string())?;
-    if !previous_content.contains(target_snippet) {
+    if !target_snippet.is_empty() && !previous_content.contains(target_snippet) {
         return Err(format!(
-            "파일 '{}'에서 교체할 대상 문자열(target)을 찾지 못했습니다. 정확한 원문을 확인해 주세요.",
+            "파일 '{}'에서 교체할 대상 문자열(target)을 찾지 못했습니다. 파일이 바뀌었을 수 있으니 read_file로 현재 내용을 확인한 뒤 다시 시도하세요.",
             relative_path
         ));
     }
 
-    let new_content = previous_content.replacen(target_snippet, replacement, 1);
+    let new_content = if target_snippet.is_empty() {
+        // target이 비어 있으면 파일 맨 끝에 덧붙인다 (앞 내용과는 줄을 바꿔 구분한다).
+        let gap = if previous_content.is_empty() || previous_content.ends_with('\n') { "" } else { "\n" };
+        format!("{}{}{}", previous_content, gap, replacement)
+    } else {
+        previous_content.replacen(target_snippet, replacement, 1)
+    };
     fs::write(&target, &new_content).map_err(|e| e.to_string())?;
 
     Ok(FileSnapshot {
