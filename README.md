@@ -20,6 +20,7 @@ Skill과 MCP로 기능을 넓히는 Windows 데스크톱 앱입니다. (Tauri v2
 - **MCP**: 로컬(stdio)·원격(Streamable HTTP) MCP 서버 연결, OAuth 로그인 지원, 도구별 승인 설정
 - **찾아보기**: [카탈로그](https://github.com/kidarigun/exaone-catalog)에서 Skill과 MCP 서버를 클릭 한 번으로 설치
 - **실행 환경 관리**: Python·Node.js·uv가 없는 PC에서도 앱이 공식 배포본을 내려받아(버전 고정·해시 확인) 전용으로 설치
+- **K-EXAONE에 맞춘 동작**: 추론 강도 선택, 오늘 남은 API 호출 수 표시, 하루 호출 한도를 아끼는 도구 구성, 긴 문서 작성 중 끊김 방지 ([변경 이력](CHANGELOG.md))
 
 ## 사용하려면
 
@@ -39,6 +40,22 @@ npm test               # 프런트엔드 테스트
 cd src-tauri && cargo test --lib   # Rust 테스트
 npm run tauri build    # 설치 파일(NSIS) 만들기
 ```
+
+### 실제 API로 시험하기
+
+`harness/`의 시나리오 파일을 사용자 삼아, 실제 K-EXAONE API로 앱의 에이전트 루프를 그대로 돌려 봅니다.
+API 키는 앱에 저장해 둔 것을 Windows 자격 증명 관리자에서 읽습니다.
+
+```bash
+python harness/make_scenarios.py     # 시나리오 JSON 만들기
+cd src-tauri
+EXA_SCENARIOS=../harness/scenarios.json EXA_OUT=../harness/runs/내이름 EXA_MAX_CALLS=20   cargo test --lib harness::live -- --ignored --nocapture
+python ../harness/report.py ../harness/runs/내이름    # 결과 요약
+```
+
+- 하루 호출 한도를 함께 쓰므로 `EXA_MAX_CALLS`(이번 실행의 상한)와 `EXA_DAY_RESERVE`(남겨 둘 호출 수)를 정해 두세요.
+- 이용약관상 부하 시험과 같은 요청의 반복은 금지되어 있습니다. 한 번에 하나씩 실행하고, 시험 자료는 지어낸 것만 쓰세요.
+- 결과(`harness/runs/`)는 Git에 올라가지 않습니다.
 
 ## 데이터와 보안
 
