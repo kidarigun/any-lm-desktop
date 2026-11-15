@@ -27,7 +27,10 @@ Skill과 MCP로 기능을 넓히는 Windows 데스크톱 앱입니다. (Tauri v2
 - Windows 10 / 11 (64비트)
 - K-EXAONE API 키 — 앱의 **[API 및 모델 설정]**에 입력하면 Windows 자격 증명 관리자에 저장됩니다.
 
-설치 파일은 준비 중입니다. 지금은 아래처럼 소스에서 빌드해 실행할 수 있습니다.
+설치 파일은 [릴리스 페이지](https://github.com/kidarigun/k-exaone-desktop/releases/latest)에서 내려받습니다.
+서명되지 않은 설치 파일이라 Windows가 "PC 보호" 경고를 보여 줄 수 있습니다. **추가 정보 → 실행**을 누르면 설치됩니다.
+
+소스에서 직접 빌드하려면 아래 "개발"을 보세요.
 
 ## 개발
 
