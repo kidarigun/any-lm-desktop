@@ -132,16 +132,32 @@ fn commit_assistant_message(
 ) -> Result<Conversation, String> {
     let mut db = state.db.lock().map_err(|e| e.to_string())?;
     db.snapshots.extend(new_snapshots);
-    let conv = find_conv_mut(&mut db, conversation_id)?;
-    if let Some(existing) = conv.messages.iter_mut().find(|m| m.id == assistant_msg.id) {
-        *existing = assistant_msg;
-    } else {
-        conv.messages.push(assistant_msg);
+    // 오래된 되돌리기 기록을 정리한다 (그 기록이 쓰던 백업 파일도 지운다).
+    for blob in db.prune_snapshots() {
+        fs_ops::delete_blob(&blob);
     }
+    let conv = find_conv_mut(&mut db, conversation_id)?;
+    upsert_message(conv, assistant_msg);
     conv.updated_at = chrono::Local::now().to_rfc3339();
     let updated = conv.clone();
     state.store.save(&db)?;
     Ok(updated)
+}
+
+fn upsert_message(conv: &mut Conversation, msg: ChatMessage) {
+    if let Some(existing) = conv.messages.iter_mut().find(|m| m.id == msg.id) {
+        *existing = msg;
+    } else {
+        conv.messages.push(msg);
+    }
+}
+
+/// 답변을 받는 도중의 내용을 저장한다. 앱이 갑자기 꺼져도 받은 데까지는 대화에 남는다.
+fn save_checkpoint(state: &AppState, conversation_id: &str, msg: &ChatMessage) {
+    let Ok(mut db) = state.db.lock() else { return };
+    let Ok(conv) = find_conv_mut(&mut db, conversation_id) else { return };
+    upsert_message(conv, msg.clone());
+    let _ = state.store.save(&db);
 }
 
 #[tauri::command]
@@ -159,8 +175,14 @@ fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> Result<Ap
         secrets::store_api_key(&new_key)?;
     }
     let mut db = state.db.lock().map_err(|e| e.to_string())?;
+    // 새 키를 받았을 때만 입력 시각을 새로 적는다 (화면이 보낸 값은 쓰지 않는다).
+    let api_key_saved_at = if new_key.is_empty() {
+        db.settings.api_key_saved_at.clone()
+    } else {
+        Some(chrono::Local::now().to_rfc3339())
+    };
     let api_key = if new_key.is_empty() { db.settings.api_key.clone() } else { new_key };
-    db.settings = AppSettings { api_key_set: !api_key.is_empty(), api_key, ..settings };
+    db.settings = AppSettings { api_key_set: !api_key.is_empty(), api_key, api_key_saved_at, ..settings };
     state.store.save(&db)?;
     // api_key는 직렬화되지 않으므로 화면에는 키가 전달되지 않는다.
     Ok(db.settings.clone())
@@ -172,6 +194,7 @@ fn clear_api_key(state: State<'_, AppState>) -> Result<AppSettings, String> {
     let mut db = state.db.lock().map_err(|e| e.to_string())?;
     db.settings.api_key.clear();
     db.settings.api_key_set = false;
+    db.settings.api_key_saved_at = None;
     state.store.save(&db)?;
     Ok(db.settings.clone())
 }
@@ -377,6 +400,7 @@ fn create_or_update_project(
         root_path,
         instructions,
         created_at: chrono::Local::now().to_rfc3339(),
+        auto_approve: Vec::new(),
     };
     db.projects.push(proj.clone());
     state.store.save(&db)?;
@@ -584,6 +608,7 @@ fn create_conversation(
         title,
         messages: Vec::new(),
         updated_at: chrono::Local::now().to_rfc3339(),
+        mode: None,
     };
     db.conversations.insert(0, conv.clone());
     state.store.save(&db)?;
@@ -609,6 +634,7 @@ async fn send_chat_message(
     conversation_id: String,
     user_content: String,
     attached_files: Vec<String>,
+    mode: Option<String>,
 ) -> Result<Conversation, String> {
     let run = state.runs.begin(&conversation_id)?;
     let cancel_flag = run.cancel_flag();
@@ -625,7 +651,7 @@ async fn send_chat_message(
     };
     let attachments_block = read_attachments(&app, attach_project.as_ref(), &attached_files).await;
 
-    let (settings, project, history_for_api) = {
+    let (settings, project, history_for_api, turn_mode) = {
         let mut db = state.db.lock().map_err(|e| e.to_string())?;
         let settings = db.settings.clone();
         let conv_idx = db
@@ -644,8 +670,7 @@ async fn send_chat_message(
             reasoning_content: None,
             tool_records: Vec::new(),
             created_at: chrono::Local::now().to_rfc3339(),
-            round_contents: Vec::new(),
-            round_reasonings: Vec::new(),
+            ..Default::default()
         };
 
         let conv = &mut db.conversations[conv_idx];
@@ -660,10 +685,15 @@ async fn send_chat_message(
         }
         conv.messages.push(user_msg);
         conv.updated_at = chrono::Local::now().to_rfc3339();
+        if mode.is_some() {
+            conv.mode = mode.clone();
+        }
+        let turn_mode = conv.mode.clone().unwrap_or_default();
         let history = conv.messages.clone();
         state.store.save(&db)?;
-        (settings, project, history)
+        (settings, project, history, turn_mode)
     };
+    let checkpoint = |m: &ChatMessage| save_checkpoint(&state, &conversation_id, m);
 
     let turn_res = exaone::run_exaone_turn(
         &app,
@@ -673,6 +703,8 @@ async fn send_chat_message(
             conversation_id: &conversation_id,
             history: &history_for_api,
             continue_from: None,
+            mode: &turn_mode,
+            checkpoint: Some(&checkpoint),
         },
         cancel_flag,
     )
@@ -716,7 +748,7 @@ async fn edit_and_resend_message(
     let run = state.runs.begin(&conversation_id)?;
     let cancel_flag = run.cancel_flag();
 
-    let (settings, project, history_for_api, backup_messages) = {
+    let (settings, project, history_for_api, backup_messages, turn_mode) = {
         let mut db = state.db.lock().map_err(|e| e.to_string())?;
         let settings = db.settings.clone();
         let conv_idx = db
@@ -745,8 +777,7 @@ async fn edit_and_resend_message(
             reasoning_content: None,
             tool_records: Vec::new(),
             created_at: chrono::Local::now().to_rfc3339(),
-            round_contents: Vec::new(),
-            round_reasonings: Vec::new(),
+            ..Default::default()
         };
 
         if conv.messages.is_empty() {
@@ -758,10 +789,12 @@ async fn edit_and_resend_message(
 
         conv.messages.push(updated_user_msg);
         conv.updated_at = chrono::Local::now().to_rfc3339();
+        let turn_mode = conv.mode.clone().unwrap_or_default();
         let history = conv.messages.clone();
         state.store.save(&db)?;
-        (settings, project, history, backup)
+        (settings, project, history, backup, turn_mode)
     };
+    let checkpoint = |m: &ChatMessage| save_checkpoint(&state, &conversation_id, m);
 
     let turn_res = exaone::run_exaone_turn(
         &app,
@@ -771,6 +804,8 @@ async fn edit_and_resend_message(
             conversation_id: &conversation_id,
             history: &history_for_api,
             continue_from: None,
+            mode: &turn_mode,
+            checkpoint: Some(&checkpoint),
         },
         cancel_flag,
     )
@@ -910,6 +945,108 @@ pub(crate) async fn run_approved_tool<R: tauri::Runtime>(
     ApprovedRun { status, output, snapshot: new_snap, produced }
 }
 
+// ---------------------------------------------------------------------------
+// 자동 업데이트
+// 깃허브 릴리스의 latest.json을 읽어 새 버전이 있으면 알려 주고, 사용자가 누르면 내려받아 설치한다.
+// 설치 파일은 이 앱의 서명 키로 서명된 것만 받아들인다 (tauri.conf.json의 plugins.updater.pubkey).
+// ---------------------------------------------------------------------------
+
+pub const UPDATE_PROGRESS_EVENT: &str = "update-progress";
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateInfo {
+    current_version: String,
+    version: String,
+    /// 릴리스 노트
+    notes: Option<String>,
+    date: Option<String>,
+}
+
+/// 지금 실행 중인 앱의 버전
+#[tauri::command]
+fn app_version(app: AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
+async fn find_update(app: &AppHandle) -> Result<Option<tauri_plugin_updater::Update>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app
+        .updater()
+        .map_err(|e| format!("업데이트 확인을 준비하지 못했습니다: {}", e))?;
+    updater
+        .check()
+        .await
+        .map_err(|e| format!("새 버전이 있는지 확인하지 못했습니다: {}", e))
+}
+
+/// 새 버전이 있으면 그 정보를, 최신이면 null을 돌려준다.
+#[tauri::command]
+async fn check_update(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
+    Ok(find_update(&app).await?.map(|u| UpdateInfo {
+        current_version: u.current_version.clone(),
+        version: u.version.clone(),
+        notes: u.body.clone(),
+        date: u.date.map(|d| d.to_string()),
+    }))
+}
+
+/// 새 버전을 내려받아 설치한다. 설치가 시작되면 앱이 닫히고, 설치가 끝나면 새 버전이 다시 열린다.
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    let update = find_update(&app)
+        .await?
+        .ok_or_else(|| "이미 최신 버전입니다.".to_string())?;
+    use tauri::Emitter;
+    let progress = app.clone();
+    let mut downloaded: u64 = 0;
+    let bytes = update
+        .download(
+            move |chunk, total| {
+                downloaded += chunk as u64;
+                let _ = progress.emit(UPDATE_PROGRESS_EVENT, serde_json::json!({ "downloaded": downloaded, "total": total }));
+            },
+            || {},
+        )
+        .await
+        .map_err(|e| format!("새 버전을 내려받지 못했습니다: {}", e))?;
+    // 설치 프로그램이 앱을 닫으므로, 로컬 MCP 서버 프로세스를 먼저 끝낸다.
+    if let Some(m) = app.try_state::<Arc<mcp::McpManager>>() {
+        m.shutdown_all();
+    }
+    update
+        .install(bytes)
+        .map_err(|e| format!("새 버전을 설치하지 못했습니다: {}", e))?;
+    // Windows에서는 설치 프로그램이 앱을 닫고 다시 연다. 그렇지 않은 환경에서는 직접 다시 시작한다.
+    app.restart();
+}
+
+/// 프로젝트에서 묻지 않고 실행할 도구를 켜거나 끈다.
+#[tauri::command]
+fn set_project_auto_approve(
+    state: State<'_, AppState>,
+    project_id: String,
+    tool: String,
+    enabled: bool,
+) -> Result<Project, String> {
+    if !exaone::AUTO_APPROVABLE.contains(&tool.as_str()) {
+        return Err(format!("'{}' 도구는 항상 허용으로 둘 수 없습니다.", tool));
+    }
+    let mut db = state.db.lock().map_err(|e| e.to_string())?;
+    let proj = db
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| "프로젝트를 찾을 수 없습니다.".to_string())?;
+    proj.auto_approve.retain(|t| t != &tool);
+    if enabled {
+        proj.auto_approve.push(tool);
+    }
+    let updated = proj.clone();
+    state.store.save(&db)?;
+    Ok(updated)
+}
+
 /// 가장 최근 API 응답에서 받은 호출 한도 (아직 호출 전이면 null)
 #[tauri::command]
 fn rate_info() -> Option<exaone::RateInfo> {
@@ -958,6 +1095,21 @@ async fn resolve_tool_approval(
         (project, rec.tool_name.clone(), args)
     };
 
+    // "항상 허용": 이 프로젝트에서는 이 도구를 앞으로 묻지 않고 실행한다 (MCP 도구는 서버 설정에 따로 적는다).
+    let mut project = project;
+    if approve && always == Some(true) && exaone::AUTO_APPROVABLE.contains(&tool_name.as_str()) {
+        if let Some(p) = project.as_mut() {
+            let mut db = state.db.lock().map_err(|e| e.to_string())?;
+            if let Some(stored) = db.projects.iter_mut().find(|x| x.id == p.id) {
+                if !stored.auto_approve.contains(&tool_name) {
+                    stored.auto_approve.push(tool_name.clone());
+                }
+                *p = stored.clone();
+            }
+            state.store.save(&db)?;
+        }
+    }
+
     // 2) 잠금 밖에서 실제 작업 실행
     let ApprovedRun { status, output, snapshot: new_snap, produced } = if approve {
         run_approved_tool(&app, project.as_ref(), &tool_id, &tool_name, &args, always == Some(true)).await
@@ -1000,7 +1152,7 @@ async fn resolve_tool_approval(
         // 사용자가 그사이 새 메시지를 보냈다면 이 메시지는 더 이상 마지막이 아니므로 이어가지 않는다.
         let is_last = msg_idx + 1 == conv.messages.len();
         let continuation = if all_resolved && is_last {
-            Some((settings, conv.messages.clone(), msg.clone()))
+            Some((settings, conv.messages.clone(), msg.clone(), conv.mode.clone().unwrap_or_default()))
         } else {
             None
         };
@@ -1013,7 +1165,8 @@ async fn resolve_tool_approval(
     };
 
     // 4) 도구 결과를 모델에 전달해 같은 메시지에 이어서 답변을 받는다.
-    let (settings, history, assistant_msg) = continuation;
+    let (settings, history, assistant_msg, turn_mode) = continuation;
+    let checkpoint = |m: &ChatMessage| save_checkpoint(&state, &conversation_id, m);
     let (updated_msg, new_snapshots) = exaone::run_exaone_turn(
         &app,
         TurnRequest {
@@ -1022,6 +1175,8 @@ async fn resolve_tool_approval(
             conversation_id: &conversation_id,
             history: &history,
             continue_from: Some(assistant_msg),
+            mode: &turn_mode,
+            checkpoint: Some(&checkpoint),
         },
         run.cancel_flag(),
     )
@@ -1744,6 +1899,7 @@ pub fn run() {
     };
     tauri::Builder::default()
         .plugin(navigation_guard())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             if let Some(listener) = instance.take() {
                 let handle = app.handle().clone();
@@ -1784,6 +1940,10 @@ pub fn run() {
                 .unwrap_or_else(|_| app_data_dir.join("workspace"));
             let store = StoreManager::new(&app_data_dir).with_default_workspace(default_workspace);
             let mut initial_db = store.load();
+            for blob in initial_db.prune_snapshots() {
+                fs_ops::delete_blob(&blob);
+            }
+            exaone::set_rate_file(app_data_dir.join("rate_info.json"));
             load_api_key_into(&store, &mut initial_db);
             app.manage(AppState {
                 store,
@@ -1825,6 +1985,10 @@ pub fn run() {
             skill_text,
             open_skill_location,
             rate_info,
+            set_project_auto_approve,
+            app_version,
+            check_update,
+            install_update,
             runtime_status,
             runtime_install,
             runtime_remove,

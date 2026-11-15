@@ -53,6 +53,7 @@ import { PanelResizer } from "./ui/PanelResizer";
 import { SkillsDialog } from "./skills/SkillsDialog";
 import { McpDialog } from "./mcp/McpDialog";
 import { RuntimePanel } from "./runtime/RuntimePanel";
+import { UpdateBanner, UpdateSettings, useUpdater } from "./update/UpdatePanel";
 import {
   CANVAS_DEFAULT_WIDTH,
   CANVAS_MIN_WIDTH,
@@ -72,6 +73,7 @@ import {
   Project,
   RateInfo,
   ToolExecutionRecord,
+  TurnStats,
 } from "./types";
 
 /** 메시지에서 캔버스로 열 문서: 파일(경로) 또는 코드 블록(본문) */
@@ -153,6 +155,95 @@ function RunBadge({ count }: { count: number }) {
   );
 }
 
+/**
+ * Markdown 답변. 글이 바뀔 때만 다시 변환한다.
+ * (답변을 받는 동안 화면이 초당 수십 번 다시 그려지는데, 그때마다 지난 답변을 모두 다시 변환하지 않게 한다.)
+ */
+const MarkdownBody = React.memo(function MarkdownBody({
+  text,
+  onClick,
+}: {
+  text: string;
+  onClick: (e: React.MouseEvent<HTMLDivElement>) => void;
+}) {
+  const html = useMemo(() => renderMarkdownSafe(text), [text]);
+  return (
+    <div
+      className="markdown-body text-sm text-stone-800 dark:text-stone-100 select-text"
+      onClick={onClick}
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+});
+
+/** 자주 바뀌는 값을 `ms`마다 한 번씩만 화면에 반영한다. */
+function useThrottled<T>(value: T, ms: number): T {
+  const [shown, setShown] = useState(value);
+  const last = useRef(0);
+  useEffect(() => {
+    const wait = ms - (Date.now() - last.current);
+    if (wait <= 0) {
+      last.current = Date.now();
+      setShown(value);
+      return;
+    }
+    const timer = setTimeout(() => {
+      last.current = Date.now();
+      setShown(value);
+    }, wait);
+    return () => clearTimeout(timer);
+  }, [value, ms]);
+  return shown;
+}
+
+/** 받는 중인 답변. 글자 조각이 초당 수십 번 와도 변환은 초당 8번쯤만 한다. */
+function StreamingMarkdown(props: { text: string; onClick: (e: React.MouseEvent<HTMLDivElement>) => void }) {
+  const text = useThrottled(props.text, 120);
+  return <MarkdownBody text={text} onClick={props.onClick} />;
+}
+
+function formatDuration(ms: number): string {
+  const sec = Math.round(ms / 1000);
+  return sec >= 60 ? `${Math.floor(sec / 60)}분 ${sec % 60}초` : `${sec}초`;
+}
+
+/** 답변 아래에 작게 보여 주는 호출·토큰·시간 */
+function TurnStatsLine({ stats }: { stats?: TurnStats | null }) {
+  if (!stats || !stats.apiCalls) return null;
+  const parts = [`호출 ${stats.apiCalls}회`];
+  if (stats.completionTokens) parts.push(`출력 ${stats.completionTokens.toLocaleString()}토큰`);
+  if (stats.elapsedMs) parts.push(formatDuration(stats.elapsedMs));
+  return (
+    <div
+      className="text-[11px] text-stone-400 dark:text-stone-500 tabular-nums select-none"
+      title={`이 답변에 쓴 API 호출 ${stats.apiCalls}회 (하루 한도에서 빠집니다) · 입력 ${stats.promptTokens.toLocaleString()}토큰 · 출력 ${stats.completionTokens.toLocaleString()}토큰 (그중 추론 ${stats.reasoningTokens.toLocaleString()}토큰)`}
+    >
+      {parts.join(" · ")}
+    </div>
+  );
+}
+
+/** K-EXAONE API 키는 발급 30일 뒤 만료된다. 앱에 입력한 지 며칠 됐는지. */
+const KEY_VALID_DAYS = 30;
+function keyAgeDays(savedAt?: string | null): number | null {
+  if (!savedAt) return null;
+  const t = new Date(savedAt).getTime();
+  return Number.isNaN(t) ? null : Math.floor((Date.now() - t) / (24 * 60 * 60 * 1000));
+}
+
+/** 대화 전체를 Markdown 글로 만든다 (내보내기용). */
+function conversationToMarkdown(conv: Conversation): string {
+  const lines: string[] = [`# ${conv.title || "대화"}`, ""];
+  for (const m of conv.messages) {
+    if (m.role !== "user" && m.role !== "assistant") continue;
+    lines.push(m.role === "user" ? "## 사용자" : "## 엑사원", "");
+    lines.push(m.content.trim() || "(내용 없음)", "");
+    const files = m.toolRecords.filter((r) => r.filePath && r.status === "completed").map((r) => r.filePath);
+    if (files.length) lines.push(`> 이 답변에서 다룬 파일: ${Array.from(new Set(files)).join(", ")}`, "");
+  }
+  return lines.join("\n");
+}
+
 /** 오늘 남은 API 호출 수. 도구를 한 번 쓸 때마다 호출이 한 번씩 들기 때문에 입력란 옆에 늘 보여 준다. */
 function RateBadge({ info }: { info: RateInfo | null }) {
   // 받은 지 하루가 넘은 값은 이미 바뀌었을 테니 보이지 않는다.
@@ -175,6 +266,25 @@ function RateBadge({ info }: { info: RateInfo | null }) {
     </span>
   );
 }
+
+/** 오늘 남은 호출이 거의 없으면 보내기 전에 알려 준다. */
+function LowBudgetNotice({ info }: { info: RateInfo | null }) {
+  if (!info || info.dayRemaining == null || info.dayRemaining > 5) return null;
+  if (Date.now() - new Date(info.updatedAt).getTime() > 24 * 60 * 60 * 1000) return null;
+  return (
+    <div className="text-[11px] text-red-600 dark:text-red-400 pb-0.5">
+      {info.dayRemaining <= 0
+        ? "오늘 쓸 수 있는 API 호출을 모두 썼습니다. 한도가 다시 채워진 뒤 보내 주세요."
+        : `오늘 남은 API 호출이 ${info.dayRemaining}회입니다. 파일을 여러 번 다루는 작업은 중간에 멈출 수 있습니다.`}
+    </div>
+  );
+}
+
+/** 프로젝트에서 "항상 허용"할 수 있는 도구 */
+const AUTO_APPROVE_TOOLS = [
+  { tool: "run_python", label: "Python 스크립트 실행" },
+  { tool: "run_command", label: "PowerShell 명령 실행" },
+];
 
 /** K-EXAONE 2.5가 받는 추론 강도 (공식 문서: low / high / max, 서버 기본값은 max) */
 const REASONING_EFFORTS: { value: AppSettings["reasoningEffort"]; label: string; hint: string }[] = [
@@ -322,7 +432,9 @@ export default function App() {
     );
     if (!searchQuery.trim()) return list;
     const q = searchQuery.toLowerCase();
-    return list.filter((c) => c.title.toLowerCase().includes(q));
+    return list.filter(
+      (c) => c.title.toLowerCase().includes(q) || c.messages.some((m) => m.content.toLowerCase().includes(q))
+    );
   }, [conversations, activeMode, activeProject, searchQuery]);
 
   const activeConversation = useMemo(
@@ -488,6 +600,12 @@ export default function App() {
     })();
   }, []);
 
+  // 새 버전 확인과 설치 (설정을 읽은 뒤, 켜져 있으면 한 번 조용히 확인한다)
+  const updater = useUpdater(settings.checkUpdates);
+
+  // API 키를 입력한 지 며칠 됐는지 (발급 30일 뒤 만료되므로 가까워지면 알린다)
+  const keyDays = settings.apiKeySet ? keyAgeDays(settings.apiKeySavedAt) : null;
+
   // 서버가 알려 준 호출 한도 (오늘 남은 호출 수 표시용)
   const [rateInfo, setRateInfo] = useState<RateInfo | null>(null);
   useEffect(() => {
@@ -566,14 +684,19 @@ export default function App() {
     };
   }, []);
 
+  // 새 메시지가 생기면 맨 아래로 간다.
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [
-    activeConversation?.messages,
-    streamingReasoning,
-    streamingContent,
-    streamingTools,
-  ]);
+  }, [activeConversation?.messages]);
+
+  // 답변을 받는 동안에는 맨 아래를 보고 있을 때만 따라 내려간다 (위쪽을 읽는 중이면 끌어내리지 않는다).
+  useEffect(() => {
+    const end = chatEndRef.current;
+    const scroller = end?.closest(".overflow-y-auto");
+    if (!end || !scroller) return;
+    const distance = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+    if (distance < 240) end.scrollIntoView({ behavior: "auto" });
+  }, [streamingReasoning, streamingContent, streamingTools]);
 
   async function handleSwitchMode(mode: "chat" | "project" | "code") {
     setActiveMode(mode);
@@ -582,20 +705,7 @@ export default function App() {
       mode === "chat" ? "general-chat" : activeProject?.id || "";
     const firstConv = conversations.find((c) => c.projectId === targetScope);
     setActiveConvId(firstConv ? firstConv.id : "");
-
-    const style =
-      mode === "code"
-        ? "code_architect"
-        : mode === "project"
-        ? "project"
-        : "default";
-    const nextSettings = { ...settings, writingStyle: style as any };
-    setSettings(nextSettings);
-    try {
-      await BackendAPI.saveSettings(nextSettings);
-    } catch {
-      // ignore
-    }
+    // 화면에 맞는 지침은 메시지를 보낼 때 화면 이름(mode)으로 고른다.
   }
 
   /** 입력란에서 고른 추론 강도를 저장한다. 다음에 보내는 메시지부터 적용된다. */
@@ -774,7 +884,7 @@ export default function App() {
         setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, title } : c)));
       }
 
-      const updatedConv = await BackendAPI.sendChatMessage(id, text, filesToSend);
+      const updatedConv = await BackendAPI.sendChatMessage(id, text, filesToSend, activeMode);
 
       setConversations((prev) => {
         const exists = prev.some((c) => c.id === updatedConv.id);
@@ -876,6 +986,11 @@ export default function App() {
   ) {
     if (!activeConversation || isStreaming) return;
     const convId = activeConversation.id;
+    // "항상 허용"을 누른 도구가 프로젝트 단위로 허용되는 것(Python·명령 실행)이면 그 이름
+    const approvedTool = activeConversation.messages
+      .find((m) => m.id === messageId)
+      ?.toolRecords.find((r) => r.id === toolId)?.toolName;
+    const alwaysTool = AUTO_APPROVE_TOOLS.find((t) => t.tool === approvedTool)?.tool;
 
     // 승인/거부 직후 화면에 바로 반영하고, 마지막 대기 작업이면 백엔드가 에이전트를 이어서 실행한다.
     setConversations((prev) =>
@@ -925,6 +1040,14 @@ export default function App() {
       setConversations((prev) =>
         prev.map((c) => (c.id === updated.id ? updated : c))
       );
+      if (approve && always && alwaysTool && activeProject) {
+        const pid = activeProject.id;
+        setProjects((prev) =>
+          prev.map((p) =>
+            p.id === pid ? { ...p, autoApprove: Array.from(new Set([...(p.autoApprove ?? []), alwaysTool])) } : p
+          )
+        );
+      }
     } catch (err: any) {
       failure = { error: String(err) };
       // 도구 결과는 저장됐지만 이어가기가 실패했을 수 있으므로 이 대화만 저장된 상태로 다시 맞춘다.
@@ -1058,6 +1181,40 @@ export default function App() {
       setErrorBanner(`답변을 저장하지 못했습니다: ${err?.message || String(err)}`);
     } finally {
       setSavingAnswerId(null);
+    }
+  }
+
+  /** 지금 대화 전체를 Markdown 파일로 저장한다. */
+  async function handleExportConversation() {
+    const conv = activeConversation;
+    if (!conv || conv.messages.length === 0) return;
+    const text = conversationToMarkdown(conv);
+    const fileName = `${(conv.title || "대화").replace(/[\\/:*?"<>|]/g, " ").trim().slice(0, 40) || "대화"}.md`;
+    try {
+      if (!isTauri()) {
+        const url = URL.createObjectURL(new Blob([text], { type: "text/markdown" }));
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = fileName;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        return;
+      }
+      const projectRoot = currentScopeId !== "general-chat" ? activeProject?.rootPath : undefined;
+      const picked = await BackendAPI.pickSavePath(projectRoot, fileName, "Markdown|md");
+      if (!picked) return;
+      const projectId = currentScopeId !== "general-chat" ? activeProject?.id ?? null : null;
+      const res = await BackendAPI.saveFileToPath(projectId, picked, bytesToBase64(new TextEncoder().encode(text)));
+      if (res.snapshot) setSnapshots((prev) => [...prev, res.snapshot!]);
+      if (res.relativePath) bumpFileTree();
+      setErrorBanner(null);
+      setSavedAnswer({
+        name: res.absolutePath.split(/[\\/]/).pop() || res.absolutePath,
+        absolutePath: res.absolutePath,
+        relativePath: res.relativePath ?? null,
+      });
+    } catch (err: any) {
+      setErrorBanner(`대화를 저장하지 못했습니다: ${err?.message || String(err)}`);
     }
   }
 
@@ -1312,7 +1469,7 @@ export default function App() {
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="대화 검색..."
+                placeholder="대화 제목·내용 검색..."
                 className="w-full bg-white/80 dark:bg-[#232320] border border-stone-200/90 dark:border-[#343430] rounded-lg pl-8 pr-2.5 py-1 text-xs text-stone-800 dark:text-stone-200 placeholder:text-stone-400 focus:outline-none focus:border-stone-400 dark:focus:border-stone-500"
               />
             </div>
@@ -1372,6 +1529,7 @@ export default function App() {
 
         {/* Bottom Settings Button */}
         <div className="p-3 border-t border-[#E2E0D8] dark:border-[#2C2C29] space-y-1.5">
+          <UpdateBanner updater={updater} runningCount={Object.keys(runs).length} />
           <button
             onClick={() => setShowSkills(true)}
             className="w-full py-2 px-3 rounded-xl bg-white dark:bg-[#242421] hover:bg-stone-100 dark:hover:bg-[#2E2E2A] border border-stone-300/80 dark:border-[#383834] text-xs font-medium text-stone-700 dark:text-stone-200 flex items-center gap-1.5 cursor-pointer transition"
@@ -1396,12 +1554,18 @@ export default function App() {
             </span>
             <span
               className={`text-xs font-semibold ${
-                settings.apiKeySet
+                settings.apiKeySet && !(keyDays !== null && keyDays >= KEY_VALID_DAYS - 5)
                   ? "text-emerald-700 dark:text-emerald-400"
                   : "text-amber-700 dark:text-amber-400"
               }`}
             >
-              {settings.apiKeySet ? "연결됨" : "키 입력 필요"}
+              {!settings.apiKeySet
+                ? "키 입력 필요"
+                : keyDays !== null && keyDays >= KEY_VALID_DAYS
+                  ? "키 만료됐을 수 있음"
+                  : keyDays !== null && keyDays >= KEY_VALID_DAYS - 5
+                    ? `키 만료 ${KEY_VALID_DAYS - keyDays}일 전`
+                    : "연결됨"}
             </span>
           </button>
         </div>
@@ -1453,6 +1617,16 @@ export default function App() {
               </button>
             )}
 
+            {activeConversation && activeConversation.messages.length > 0 && !showProjectOverview && (
+              <button
+                onClick={handleExportConversation}
+                className="px-2.5 py-1.5 rounded-lg bg-stone-200/80 dark:bg-[#2C2C28] hover:bg-stone-300 dark:hover:bg-[#383833] text-xs font-semibold text-stone-700 dark:text-stone-200 flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
+                title="이 대화 전체를 Markdown 파일로 저장합니다"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>대화 저장</span>
+              </button>
+            )}
             <button
               onClick={handleOpenDocument}
               className="px-2.5 py-1.5 rounded-lg bg-stone-200/80 dark:bg-[#2C2C28] hover:bg-stone-300 dark:hover:bg-[#383833] text-xs font-semibold text-stone-700 dark:text-stone-200 flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
@@ -1593,6 +1767,31 @@ export default function App() {
                         "설정된 프로젝트 지침이 없습니다."}
                     </p>
                   </div>
+                </div>
+
+                <div className="p-4 rounded-xl bg-[#FAF9F5] dark:bg-[#1E1E1C] border border-stone-200/80 dark:border-[#343430] space-y-2">
+                  <div className="text-xs font-bold text-stone-700 dark:text-stone-300">묻지 않고 실행</div>
+                  <p className="text-xs text-stone-500 dark:text-stone-400 leading-relaxed">
+                    켜 두면 이 프로젝트에서는 엑사원이 만든 스크립트나 명령을 승인 없이 바로 실행합니다. 호출과 시간을 아끼지만,
+                    실행 전에 내용을 확인할 수 없습니다. 파일 삭제는 항상 묻습니다.
+                  </p>
+                  {AUTO_APPROVE_TOOLS.map((t) => (
+                    <label key={t.tool} className="flex items-center gap-2 text-xs text-stone-700 dark:text-stone-300 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={(activeProject.autoApprove ?? []).includes(t.tool)}
+                        onChange={async (e) => {
+                          try {
+                            const updated = await BackendAPI.setProjectAutoApprove(activeProject.id, t.tool, e.target.checked);
+                            setProjects((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+                          } catch (err) {
+                            setErrorBanner(String(err));
+                          }
+                        }}
+                      />
+                      {t.label}
+                    </label>
+                  ))}
                 </div>
 
                 <div className="pt-2 flex justify-end">
@@ -1876,15 +2075,8 @@ export default function App() {
                           )}
 
                           {/* Main Markdown Response */}
-                          {msg.content && (
-                            <div
-                              className="markdown-body text-sm text-stone-800 dark:text-stone-100 select-text"
-                              onClick={handleMarkdownLinkClick}
-                              dangerouslySetInnerHTML={{
-                                __html: renderMarkdownSafe(msg.content),
-                              }}
-                            />
-                          )}
+                          {msg.content && <MarkdownBody text={msg.content} onClick={handleMarkdownLinkClick} />}
+                          <TurnStatsLine stats={msg.stats} />
 
                           {/* Claude-Style Artifact Card */}
                           {msgArtifact && (
@@ -2055,15 +2247,7 @@ export default function App() {
                       />
                     ))}
 
-                    {streamingContent && (
-                      <div
-                        className="markdown-body text-sm text-stone-800 dark:text-stone-100 select-text"
-                        onClick={handleMarkdownLinkClick}
-                        dangerouslySetInnerHTML={{
-                          __html: renderMarkdownSafe(streamingContent),
-                        }}
-                      />
-                    )}
+                    {streamingContent && <StreamingMarkdown text={streamingContent} onClick={handleMarkdownLinkClick} />}
                   </div>
                 )}
 
@@ -2149,6 +2333,7 @@ export default function App() {
                   className="w-full text-sm text-stone-800 dark:text-stone-100 bg-transparent placeholder:text-stone-400 dark:placeholder:text-stone-500 resize-none focus:outline-none leading-relaxed"
                 />
 
+                <LowBudgetNotice info={rateInfo} />
                 <div className="flex justify-between items-center pt-1">
                   <div className="flex items-center gap-1.5">
                     <button
@@ -2361,6 +2546,18 @@ export default function App() {
                   }
                   className="w-full bg-white dark:bg-[#1E1E1C] border border-stone-300 dark:border-[#3A3A36] rounded-xl px-3 py-2 text-stone-900 dark:text-stone-100 focus:outline-none focus:border-[#A50034]"
                 />
+                {keyDays !== null && (
+                  <div
+                    className={`mt-1 text-[11px] ${
+                      keyDays >= KEY_VALID_DAYS - 5
+                        ? "text-amber-700 dark:text-amber-400 font-semibold"
+                        : "text-stone-500 dark:text-stone-400"
+                    }`}
+                  >
+                    이 키를 입력한 지 {keyDays}일 지났습니다. K-EXAONE API 키는 발급한 날부터 30일 뒤 만료되니,
+                    {keyDays >= KEY_VALID_DAYS - 5 ? " 새 키를 발급받아 바꿔 주세요." : " 그 전에 새 키로 바꿔 주세요."}
+                  </div>
+                )}
                 <div className="mt-1 flex items-center justify-between text-[11px] text-stone-500 dark:text-stone-400">
                   <span>키는 Windows 자격 증명 관리자에 암호화되어 저장됩니다.</span>
                   {settings.apiKeySet && (
@@ -2414,6 +2611,24 @@ export default function App() {
             <div className="pt-3 border-t border-stone-200 dark:border-[#34342F] text-xs space-y-2">
               <h4 className="font-bold text-stone-900 dark:text-stone-100">실행 환경</h4>
               <RuntimePanel />
+            </div>
+
+            <div className="pt-3 border-t border-stone-200 dark:border-[#34342F] text-xs space-y-2">
+              <h4 className="font-bold text-stone-900 dark:text-stone-100">업데이트</h4>
+              <UpdateSettings
+                updater={updater}
+                runningCount={Object.keys(runs).length}
+                autoCheck={settings.checkUpdates !== false}
+                onAutoCheckChange={async (value) => {
+                  setSettings((prev) => ({ ...prev, checkUpdates: value }));
+                  try {
+                    // 키는 보내지 않는다 (비어 있으면 저장된 키를 그대로 둔다).
+                    await BackendAPI.saveSettings({ ...settings, apiKey: "", checkUpdates: value });
+                  } catch (err) {
+                    setSettingsError(String(err));
+                  }
+                }}
+              />
             </div>
 
             {settingsError && (
@@ -2635,6 +2850,8 @@ function ToolCallBox({
   approvalDisabled?: boolean;
 }) {
   const isMcp = record.toolName.startsWith("mcp__");
+  // 프로젝트 단위로 "항상 허용"할 수 있는 도구 (파일 삭제와 보호 폴더 쓰기는 매번 묻는다)
+  const projectAlways = AUTO_APPROVE_TOOLS.some((t) => t.tool === record.toolName);
   const isPending = record.status === "pending_approval";
   const isRunning = record.status === "running";
   // AI가 작성했거나 실행한 Python 스크립트는 카드에서 바로 (다시) 실행할 수 있다.
@@ -2720,11 +2937,15 @@ function ToolCallBox({
             >
               승인
             </button>
-            {isMcp && (
+            {(isMcp || projectAlways) && (
               <button
                 onClick={() => onApprove(true, true)}
                 disabled={approvalDisabled}
-                title="이 도구는 앞으로 묻지 않고 실행합니다 (MCP 서버 설정에서 되돌릴 수 있음)"
+                title={
+                  isMcp
+                    ? "이 도구는 앞으로 묻지 않고 실행합니다 (MCP 서버 설정에서 되돌릴 수 있음)"
+                    : "이 프로젝트에서는 앞으로 묻지 않고 실행합니다 ([프로젝트 관리]에서 되돌릴 수 있음)"
+                }
                 className="px-2.5 py-1 rounded bg-emerald-600/15 text-emerald-800 dark:text-emerald-300 font-semibold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 항상 허용

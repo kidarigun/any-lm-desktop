@@ -12,6 +12,18 @@ export interface AppSettings {
     | "creative_writing"
     | "code_architect"
     | "default";
+  /** API 키를 앱에 입력한 시각 (K-EXAONE 키는 발급 30일 뒤 만료된다) */
+  apiKeySavedAt?: string | null;
+  /** 앱을 켤 때 새 버전이 있는지 확인할지 (없으면 아직 설정을 읽지 못한 것) */
+  checkUpdates?: boolean;
+}
+
+/** 설치할 수 있는 새 버전 */
+export interface UpdateInfo {
+  currentVersion: string;
+  version: string;
+  notes?: string | null;
+  date?: string | null;
 }
 
 export interface Project {
@@ -20,6 +32,8 @@ export interface Project {
   rootPath: string;
   instructions: string;
   createdAt: string;
+  /** 이 프로젝트에서 묻지 않고 실행하도록 허락한 도구 ("run_python" | "run_command") */
+  autoApprove?: string[];
 }
 
 export interface ToolExecutionRecord {
@@ -162,6 +176,17 @@ export interface ChatMessage {
   createdAt: string;
   /** 라운드별 어시스턴트 텍스트 (content는 이를 합친 표시용 문자열) */
   roundContents?: string[];
+  /** 이 답변을 만드는 데 든 호출·토큰·시간 */
+  stats?: TurnStats | null;
+}
+
+export interface TurnStats {
+  /** 서버에 보낸 요청 수 (하루 호출 한도에서 빠지는 수) */
+  apiCalls: number;
+  promptTokens: number;
+  completionTokens: number;
+  reasoningTokens: number;
+  elapsedMs: number;
 }
 
 export interface Conversation {
@@ -170,6 +195,8 @@ export interface Conversation {
   title: string;
   messages: ChatMessage[];
   updatedAt: string;
+  /** 마지막으로 메시지를 보낸 화면 */
+  mode?: "chat" | "project" | "code" | null;
 }
 
 export interface FileSnapshot {

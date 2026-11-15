@@ -335,6 +335,14 @@ fn save_blob(bytes: &[u8]) -> Result<String, String> {
     Ok(name)
 }
 
+/// 정리된 되돌리기 기록이 쓰던 백업 파일을 지운다 (없어도 문제없다).
+pub fn delete_blob(name: &str) {
+    if name.contains(['/', '\\']) || name.contains("..") {
+        return;
+    }
+    let _ = fs::remove_file(blob_dir().join(name));
+}
+
 pub fn load_blob(name: &str) -> Result<Vec<u8>, String> {
     // 저장된 이름만 받는다 (경로 조작 방지).
     if name.contains(['/', '\\']) || name.contains("..") {

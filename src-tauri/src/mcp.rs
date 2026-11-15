@@ -1974,7 +1974,7 @@ rl.on('line', (line) => {
                     log.lock().unwrap().push(format!("{} {}", first.split_whitespace().next().unwrap_or(""), url.path()));
                     let json_resp = |status: &str, v: Value| {
                         let b = v.to_string();
-                        format!("HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", status, b.len(), b)
+                        format!("HTTP/1.1 {}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}", status, b.len(), b)
                     };
                     let resp = match url.path() {
                         "/.well-known/oauth-protected-resource" => json_resp("200 OK", json!({ "resource": format!("{}/mcp", base), "authorization_servers": [base] })),
@@ -1988,7 +1988,7 @@ rl.on('line', (line) => {
                             assert_eq!(q["resource"], format!("{}/mcp", base), "발견한 resource를 보낸다");
                             *challenge.lock().unwrap() = q["code_challenge"].clone();
                             let loc = format!("{}?code=the-code&state={}", q["redirect_uri"], q["state"]);
-                            format!("HTTP/1.1 302 Found\r\nLocation: {}\r\nContent-Length: 0\r\n\r\n", loc)
+                            format!("HTTP/1.1 302 Found\r\nLocation: {}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", loc)
                         }
                         "/token" => match form.get("grant_type").map(String::as_str) {
                             Some("authorization_code") => {
@@ -2012,7 +2012,7 @@ rl.on('line', (line) => {
                             if !matches!(auth.as_deref(), Some("acc-1") | Some("acc-2")) {
                                 let b = "{}";
                                 format!(
-                                    "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource\"\r\nContent-Length: {}\r\n\r\n{}",
+                                    "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource\"\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
                                     base, b.len(), b
                                 )
                             } else {
@@ -2022,14 +2022,14 @@ rl.on('line', (line) => {
                                     "tools/call" => json!({ "content": [{ "type": "text", "text": format!("token={}", auth.clone().unwrap_or_default()) }] }),
                                     _ => {
                                         return {
-                                            let _ = sock.write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n").await;
+                                            let _ = sock.write_all(b"HTTP/1.1 202 Accepted\r\nConnection: close\r\nContent-Length: 0\r\n\r\n").await;
                                         };
                                     }
                                 };
                                 json_resp("200 OK", json!({ "jsonrpc": "2.0", "id": msg["id"], "result": result }))
                             }
                         }
-                        _ => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string(),
+                        _ => "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n".to_string(),
                     };
                     let _ = sock.write_all(resp.as_bytes()).await;
                 });

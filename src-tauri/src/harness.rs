@@ -319,6 +319,7 @@ async fn live() {
             root_path: work.to_string_lossy().trim_start_matches(r"\\?\").to_string(),
             instructions: sc.instructions.clone(),
             created_at: chrono::Local::now().to_rfc3339(),
+            auto_approve: Vec::new(),
         });
         let root = project.as_ref().map(|p| PathBuf::from(&p.root_path)).unwrap_or_else(|| work.clone());
 
@@ -346,8 +347,7 @@ async fn live() {
                 reasoning_content: None,
                 tool_records: Vec::new(),
                 created_at: chrono::Local::now().to_rfc3339(),
-                round_contents: Vec::new(),
-                round_reasonings: Vec::new(),
+                ..Default::default()
             });
             let mut log = TurnLog {
                 prompt: prompt.clone(),
@@ -369,6 +369,8 @@ async fn live() {
                         conversation_id: &sc.id,
                         history: &history,
                         continue_from: continue_from.take(),
+                        mode: &sc.mode,
+                        checkpoint: None,
                     },
                     Arc::new(AtomicBool::new(false)),
                 )

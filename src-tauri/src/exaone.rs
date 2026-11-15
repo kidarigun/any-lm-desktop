@@ -2,7 +2,7 @@ use crate::doc_bridge::{self, DocKind};
 use crate::fs_ops;
 use crate::mcp;
 use crate::skills;
-use crate::store::{AppSettings, ChatMessage, FileSnapshot, Project, ToolExecutionRecord};
+use crate::store::{AppSettings, ChatMessage, FileSnapshot, Project, ToolExecutionRecord, TurnStats};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -197,6 +197,24 @@ pub struct RateInfo {
 }
 
 static LAST_RATE: std::sync::Mutex<Option<RateInfo>> = std::sync::Mutex::new(None);
+static RATE_FILE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// 호출 한도를 적어 둘 파일을 정하고, 전에 적어 둔 값을 읽어 온다 (앱을 다시 켜도 남은 호출 수가 보이게).
+pub fn set_rate_file(path: std::path::PathBuf) {
+    if let Some(info) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<RateInfo>(&b).ok()) {
+        *LAST_RATE.lock().unwrap_or_else(|e| e.into_inner()) = Some(info);
+    }
+    let _ = RATE_FILE.set(path);
+}
+
+fn remember_rate(info: &RateInfo) {
+    *LAST_RATE.lock().unwrap_or_else(|e| e.into_inner()) = Some(info.clone());
+    if let Some(path) = RATE_FILE.get() {
+        if let Ok(json) = serde_json::to_vec(info) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+}
 
 /// 가장 최근 응답에서 받은 호출 한도. 이번 실행에서 아직 호출한 적이 없으면 `None`.
 pub fn last_rate_info() -> Option<RateInfo> {
@@ -280,6 +298,10 @@ pub fn build_tools_schema() -> Value {
                         "relative_path": {
                             "type": "string",
                             "description": "읽을 파일의 프로젝트 내 상대 경로 (예: 'docs/report.md')"
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "앞에서 건너뛸 글자 수. 긴 파일이 잘려서 왔을 때, 안내된 값을 넣어 이어서 읽습니다. 처음 읽을 때는 생략하세요."
                         }
                     },
                     "required": ["relative_path"]
@@ -336,7 +358,7 @@ pub fn build_tools_schema() -> Value {
             "type": "function",
             "function": {
                 "name": "search_files",
-                "description": "프로젝트 폴더 내 모든 파일에서 특정 키워드를 검색합니다.",
+                "description": "프로젝트 폴더 내 모든 파일에서 특정 키워드를 검색합니다. Word·Excel·PowerPoint·PDF 문서 안의 글도 찾습니다.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -687,7 +709,7 @@ pub fn build_api_messages(sys_prompt: &str, history: &[ChatMessage], include_too
     build_api_messages_with(sys_prompt, history, include_tools, false)
 }
 
-/// `with_reasoning`이 참이면 라운드별 추론(`round_reasonings`)도 함께 돌려보낸다.
+/// `keep_reasoning`이 참이면 그때의 추론도 함께 돌려보낸다.
 pub fn build_api_messages_with(
     sys_prompt: &str,
     history: &[ChatMessage],
@@ -698,7 +720,7 @@ pub fn build_api_messages_with(
     for msg in history {
         let reasoning_of = |round: usize| -> Option<&str> {
             if keep_reasoning {
-                msg.round_reasonings.get(round).map(String::as_str)
+                msg.round_reasoning(round)
             } else {
                 None
             }
@@ -712,10 +734,9 @@ pub fn build_api_messages_with(
                     } else {
                         msg.content.as_str()
                     };
-                    let all: String = msg.round_reasonings.join("\n\n");
                     out.push(with_reasoning(
                         json!({ "role": "assistant", "content": content }),
-                        Some(all.as_str()).filter(|_| keep_reasoning),
+                        msg.reasoning_content.as_deref().filter(|_| keep_reasoning),
                     ));
                     continue;
                 }
@@ -749,8 +770,8 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
-/// 프로젝트 폴더의 파일 목록(3단계 깊이, 최대 150줄). 모델이 목록부터 조회하느라 API 호출을 쓰지 않게 한다.
-fn project_files_section(root: &Path) -> String {
+/// 파일 트리를 한 줄에 경로 하나씩 적은 글로 바꾼다 (최대 150줄). JSON보다 토큰을 훨씬 덜 쓴다.
+fn tree_lines(tree: &[fs_ops::FileNode], empty: &str) -> String {
     fn walk(nodes: &[fs_ops::FileNode], out: &mut Vec<String>, total: &mut usize) {
         for n in nodes {
             *total += 1;
@@ -768,15 +789,21 @@ fn project_files_section(root: &Path) -> String {
     }
     let mut lines = Vec::new();
     let mut total = 0usize;
-    if let Ok(tree) = fs_ops::list_project_tree(root, 2) {
-        walk(&tree, &mut lines, &mut total);
-    }
-    let body = if lines.is_empty() {
-        "(아직 파일이 없습니다)".to_string()
+    walk(tree, &mut lines, &mut total);
+    if lines.is_empty() {
+        empty.to_string()
     } else if total > lines.len() {
         format!("{}\n... 외 {}개 (더 필요하면 list_directory로 해당 폴더를 조회하세요)", lines.join("\n"), total - lines.len())
     } else {
         lines.join("\n")
+    }
+}
+
+/// 프로젝트 폴더의 파일 목록(3단계 깊이, 최대 150줄). 모델이 목록부터 조회하느라 API 호출을 쓰지 않게 한다.
+fn project_files_section(root: &Path) -> String {
+    let body = match fs_ops::list_project_tree(root, 2) {
+        Ok(tree) => tree_lines(&tree, "(아직 파일이 없습니다)"),
+        Err(_) => "(아직 파일이 없습니다)".to_string(),
     };
     format!(
         "\n\n[프로젝트 파일 목록] (이 요청을 받은 시점, 3단계 깊이까지. '/'로 끝나면 폴더)\n{}",
@@ -784,9 +811,30 @@ fn project_files_section(root: &Path) -> String {
     )
 }
 
-fn build_system_prompt(project: Option<&Project>, skills: &[skills::SkillInfo], mcp_tools: &[mcp::ToolSpec]) -> String {
+/// 화면(코딩 / 프로젝트)에 따라 덧붙이는 지침
+fn mode_section(mode: &str) -> &'static str {
+    match mode {
+        "code" => "\n\n[코딩 화면]\n\
+- 사용자는 코드를 고치거나 만들려고 합니다. 고치기 전에 관련 파일을 읽고, 기존 코드의 방식(이름 짓기, 구조, 주석 언어)을 따르세요.\n\
+- 요청한 것만 필요한 만큼 고치세요. 부탁하지 않은 구조 변경이나 문서 파일 만들기는 하지 마세요.\n\
+- 고친 뒤 실행하거나 시험할 방법이 있으면 run_python 또는 run_command로 한 번 실행해 결과를 확인하세요.\n\
+- 답변에는 바꾼 파일과 이유를 짧게 적으세요. 고친 코드 전체를 답변에 다시 붙이지 마세요.",
+        "project" => "\n\n[프로젝트 화면]\n\
+- 사용자는 주로 보고서·문서 작성과 자료 정리를 원합니다. 문서를 만들어 달라는 요청이면 결과물을 파일로 저장하세요 (형식을 말하지 않았으면 .md). 질문에는 파일을 만들지 말고 답변으로 답하세요.\n\
+- 문서는 제목·소제목·표로 읽기 쉽게 구성하세요. 자료에 없는 수치는 지어내지 말고 '확인 필요'라고 적으세요.",
+        _ => "",
+    }
+}
+
+fn build_system_prompt(
+    project: Option<&Project>,
+    mode: &str,
+    skills: &[skills::SkillInfo],
+    mcp_tools: &[mcp::ToolSpec],
+) -> String {
     let mut prompt = base_system_prompt(project);
     if let Some(p) = project {
+        prompt.push_str(mode_section(mode));
         prompt.push_str(&project_files_section(Path::new(&p.root_path)));
     }
     if !mcp_tools.is_empty() {
@@ -870,6 +918,52 @@ pub struct TurnRequest<'a> {
     pub history: &'a [ChatMessage],
     /// 승인 대기로 멈췄던 어시스턴트 메시지. 주어지면 새 메시지를 만들지 않고 이어서 진행한다.
     pub continue_from: Option<ChatMessage>,
+    /// 메시지를 보낸 화면 ("chat" | "project" | "code"). 화면에 맞는 지침을 고른다. 모르면 빈 문자열.
+    pub mode: &'a str,
+    /// 답변을 받는 동안 지금까지의 내용을 넘겨받아 저장하는 함수. 앱이 꺼져도 받은 데까지는 남는다.
+    pub checkpoint: Option<&'a (dyn Fn(&ChatMessage) + Send + Sync)>,
+}
+
+/// 답변을 받는 동안 중간 저장을 하는 간격
+const CHECKPOINT_EVERY: Duration = Duration::from_secs(15);
+
+fn joined_content(rounds: &[String]) -> String {
+    rounds
+        .iter()
+        .filter(|c| !c.trim().is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// 지금까지 받은 내용으로 중간 저장용 메시지를 만든다.
+/// `partial`은 아직 끝나지 않은 라운드의 (글, 추론, 앞 라운드에 이어 붙이는 중인지).
+fn checkpoint_message(msg: &ChatMessage, partial: Option<(&str, &str, bool)>) -> ChatMessage {
+    let mut m = msg.clone();
+    if let Some((content, reasoning, continuing)) = partial {
+        match m.round_contents.last_mut() {
+            Some(last) if continuing => last.push_str(content),
+            _ => m.round_contents.push(content.to_string()),
+        }
+        let idx = m.round_contents.len() - 1;
+        m.push_round_reasoning(idx, reasoning);
+    }
+    m.content = joined_content(&m.round_contents);
+    m.incomplete = true;
+    m
+}
+
+/// 요청 한 번의 호출·토큰·시간을 답변의 통계에 더한다.
+fn add_stats(msg: &mut ChatMessage, trace: &RoundTrace) {
+    let num = |key: &str| trace.usage.as_ref().and_then(|u| u.get(key)).and_then(Value::as_u64);
+    let stats = msg.stats.get_or_insert_with(TurnStats::default);
+    stats.api_calls += trace.attempts;
+    stats.elapsed_ms += trace.total_ms;
+    if let Some(n) = num("prompt_tokens") {
+        stats.prompt_tokens = n;
+    }
+    stats.completion_tokens += num("completion_tokens").unwrap_or(0);
+    stats.reasoning_tokens += num("reasoning_tokens").unwrap_or(0);
 }
 
 struct StreamSink<'a, R: Runtime> {
@@ -968,7 +1062,7 @@ async fn send_with_retry<R: Runtime>(
         trace.rate_limits = rate_limit_headers(resp.headers());
         let rate = parse_rate_info(resp.headers());
         if let Some(info) = &rate {
-            *LAST_RATE.lock().unwrap_or_else(|e| e.into_inner()) = Some(info.clone());
+            remember_rate(info);
             sink.emit(|p| p.rate_info = Some(info.clone()));
         }
         if status.is_success() {
@@ -1011,7 +1105,7 @@ async fn send_with_retry<R: Runtime>(
 
         if code == 401 || code == 403 {
             return Err(format!(
-                "EXAONE API 키가 올바르지 않거나 권한이 없습니다 ({}). [API 설정]에서 API 키를 확인해 주세요. {}",
+                "EXAONE API 키가 올바르지 않거나 권한이 없습니다 ({}). K-EXAONE API 키는 발급한 지 30일이 지나면 만료됩니다. 만료됐다면 새 키를 발급받아 [API 설정]에 입력해 주세요. {}",
                 status, err_text
             ));
         }
@@ -1173,6 +1267,87 @@ fn edit_context(new_content: &str, pos: usize, len: usize) -> String {
     }
 }
 
+/// 문서 검색에서 열어 보는 파일 수와 크기의 상한 (문서는 변환해야 읽을 수 있어 느리다)
+const DOC_SEARCH_MAX_FILES: usize = 20;
+const DOC_SEARCH_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Word·Excel·PowerPoint·PDF 안에서 `query`가 든 줄을 찾는다. "경로: 줄" 형식으로 파일마다 3줄까지.
+async fn search_in_documents<R: Runtime>(app: &AppHandle<R>, root: &Path, query: &str) -> Vec<String> {
+    fn collect(nodes: &[fs_ops::FileNode], out: &mut Vec<String>) {
+        for n in nodes {
+            if n.is_dir {
+                if let Some(children) = &n.children {
+                    collect(children, out);
+                }
+            } else if DocKind::from_path(&n.relative_path).is_some()
+                && n.size <= DOC_SEARCH_MAX_BYTES
+                && out.len() < DOC_SEARCH_MAX_FILES
+            {
+                out.push(n.relative_path.clone());
+            }
+        }
+    }
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut files = Vec::new();
+    if let Ok(tree) = fs_ops::list_project_tree(root, 5) {
+        collect(&tree, &mut files);
+    }
+    let mut hits = Vec::new();
+    for rel in files {
+        let Some(kind) = DocKind::from_path(&rel) else { continue };
+        let Ok(bytes) = fs_ops::read_file_bytes(root, &rel) else { continue };
+        // 변환기를 쓸 수 없으면(창이 준비되지 않음) 문서 검색은 건너뛴다.
+        let Ok(text) = doc_bridge::extract_text(app, kind, &bytes).await else { break };
+        for line in text.lines().filter(|l| l.to_lowercase().contains(&needle)).take(3) {
+            let short: String = line.trim().chars().take(200).collect();
+            hits.push(format!("{}: {}", rel, short));
+        }
+    }
+    hits
+}
+
+/// 한 번에 모델에 돌려주는 파일 내용의 길이 (안내문이 붙어도 `MAX_TOOL_OUTPUT_CHARS`를 넘지 않게)
+const READ_PAGE_CHARS: usize = MAX_TOOL_OUTPUT_CHARS - 400;
+
+fn offset_arg(args: &Value) -> usize {
+    args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize
+}
+
+/// 긴 글을 `offset`부터 한 쪽 분량만 잘라 주고, 이어 읽는 방법을 안내한다.
+fn page_text(text: &str, offset: usize) -> String {
+    let total = text.chars().count();
+    if offset == 0 && total <= READ_PAGE_CHARS {
+        return text.to_string();
+    }
+    if offset >= total {
+        return format!("[파일은 {}자까지입니다. offset {}에는 더 읽을 내용이 없습니다.]", total, offset);
+    }
+    let page: String = text.chars().skip(offset).take(READ_PAGE_CHARS).collect();
+    let end = offset + page.chars().count();
+    if end < total {
+        format!(
+            "{}\n\n[전체 {}자 중 {}~{}자를 표시했습니다. 이어서 읽으려면 offset={}으로 read_file을 다시 호출하세요.]",
+            page, total, offset, end, end
+        )
+    } else {
+        format!("{}\n\n[전체 {}자 중 {}자부터 끝까지 표시했습니다.]", page, total, offset)
+    }
+}
+
+/// 프로젝트에서 "항상 허용"할 수 있는 도구. 삭제와 보호 폴더 쓰기는 매번 묻는다.
+pub const AUTO_APPROVABLE: [&str; 2] = ["run_python", "run_command"];
+/// "항상 허용"으로 바로 실행한 도구를 기다리는 최대 시간
+const AUTO_RUN_LIMIT: Duration = Duration::from_secs(200);
+
+fn is_auto_approved(project: &Project, record: &ToolExecutionRecord) -> bool {
+    record.status == "pending_approval"
+        && AUTO_APPROVABLE.contains(&record.tool_name.as_str())
+        && project.auto_approve.iter().any(|t| t == &record.tool_name)
+}
+
 /// 한 라운드의 스트림 줄을 처리하고 화면으로 델타를 내보낸다.
 struct RoundStreamer {
     acc: RoundAccumulator,
@@ -1224,7 +1399,7 @@ pub async fn run_exaone_turn<R: Runtime>(
     };
     let tools = tools_for(req.project.is_some(), !available_skills.is_empty(), &mcp_tools);
     let tools_enabled = tools.is_some();
-    let sys_prompt = build_system_prompt(req.project, &available_skills, &mcp_tools);
+    let sys_prompt = build_system_prompt(req.project, req.mode, &available_skills, &mcp_tools);
     let tune = tuning();
     // 다른 OpenAI 호환 서버는 모르는 항목을 거부할 수 있어 K-EXAONE 모델에만 쓴다.
     let keep_thinking = tune.preserve_thinking && settings.model.to_lowercase().contains("exaone");
@@ -1238,8 +1413,7 @@ pub async fn run_exaone_turn<R: Runtime>(
         reasoning_content: None,
         tool_records: Vec::new(),
         created_at: chrono::Local::now().to_rfc3339(),
-        round_contents: Vec::new(),
-        round_reasonings: Vec::new(),
+        ..Default::default()
     });
     if msg.round_contents.is_empty() && !msg.content.is_empty() {
         msg.round_contents.push(msg.content.clone());
@@ -1321,12 +1495,14 @@ pub async fn run_exaone_turn<R: Runtime>(
                 cancelled = true;
                 trace.error = Some("cancelled".to_string());
                 trace.total_ms = round_started.elapsed().as_millis() as u64;
+                add_stats(&mut msg, &trace);
                 trace_push(trace);
                 break;
             }
             Err(e) => {
                 trace.error = Some(e.clone());
                 trace.total_ms = round_started.elapsed().as_millis() as u64;
+                add_stats(&mut msg, &trace);
                 trace_push(trace);
                 if compact_level < 2 && looks_like_context_overflow(&e) {
                     // 대화가 길어 모델이 받을 수 있는 양을 넘었다: 오래된 내용을 크게 줄여 한 번 더 보낸다.
@@ -1349,7 +1525,16 @@ pub async fn run_exaone_turn<R: Runtime>(
 
         let mut last_chunk = Instant::now();
         let mut quiet_notice = false;
+        let mut last_checkpoint = Instant::now();
         while !finished {
+            // 받는 도중 주기적으로 저장해, 앱이 꺼져도 받은 데까지는 남게 한다.
+            if last_checkpoint.elapsed() >= CHECKPOINT_EVERY {
+                last_checkpoint = Instant::now();
+                let acc = &streamer.acc;
+                if let (Some(save), true) = (req.checkpoint, !acc.content.is_empty() || !acc.reasoning.is_empty()) {
+                    save(&checkpoint_message(&msg, Some((&acc.content, &acc.reasoning, continuing))));
+                }
+            }
             match race_cancel(stream.next(), &cancel_flag, QUIET_TICK).await {
                 Raced::Cancelled => {
                     cancelled = true;
@@ -1437,31 +1622,16 @@ pub async fn run_exaone_turn<R: Runtime>(
             })
             .collect();
         trace.error = failure.clone().or_else(|| cancelled.then(|| "cancelled".to_string()));
+        add_stats(&mut msg, &trace);
         trace_push(trace);
 
-        if !acc.reasoning.is_empty() {
-            let merged = match msg.reasoning_content.take() {
-                Some(prev) if !prev.is_empty() => format!("{}\n\n{}", prev, acc.reasoning),
-                _ => acc.reasoning.clone(),
-            };
-            msg.reasoning_content = Some(merged);
-        }
         match msg.round_contents.last_mut() {
             Some(last) if continuing => last.push_str(&acc.content),
             _ => msg.round_contents.push(acc.content.clone()),
         }
-        if keep_thinking && !acc.reasoning.is_empty() {
-            // 라운드 글과 같은 자리에 그때의 추론을 둔다 (다음 요청에 돌려보내기 위해).
-            let idx = msg.round_contents.len() - 1;
-            if msg.round_reasonings.len() <= idx {
-                msg.round_reasonings.resize(idx + 1, String::new());
-            }
-            let slot = &mut msg.round_reasonings[idx];
-            if !slot.is_empty() {
-                slot.push_str("\n\n");
-            }
-            slot.push_str(&acc.reasoning);
-        }
+        // 추론은 한 벌만 저장하고, 이 라운드의 것이 어디인지 위치를 함께 적는다 (다음 요청에 돌려보내기 위해).
+        let round_idx = msg.round_contents.len() - 1;
+        msg.push_round_reasoning(round_idx, &acc.reasoning);
         continuing = false;
 
         // 취소되거나 실패하면 끝까지 받지 못한 도구 호출은 실행하지 않는다.
@@ -1601,6 +1771,26 @@ pub async fn run_exaone_turn<R: Runtime>(
                 };
             // 이어 받기로 라운드 글이 합쳐질 수 있어, 방금 넣은 글의 위치를 라운드 번호로 쓴다.
             record.round = msg.round_contents.len().saturating_sub(1) as u32;
+            // 사용자가 이 프로젝트에서 "항상 허용"한 도구는 묻지 않고 바로 실행한다.
+            let mut needs_approval = needs_approval;
+            if let Some(project) = req.project.filter(|p| needs_approval && is_auto_approved(p, &record)) {
+                record.status = "running".to_string();
+                sink.tool(record.clone(), snap.clone());
+                let args: Value = serde_json::from_str(&record.arguments_json).unwrap_or_default();
+                let run = crate::run_approved_tool(app, Some(project), &record.id, &record.tool_name, &args, false);
+                match race_cancel(run, &cancel_flag, AUTO_RUN_LIMIT).await {
+                    Raced::Done(done) => {
+                        record.status = done.status.to_string();
+                        record.output = done.output;
+                        record.produced_files = done.produced;
+                    }
+                    Raced::Cancelled | Raced::TimedOut => {
+                        record.status = "error".to_string();
+                        record.output = "실행을 끝까지 기다리지 못하고 중단했습니다.".to_string();
+                    }
+                }
+                needs_approval = false;
+            }
             if let Some(s) = &snap {
                 new_snapshots.push(s.clone());
             }
@@ -1617,6 +1807,10 @@ pub async fn run_exaone_turn<R: Runtime>(
             &refs,
         );
         msg.tool_records.extend(round_records);
+        // 도구를 실행할 때마다 저장한다 (파일은 이미 바뀌었으니 기록도 남아야 한다).
+        if let Some(save) = req.checkpoint {
+            save(&checkpoint_message(&msg, None));
+        }
 
         if paused_for_approval {
             break;
@@ -1669,13 +1863,8 @@ pub async fn run_exaone_turn<R: Runtime>(
         }
     }
 
-    msg.content = msg
-        .round_contents
-        .iter()
-        .filter(|c| !c.trim().is_empty())
-        .cloned()
-        .collect::<Vec<_>>()
-        .join("\n\n");
+    msg.content = joined_content(&msg.round_contents);
+    msg.incomplete = false;
 
     sink.done();
     Ok((msg, new_snapshots))
@@ -1847,7 +2036,7 @@ async fn run_tool<R: Runtime>(
             let rel = str_arg(args, "relative_path");
             let res = fs_ops::resolve_safe_path(root, rel)
                 .and_then(|target| fs_ops::list_project_subtree(root, &target, 2))
-                .map(|nodes| serde_json::to_string_pretty(&nodes).unwrap_or_default());
+                .map(|nodes| tree_lines(&nodes, "(빈 폴더입니다)"));
             match res {
                 Ok(out) => done(out, None),
                 Err(err) => fail(err, None),
@@ -1856,7 +2045,7 @@ async fn run_tool<R: Runtime>(
         "read_file" => {
             let rel = str_arg(args, "relative_path");
             match fs_ops::read_file_content(root, rel) {
-                Ok(content) => done(content, Some(rel.replace('\\', "/"))),
+                Ok(content) => done(page_text(&content, offset_arg(args)), Some(rel.replace('\\', "/"))),
                 Err(err) => fail(err, Some(rel.to_string())),
             }
         }
@@ -1922,7 +2111,16 @@ async fn run_tool<R: Runtime>(
             }
         }
         "search_files" => match fs_ops::search_in_files(root, str_arg(args, "query")) {
-            Ok(out) => done(out, None),
+            Ok(out) => {
+                let docs = search_in_documents(app, root, str_arg(args, "query")).await;
+                if docs.is_empty() {
+                    done(out, None)
+                } else if out.contains("검색 결과가 없습니다") {
+                    done(docs.join("\n"), None)
+                } else {
+                    done(format!("{}\n{}", out, docs.join("\n")), None)
+                }
+            }
             Err(err) => fail(err, None),
         },
         "delete_path" | "run_command" | "run_python" => {
@@ -2034,7 +2232,7 @@ async fn document_tool<R: Runtime>(
                 Ok(bytes) => doc_bridge::extract_text(app, kind, &bytes).await,
                 Err(e) => Err(e),
             };
-            match res {
+            match res.map(|text| page_text(&text, offset_arg(args))) {
                 Ok(text) => (
                     tool_record(
                         call_id,
@@ -2126,8 +2324,7 @@ mod tests {
             reasoning_content: None,
             tool_records: vec![],
             created_at: String::new(),
-            round_contents: vec![],
-            round_reasonings: vec![],
+            ..Default::default()
         }
     }
 
@@ -2523,6 +2720,8 @@ mod tests {
             model: "k-exaone_v2.5".into(),
             reasoning_effort: "high".into(),
             writing_style: "default".into(),
+            api_key_saved_at: None,
+            check_updates: true,
         }
     }
 
@@ -2533,6 +2732,7 @@ mod tests {
             root_path: root.to_string_lossy().to_string(),
             instructions: String::new(),
             created_at: String::new(),
+            auto_approve: Vec::new(),
         }
     }
 
@@ -2559,6 +2759,8 @@ mod tests {
                 conversation_id: "conv-busy",
                 history: &history,
                 continue_from: None,
+                mode: "",
+                checkpoint: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -2641,6 +2843,8 @@ mod tests {
                 conversation_id: "conv-1",
                 history: &history,
                 continue_from: None,
+                mode: "",
+                checkpoint: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -2701,6 +2905,8 @@ mod tests {
                 conversation_id: "conv-2",
                 history: &[user.clone()],
                 continue_from: None,
+                mode: "",
+                checkpoint: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -2721,6 +2927,8 @@ mod tests {
                 conversation_id: "conv-2",
                 history: &history,
                 continue_from: Some(paused.clone()),
+                mode: "",
+                checkpoint: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -2765,6 +2973,8 @@ mod tests {
                 conversation_id: "conv-3",
                 history: &[msg("user", "길게 말해줘")],
                 continue_from: None,
+                mode: "",
+                checkpoint: None,
             },
             flag,
         )
@@ -2873,13 +3083,13 @@ mod tests {
         std::fs::write(dir.path().join("data/2025/sales.csv"), "a,b\n1,2\n").unwrap();
         std::fs::write(dir.path().join("README.md"), "x".repeat(2048)).unwrap();
         std::fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
-        let prompt = build_system_prompt(Some(&test_project(dir.path())), &[], &[]);
+        let prompt = build_system_prompt(Some(&test_project(dir.path())), "project", &[], &[]);
         assert!(prompt.contains("[프로젝트 파일 목록]"));
         assert!(prompt.contains("data/2025/sales.csv (8B)"), "{}", prompt);
         assert!(prompt.contains("README.md (2KB)"));
         assert!(!prompt.contains("node_modules"));
         // 일반 채팅에는 넣지 않는다.
-        assert!(!build_system_prompt(None, &[], &[]).contains("프로젝트 파일 목록"));
+        assert!(!build_system_prompt(None, "chat", &[], &[]).contains("프로젝트 파일 목록"));
 
         let big = tempfile::tempdir().unwrap();
         for i in 0..200 {
@@ -2934,12 +3144,13 @@ mod tests {
         let history = vec![msg("user", "a.txt 읽어 줘")];
         let (out, _) = run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, project: Some(&project), conversation_id: "c", history: &history, continue_from: None },
+            TurnRequest { settings: &settings, project: Some(&project), conversation_id: "c", history: &history, continue_from: None, mode: "", checkpoint: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await
         .unwrap();
-        assert_eq!(out.round_reasonings, vec!["파일을 먼저 읽자".to_string()]);
+        assert_eq!(out.round_reasoning(0), Some("파일을 먼저 읽자"));
+        assert_eq!(out.stats.as_ref().map(|s| s.api_calls), Some(2));
         let b = bodies.lock().unwrap();
         assert_eq!(b[0]["chat_template_kwargs"]["preserve_thinking"], true);
         assert_eq!(b[0]["stream_options"]["include_usage"], true);
@@ -3026,6 +3237,134 @@ mod tests {
     }
 
     #[test]
+    fn long_files_are_read_a_page_at_a_time() {
+        let text = "가".repeat(READ_PAGE_CHARS + 100);
+        let first = page_text(&text, 0);
+        assert!(first.contains(&format!("offset={}으로 read_file을 다시", READ_PAGE_CHARS)), "{}", &first[first.len() - 200..]);
+        assert!(first.chars().count() <= MAX_TOOL_OUTPUT_CHARS);
+        let rest = page_text(&text, READ_PAGE_CHARS);
+        assert!(rest.starts_with(&"가".repeat(100)) && rest.contains("끝까지 표시"));
+        assert!(page_text(&text, text.chars().count() + 5).contains("더 읽을 내용이 없습니다"));
+        assert_eq!(page_text("짧은 글", 0), "짧은 글");
+    }
+
+    #[tokio::test]
+    async fn directory_listing_is_plain_lines_and_search_looks_inside_documents() {
+        let app = app_with_fake_converter();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(dir.path().join("docs/메모.md"), "환불은 3일 안에").unwrap();
+        std::fs::write(dir.path().join("docs/규정.docx"), "첫 줄\n위약금은 10%입니다\n끝").unwrap();
+
+        let (l, _, _) = execute_or_queue_tool(app.handle(), dir.path(), "p", "c1", "list_directory", &json!({"relative_path": ""})).await;
+        assert!(l.output.contains("docs/\n") && l.output.contains("docs/메모.md ("), "{}", l.output);
+        assert!(!l.output.contains('{'), "JSON이 아니라 한 줄에 경로 하나씩이다");
+
+        let (r, _, _) = execute_or_queue_tool(app.handle(), dir.path(), "p", "c2", "search_files", &json!({"query": "위약금"})).await;
+        assert_eq!(r.status, "completed");
+        assert!(r.output.contains("docs/규정.docx: ") && r.output.contains("위약금은 10%입니다"), "{}", r.output);
+    }
+
+    #[test]
+    fn each_screen_gets_its_own_guidance() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = test_project(dir.path());
+        let code = build_system_prompt(Some(&project), "code", &[], &[]);
+        let doc = build_system_prompt(Some(&project), "project", &[], &[]);
+        assert!(code.contains("[코딩 화면]") && !code.contains("[프로젝트 화면]"));
+        assert!(doc.contains("[프로젝트 화면]") && !doc.contains("[코딩 화면]"));
+        assert!(!build_system_prompt(Some(&project), "", &[], &[]).contains("화면]"));
+    }
+
+    #[tokio::test]
+    async fn progress_is_saved_after_each_tool_round_and_stats_are_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "내용").unwrap();
+        let r1 = vec![
+            sse(json!({"choices":[{"delta":{"reasoning_content":"읽자"}}]})),
+            sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"read_file","arguments":"{\"relative_path\":\"a.txt\"}"}}]}}]})),
+            sse(json!({"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20,"reasoning_tokens":5}})),
+            sse_done(),
+        ];
+        let r2 = vec![
+            sse(json!({"choices":[{"delta":{"content":"읽었습니다."}}]})),
+            sse(json!({"choices":[],"usage":{"prompt_tokens":150,"completion_tokens":30,"reasoning_tokens":0}})),
+            sse_done(),
+        ];
+        let (url, _) = mock_server(vec![r1, r2], 0).await;
+        let app = tauri::test::mock_app();
+        let settings = test_settings(url);
+        let project = test_project(dir.path());
+        let history = vec![msg("user", "a.txt 읽어 줘")];
+        let saved: StdMutex<Vec<ChatMessage>> = StdMutex::new(Vec::new());
+        let checkpoint = |m: &ChatMessage| saved.lock().unwrap().push(m.clone());
+        let (out, _) = run_exaone_turn(
+            app.handle(),
+            TurnRequest {
+                settings: &settings,
+                project: Some(&project),
+                conversation_id: "c",
+                history: &history,
+                continue_from: None,
+                mode: "project",
+                checkpoint: Some(&checkpoint),
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+
+        let saved = saved.lock().unwrap();
+        assert_eq!(saved.len(), 1, "도구를 실행한 직후 한 번 저장한다");
+        assert!(saved[0].incomplete && saved[0].tool_records.len() == 1 && saved[0].id == out.id);
+        assert!(!out.incomplete);
+        let stats = out.stats.unwrap();
+        assert_eq!((stats.api_calls, stats.prompt_tokens, stats.completion_tokens, stats.reasoning_tokens), (2, 150, 50, 5));
+    }
+
+    #[tokio::test]
+    async fn always_allowed_tools_run_without_asking() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("hello.py"), "print('자동 실행됨')\n").unwrap();
+        let call = |id: &str| {
+            vec![
+                sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":id,"function":{"name":"run_python","arguments":"{\"relative_path\":\"hello.py\"}"}}]}}]})),
+                sse_done(),
+            ]
+        };
+        let done = || vec![sse(json!({"choices":[{"delta":{"content":"끝"}}]})), sse_done()];
+        let (url, _) = mock_server(vec![call("c1"), call("c2"), done()], 0).await;
+        let app = tauri::test::mock_app();
+        let settings = test_settings(url);
+        let history = vec![msg("user", "실행해 줘")];
+        let run = |project: Project| {
+            let (app, settings, history) = (&app, &settings, &history);
+            async move {
+                run_exaone_turn(
+                    app.handle(),
+                    TurnRequest { settings, project: Some(&project), conversation_id: "c", history, continue_from: None, mode: "", checkpoint: None },
+                    Arc::new(AtomicBool::new(false)),
+                )
+                .await
+                .unwrap()
+                .0
+            }
+        };
+
+        // 허락하지 않은 프로젝트에서는 승인을 기다린다.
+        let asked = run(test_project(dir.path())).await;
+        assert_eq!(asked.tool_records[0].status, "pending_approval");
+
+        // "항상 허용"한 프로젝트에서는 바로 실행하고 답변까지 이어 간다.
+        let mut allowed = test_project(dir.path());
+        allowed.auto_approve = vec!["run_python".to_string()];
+        let ran = run(allowed).await;
+        assert_eq!(ran.tool_records[0].status, "completed", "{}", ran.tool_records[0].output);
+        assert!(ran.tool_records[0].output.contains("자동 실행됨"));
+        assert_eq!(ran.content, "끝");
+    }
+
+    #[test]
     fn detects_context_overflow_errors() {
         assert!(looks_like_context_overflow("EXAONE API 응답 오류 (400 Bad Request): This model's maximum context length is 131072 tokens"));
         assert!(looks_like_context_overflow("EXAONE API 응답 오류 (413 Payload Too Large): request too long"));
@@ -3046,7 +3385,7 @@ mod tests {
         let settings = test_settings(url);
         run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, project: None, conversation_id: "conv-r", history: &history, continue_from: None },
+            TurnRequest { settings: &settings, project: None, conversation_id: "conv-r", history: &history, continue_from: None, mode: "", checkpoint: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await

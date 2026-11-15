@@ -18,6 +18,7 @@ import {
   SkillInfo,
   StreamChunkPayload,
   RateInfo,
+  UpdateInfo,
 } from "./types";
 
 export const isTauri = () =>
@@ -622,13 +623,16 @@ export const BackendAPI = {
   async sendChatMessage(
     conversationId: string,
     userContent: string,
-    attachedFiles: string[]
+    attachedFiles: string[],
+    /** 메시지를 보낸 화면. 화면에 맞는 지침을 고르는 데 쓴다. */
+    mode: "chat" | "project" | "code"
   ): Promise<Conversation> {
     if (isTauri()) {
       return await invoke<Conversation>("send_chat_message", {
         conversationId,
         userContent,
         attachedFiles,
+        mode,
       });
     }
     throw new Error("Tauri 데스크톱 창에서 실행해 주세요.");
@@ -680,6 +684,45 @@ export const BackendAPI = {
       });
     }
     return "$ " + command + "\n(Tauri 네이티브 모드에서 실행됩니다.)";
+  },
+
+  /** 지금 실행 중인 앱의 버전 (브라우저 미리보기에서는 빈 문자열) */
+  async appVersion(): Promise<string> {
+    return isTauri() ? await invoke<string>("app_version") : "";
+  },
+
+  /** 새 버전이 있으면 그 정보를, 최신이면 null을 돌려준다. */
+  async checkUpdate(): Promise<UpdateInfo | null> {
+    return isTauri() ? await invoke<UpdateInfo | null>("check_update") : null;
+  },
+
+  /** 새 버전을 내려받아 설치한다. 성공하면 앱이 닫히고 새 버전으로 다시 열린다. */
+  async installUpdate(): Promise<void> {
+    if (!isTauri()) throw new Error("Tauri 데스크톱 창에서 실행해 주세요.");
+    await invoke("install_update");
+  },
+
+  async onUpdateProgress(
+    handler: (p: { downloaded: number; total: number | null }) => void
+  ): Promise<UnlistenFn> {
+    if (isTauri()) {
+      return await listen<{ downloaded: number; total: number | null }>("update-progress", (e) => handler(e.payload));
+    }
+    return () => {};
+  },
+
+  /** 프로젝트에서 묻지 않고 실행할 도구("run_python" | "run_command")를 켜거나 끈다. */
+  async setProjectAutoApprove(projectId: string, tool: string, enabled: boolean): Promise<Project> {
+    if (isTauri()) {
+      return await invoke<Project>("set_project_auto_approve", { projectId, tool, enabled });
+    }
+    const db = loadFallbackDb();
+    const proj = db.projects.find((p) => p.id === projectId);
+    if (!proj) throw new Error("프로젝트를 찾을 수 없습니다.");
+    proj.autoApprove = (proj.autoApprove ?? []).filter((t) => t !== tool);
+    if (enabled) proj.autoApprove.push(tool);
+    localStorage.setItem(FALLBACK_STORAGE_KEY, JSON.stringify(db));
+    return proj;
   },
 
   /** 가장 최근 응답에서 받은 호출 한도 (이번 실행에서 아직 호출 전이면 null) */
