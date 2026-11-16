@@ -2,6 +2,7 @@
 import JSZip from "jszip";
 import { describe, expect, it } from "vitest";
 import { docxToMarkdown } from "./docx";
+import { hwpxToMarkdown } from "./hwpx";
 import { exportAnswer, parentDir, sanitizeFileName, suggestAnswerFileName } from "./answerExport";
 
 const ANSWER = `## 삼성전자 2025년 실적 요약
@@ -59,6 +60,18 @@ describe("답변 내보내기", () => {
 
     const back = await docxToMarkdown(bytes);
     expect(back).toContain("삼성전자 2025년 실적 요약");
+    expect(back).toContain("**매출은 333.61조 원**");
+    expect(back).toMatch(/\|\s*4분기\s*\|\s*93\.84\s*\|\s*20\.07\s*\|/);
+    expect(back).toMatch(/-\s+메모리 회복/);
+  });
+
+  it("한글 문서도 제목·표·굵게·목록을 살린다", async () => {
+    const bytes = await exportAnswer(ANSWER, "hwpx", "삼성전자 2025년 실적 요약");
+    const zip = await JSZip.loadAsync(bytes);
+    expect(Object.keys(zip.files)[0]).toBe("mimetype");
+    expect(await zip.file("Contents/content.hpf")!.async("string")).toContain("삼성전자 2025년 실적 요약");
+    const back = await hwpxToMarkdown(bytes);
+    expect(back).toContain("## 삼성전자 2025년 실적 요약");
     expect(back).toContain("**매출은 333.61조 원**");
     expect(back).toMatch(/\|\s*4분기\s*\|\s*93\.84\s*\|\s*20\.07\s*\|/);
     expect(back).toMatch(/-\s+메모리 회복/);

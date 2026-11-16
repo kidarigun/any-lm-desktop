@@ -21,17 +21,55 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 REPO = "kidarigun/k-exaone-desktop"
+PUBLISHED = f"https://github.com/{REPO}/releases/latest/download/latest.json"
+
+
+def version_tuple(v: str) -> tuple:
+    """'0.4.0' → (0, 4, 0). 숫자가 아닌 꼬리(-beta 등)는 무시한다."""
+    parts = []
+    for p in v.strip().lstrip("v").split("-")[0].split("."):
+        parts.append(int(p) if p.isdigit() else 0)
+    return tuple(parts + [0] * (3 - len(parts)))
+
+
+def published_version() -> str | None:
+    """지금 깃허브에 올라가 있는 latest.json의 버전. 읽을 수 없으면 None."""
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(PUBLISHED, timeout=15) as r:
+            return json.loads(r.read().decode("utf-8")).get("version")
+    except Exception:
+        return None
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--notes", default="", help="앱의 업데이트 창에 보여 줄 바뀐 점")
     ap.add_argument("--out", default="release", help="올릴 파일을 모을 폴더")
+    ap.add_argument(
+        "--allow-same-version",
+        action="store_true",
+        help="올라가 있는 버전보다 높지 않아도 만든다 (설치된 앱은 이 파일을 새 버전으로 보지 않는다)",
+    )
     args = ap.parse_args()
 
     conf = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
     version = conf["version"]
     product = conf["productName"]
+
+    # 설치된 앱은 버전 번호가 더 높을 때만 업데이트로 본다. 같은 번호로 다시 올리면 아무도 받지 못한다.
+    current = published_version()
+    if current is None:
+        print(f"올라가 있는 latest.json을 읽지 못했습니다 ({PUBLISHED}). 버전 비교 없이 계속합니다.", file=sys.stderr)
+    elif version_tuple(version) <= version_tuple(current) and not args.allow_same_version:
+        print(
+            f"이번 버전({version})이 이미 올라가 있는 버전({current})보다 높지 않습니다.\n"
+            "설치된 앱이 새 버전으로 알아보지 못하므로 자동 업데이트가 되지 않습니다.\n"
+            "package.json, package-lock.json, src-tauri/Cargo.toml, src-tauri/tauri.conf.json의 버전을 올리고 다시 빌드하세요.",
+            file=sys.stderr,
+        )
+        return 1
     built = ROOT / "src-tauri" / "target" / "release" / "bundle" / "nsis" / f"{product}_{version}_x64-setup.exe"
     sig = built.with_name(built.name + ".sig")
     if not built.is_file():

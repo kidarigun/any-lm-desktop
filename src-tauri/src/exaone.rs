@@ -291,7 +291,7 @@ pub fn build_tools_schema() -> Value {
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": "프로젝트 폴더 내의 로컬 파일 내용을 읽습니다. PDF, Word(.docx), PowerPoint(.pptx)는 Markdown 텍스트로 변환해 돌려줍니다.",
+                "description": "프로젝트 폴더 내의 로컬 파일 내용을 읽습니다. PDF, Word(.docx), 한글(.hwpx), PowerPoint(.pptx)는 Markdown 텍스트로 변환해 돌려줍니다. 옛 한글 형식(.hwp)은 읽을 수 없습니다.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -312,7 +312,7 @@ pub fn build_tools_schema() -> Value {
             "type": "function",
             "function": {
                 "name": "write_file",
-                "description": "프로젝트 폴더 내에 새 파일을 작성하거나 전체 내용을 덮어씁니다. 경로가 .docx 또는 .pptx이면 content(Markdown)를 Word/PowerPoint 문서로 변환해 저장합니다. PowerPoint는 '---' 줄 또는 '## 제목'으로 슬라이드를 나누고, '노트:'로 시작하는 문단은 발표자 노트가 됩니다. 경로가 .xlsx이면 content의 Markdown 표를 엑셀 시트로 저장합니다: '## 제목'마다 시트 하나, 표의 머리글 줄이 1행·데이터는 2행부터, 숫자 칸은 단위 없이 숫자만(1,200 / 12.5% / 2026-01-31 형식 인식), '='로 시작하는 칸은 수식(예: =SUM(B2:B13)).",
+                "description": "프로젝트 폴더 내에 새 파일을 작성하거나 전체 내용을 덮어씁니다. 경로가 .docx, .hwpx 또는 .pptx이면 content(Markdown)를 Word/한글/PowerPoint 문서로 변환해 저장합니다. PowerPoint는 '---' 줄 또는 '## 제목'으로 슬라이드를 나누고, '노트:'로 시작하는 문단은 발표자 노트가 됩니다. 경로가 .xlsx이면 content의 Markdown 표를 엑셀 시트로 저장합니다: '## 제목'마다 시트 하나, 표의 머리글 줄이 1행·데이터는 2행부터, 숫자 칸은 단위 없이 숫자만(1,200 / 12.5% / 2026-01-31 형식 인식), '='로 시작하는 칸은 수식(예: =SUM(B2:B13)).",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -333,7 +333,7 @@ pub fn build_tools_schema() -> Value {
             "type": "function",
             "function": {
                 "name": "modify_file",
-                "description": "기존 로컬 파일에서 특정 구간(target)을 찾아 새로운 내용(replacement)으로 부분 수정합니다. 텍스트 파일은 target을 빈 문자열로 주면 replacement를 파일 맨 끝에 덧붙입니다. .docx/.pptx는 원래 서식을 유지한 채 한 문단 안의 문구를 교체합니다(Markdown 기호 없이 문서의 실제 문구를 지정). .xlsx는 서식을 유지한 채 한 칸의 글자, 같은 값의 숫자 칸, 또는 '='로 시작하는 수식을 바꿉니다.",
+                "description": "기존 로컬 파일에서 특정 구간(target)을 찾아 새로운 내용(replacement)으로 부분 수정합니다. 텍스트 파일은 target을 빈 문자열로 주면 replacement를 파일 맨 끝에 덧붙입니다. .docx/.hwpx/.pptx는 원래 서식을 유지한 채 한 문단(또는 표의 한 칸) 안의 문구를 교체합니다(Markdown 기호 없이 문서의 실제 문구를 지정). .xlsx는 서식을 유지한 채 한 칸의 글자, 같은 값의 숫자 칸, 또는 '='로 시작하는 수식을 바꿉니다.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -889,8 +889,8 @@ fn base_system_prompt(project: Option<&Project>) -> String {
 - delete_path, run_command, run_python은 사용자가 승인해야 실행됩니다. 거부되면 다른 방법을 제안하세요.\n\
 - 명령은 Windows PowerShell에서, 이미 프로젝트 폴더를 현재 위치로 하여 실행됩니다. cd로 이동하지 말고 cmd 문법(cd /d, &&, %VAR%)은 쓰지 마세요.\n\
 - Python 스크립트는 run_command가 아니라 run_python으로 실행하세요. 새 스크립트는 write_file을 따로 부르지 말고 run_python의 code에 내용을 넣어 한 번에 저장·실행하세요. 실행이 실패하면 _b, _c처럼 새 파일을 만들지 말고, 고친 전체 스크립트를 같은 경로의 code로 다시 보내세요.\n\
-- 보고서·문서를 만들 때 사용자가 Word나 PowerPoint를 원하면 write_file 경로를 .docx 또는 .pptx로 지정하고 content는 Markdown으로 작성하세요. 결과는 사용자의 문서 캔버스에서 바로 열립니다.\n\
-- 기존 .docx/.pptx의 일부 문구만 고칠 때는 modify_file을 쓰면 원래 서식이 유지됩니다. 전체를 다시 쓰면 서식이 단순해집니다.\n\
+- 보고서·문서를 만들 때 사용자가 Word, 한글(HWP/HWPX/아래아한글) 또는 PowerPoint를 원하면 write_file 경로를 .docx, .hwpx 또는 .pptx로 지정하고 content는 Markdown으로 작성하세요. 한글 문서는 늘 .hwpx로 만듭니다(.hwp는 만들 수 없음). 결과는 사용자의 문서 캔버스에서 바로 열립니다.\n\
+- 기존 .docx/.hwpx/.pptx의 일부 문구만 고칠 때는 modify_file을 쓰면 원래 서식이 유지됩니다. 전체를 다시 쓰면 서식이 단순해집니다. 공문서 서식처럼 모양이 중요한 한글 문서는 반드시 modify_file로 고치세요.\n\
 - 엑셀이 필요하면 write_file 경로를 .xlsx로 지정하고 content에 Markdown 표를 쓰세요. 시트는 '## 시트이름'으로 나누고, 합계·비율 등은 '=SUM(B2:B13)' 같은 수식 칸으로 넣으세요. 기존 엑셀은 read_file로 읽고 modify_file로 칸 값을 고칠 수 있습니다.\n\
 - 차트 이미지, 차트가 들어간 엑셀, 복잡한 서식처럼 write_file로 만들 수 없는 파일은 그 파일을 만드는 Python 스크립트를 run_python(code 포함)으로 실행해 실제 파일까지 만드세요. 스크립트만 남기고 끝내지 마세요.\n\
 - run_python 스크립트는 프로젝트 루트에서 실행됩니다. 결과 파일은 프로젝트 폴더 안의 상대 경로로 저장하고, 저장한 경로를 print로 출력하세요. 엑셀은 openpyxl을 쓰세요.\n\
@@ -2011,6 +2011,18 @@ async fn run_tool<R: Runtime>(
 
     if matches!(name, "read_file" | "write_file" | "modify_file") {
         let rel = str_arg(args, "relative_path");
+        if is_legacy_hwp(rel) {
+            let msg = if name == "write_file" {
+                "옛 한글 형식(.hwp)으로는 만들 수 없습니다. 같은 경로를 .hwpx로 바꿔 저장하세요 (한글 2014 이후에서 열립니다)."
+            } else {
+                "옛 한글 형식(.hwp, 바이너리)은 읽거나 고칠 수 없습니다. 사용자에게 한글에서 [다른 이름으로 저장] → HWPX 형식으로 저장해 달라고 요청하세요."
+            };
+            return (
+                tool_record(call_id, name, args_json, "error", msg.to_string(), Some(rel.replace('\\', "/")), None),
+                None,
+                false,
+            );
+        }
         if let Some(kind) = DocKind::from_path(rel) {
             return document_tool(app, root, project_id, call_id, name, args, &args_json, rel, kind).await;
         }
@@ -2207,6 +2219,13 @@ async fn run_tool<R: Runtime>(
 
 /// DOCX/PPTX/PDF/XLSX 파일에 대한 read_file / write_file / modify_file
 #[allow(clippy::too_many_arguments)]
+/// 옛 한글 바이너리 형식(.hwp). 앱의 변환기는 HWPX만 다룬다.
+fn is_legacy_hwp(rel: &str) -> bool {
+    Path::new(rel)
+        .extension()
+        .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("hwp"))
+}
+
 async fn document_tool<R: Runtime>(
     app: &AppHandle<R>,
     root: &Path,
@@ -2260,7 +2279,7 @@ async fn document_tool<R: Runtime>(
         "write_file" => {
             if kind == DocKind::Pdf {
                 return fail(
-                    "PDF 파일은 만들 수 없습니다. 같은 내용을 .docx(Word) 또는 .md로 저장하세요.".to_string(),
+                    "PDF 파일은 만들 수 없습니다. 같은 내용을 .docx(Word), .hwpx(한글) 또는 .md로 저장하세요.".to_string(),
                 );
             }
             let content = str_arg(args, "content");
@@ -2633,6 +2652,42 @@ mod tests {
         .await;
         assert_eq!(pdf.status, "error");
         assert!(pdf.output.contains("PDF 파일은 만들 수 없습니다"));
+    }
+
+    #[tokio::test]
+    async fn hwpx_goes_through_converter_and_old_hwp_is_explained() {
+        let app = app_with_fake_converter();
+        let dir = tempfile::tempdir().unwrap();
+
+        let (w, snap, _) = execute_or_queue_tool(
+            app.handle(), dir.path(), "p", "c1", "write_file",
+            &json!({"relative_path": "공문/시행문.hwpx", "content": "# 제목"}),
+        )
+        .await;
+        assert_eq!(w.status, "completed", "{}", w.output);
+        assert!(w.output.contains("한글(HWPX)"), "{}", w.output);
+        assert!(snap.is_some());
+        assert!(std::fs::read(dir.path().join("공문/시행문.hwpx")).unwrap().starts_with(b"FAKE-hwpx:"));
+
+        let (r, _, _) = execute_or_queue_tool(
+            app.handle(), dir.path(), "p", "c2", "read_file", &json!({"relative_path": "공문/시행문.hwpx"}),
+        )
+        .await;
+        assert_eq!(r.status, "completed");
+        assert!(r.output.contains("[한글(HWPX) 문서를 Markdown으로 변환한 내용]"), "{}", r.output);
+
+        std::fs::write(dir.path().join("옛문서.hwp"), b"\xd0\xcf\x11\xe0").unwrap();
+        for (tool, args, expect) in [
+            ("read_file", json!({"relative_path": "옛문서.hwp"}), "HWPX 형식으로 저장"),
+            ("modify_file", json!({"relative_path": "옛문서.hwp", "target": "a", "replacement": "b"}), "HWPX 형식으로 저장"),
+            ("write_file", json!({"relative_path": "새문서.HWP", "content": "x"}), ".hwpx로 바꿔"),
+        ] {
+            let (rec, snap, _) = execute_or_queue_tool(app.handle(), dir.path(), "p", "c3", tool, &args).await;
+            assert_eq!(rec.status, "error", "{tool}");
+            assert!(rec.output.contains(expect), "{tool}: {}", rec.output);
+            assert!(snap.is_none());
+        }
+        assert!(!dir.path().join("새문서.HWP").exists());
     }
 
     // -----------------------------------------------------------------------

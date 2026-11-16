@@ -312,3 +312,12 @@
     transition-duration: 0s;
   }
 }
+
+/* 한글 문서 편집기의 캐럿 */
+@keyframes hwpx-caret-blink {
+  0%, 50% { opacity: 1; }
+  50.01%, 100% { opacity: 0; }
+}
+.hwpx-caret {
+  animation: hwpx-caret-blink 1.06s step-end infinite;
+}

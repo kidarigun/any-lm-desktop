@@ -1,6 +1,6 @@
 [package]
 name = "exaone-desktop"
-version = "0.3.0"
+version = "0.4.0"
 description = "Unofficial desktop app for LG K-EXAONE"
 authors = ["kidarigun"]
 license = "Apache-2.0"

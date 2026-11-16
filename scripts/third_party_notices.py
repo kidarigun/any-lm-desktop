@@ -99,6 +99,9 @@ Desktop App for LG K-EXAONE은 아래 오픈소스 라이브러리를 사용합�
   "MIT OR Apache-2.0" 형식의 Rust 크레이트는 그중 하나를 따릅니다.
 - MPL-2.0 라이브러리(cssparser, selectors 등 Tauri가 쓰는 크레이트)는 수정하지 않고 그대로 씁니다.
   각 라이브러리의 소스는 아래 표의 저장소에서 받을 수 있습니다.
+- 한글 문서 엔진 @rhwp/core(rhwp, MIT)의 WASM 안에는 rhwp가 함께 묶은 라이브러리(JPEG·JPEG 2000·JBIG2 디코더,
+  qcms, svg2pdf, pdfium 등)가 들어 있습니다. 그 저작권 표시와 라이선스 전문은
+  `node_modules/@rhwp/core/notices/`와 https://github.com/edwardkim/rhwp 에 있습니다.
 
 ## 웹 화면 (npm) — {len(npm)}개
 

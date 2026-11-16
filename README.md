@@ -13,9 +13,9 @@ Skill과 MCP로 기능을 넓히는 Windows 데스크톱 앱입니다. (Tauri v2
 
 - **채팅 · 프로젝트 · 코드** 세 화면. 여러 대화를 동시에 백그라운드로 진행
 - **프로젝트 폴더 도구**: 파일 읽기·쓰기·부분 수정·검색, 삭제와 명령 실행은 승인 후 실행, 모든 변경은 되돌리기 가능
-- **문서 캔버스**: Markdown·Word(.docx) 편집, Excel(.xlsx)·PowerPoint(.pptx)·PDF 미리보기, 다른 형식으로 저장
-- **문서 직접 생성**: Word·PowerPoint·Excel 파일을 앱이 직접 만들고, 차트 같은 복잡한 파일은 Python 스크립트로 생성
-- **답변 저장**: 답변을 .md / .docx로 바로 저장
+- **문서 캔버스**: Markdown·Word(.docx) 편집, 한글(.hwpx)은 원래 모양 그대로 보며 고치기([rhwp](https://github.com/edwardkim/rhwp) 엔진), Excel(.xlsx)·PowerPoint(.pptx)·PDF 미리보기, 다른 형식으로 저장
+- **문서 직접 생성**: Word·한글(HWPX)·PowerPoint·Excel 파일을 앱이 직접 만들고, 차트 같은 복잡한 파일은 Python 스크립트로 생성
+- **답변 저장**: 답변을 .md / .docx / .hwpx로 바로 저장
 - **Skill**: 작업 지침 묶음(Agent Skills 형식)을 설치하면 엑사원이 필요할 때 읽어 따름
 - **MCP**: 로컬(stdio)·원격(Streamable HTTP) MCP 서버 연결, OAuth 로그인 지원, 도구별 승인 설정
 - **찾아보기**: [카탈로그](https://github.com/kidarigun/exaone-catalog)에서 Skill과 MCP 서버를 클릭 한 번으로 설치
@@ -63,6 +63,7 @@ python scripts/make_latest_json.py --notes "바뀐 점 요약"
 gh release create v<버전> release/K-EXAONE-Desktop_<버전>_x64-setup.exe release/latest.json --title "<버전>" --notes-file <노트 파일>
 ```
 
+- 설치된 앱은 버전 번호가 더 높을 때만 업데이트로 봅니다. 기능을 바꿨으면 네 곳(package.json, package-lock.json, src-tauri/Cargo.toml, src-tauri/tauri.conf.json)의 버전을 올리고 빌드하세요. `make_latest_json.py`는 올라가 있는 버전보다 높지 않으면 멈춥니다.
 - 서명 개인 키는 저장소에 넣지 않습니다. 잃어버리면 이미 설치된 앱에 업데이트를 보낼 수 없으니 따로 보관하세요.
 - 공개 키는 `src-tauri/tauri.conf.json`의 `plugins.updater.pubkey`에 있습니다.
 

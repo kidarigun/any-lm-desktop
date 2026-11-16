@@ -1,8 +1,9 @@
 import { markdownToDocx } from "./docx";
+import { markdownToHwpx } from "./hwpx";
 import { stripInlineMarkdown } from "./markdown";
 
 /** 답변을 저장할 수 있는 형식 */
-export type AnswerFormat = "markdown" | "docx";
+export type AnswerFormat = "markdown" | "docx" | "hwpx";
 
 export const ANSWER_FORMATS: Record<AnswerFormat, { label: string; ext: string; filter: string; mime: string }> = {
   markdown: {
@@ -16,6 +17,12 @@ export const ANSWER_FORMATS: Record<AnswerFormat, { label: string; ext: string; 
     ext: "docx",
     filter: "Word 문서 (*.docx)|*.docx|모든 파일 (*.*)|*.*",
     mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  },
+  hwpx: {
+    label: "한글 문서 (.hwpx)",
+    ext: "hwpx",
+    filter: "한글 문서 (*.hwpx)|*.hwpx|모든 파일 (*.*)|*.*",
+    mime: "application/hwp+zip",
   },
 };
 
@@ -56,10 +63,11 @@ export function suggestAnswerFileName(answer: string, question?: string, now = n
   return `엑사원 답변 ${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 }
 
-/** 답변 본문을 파일 내용으로 바꾼다. Markdown은 UTF-8 텍스트, Word는 .docx 바이트. */
+/** 답변 본문을 파일 내용으로 바꾼다. Markdown은 UTF-8 텍스트, Word·한글은 문서 바이트. */
 export async function exportAnswer(answer: string, format: AnswerFormat, title: string): Promise<Uint8Array> {
   const md = answer.trim() + "\n";
   if (format === "docx") return markdownToDocx(md, title);
+  if (format === "hwpx") return markdownToHwpx(md, title);
   return new TextEncoder().encode(md);
 }
 

@@ -17,6 +17,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BackendAPI } from "../api";
 import { bytesToBase64 } from "../docs/base64";
 import { docxToHtml, htmlToDocx } from "../docs/docx";
+import { htmlToHwpx, hwpxToHtml, hwpxToMarkdown } from "../docs/hwpx";
 import {
   KIND_EXTENSION,
   KIND_LABEL,
@@ -33,6 +34,7 @@ import type { FileSnapshot } from "../types";
 import type { CanvasDoc, CanvasSavedInfo } from "./canvasDoc";
 import { PdfViewer } from "./PdfViewer";
 import { PptxViewer } from "./PptxViewer";
+import HwpxEditor, { type HwpxEditorHandle } from "./hwpx/HwpxEditor";
 import { RichTextEditor } from "./RichTextEditor";
 import { XlsxViewer } from "./XlsxViewer";
 
@@ -83,6 +85,9 @@ export default function DocumentCanvas({
 }: DocumentCanvasProps) {
   /** PowerPoint·Excel·PDF는 미리보기만 한다 (저장·편집 없음). */
   const previewOnly = isPreviewOnlyKind(doc.kind);
+  /** 원래 앱에서 열어 고치는 단추를 보일 문서 (한글 문서는 캔버스에서도 고칠 수 있지만 서식이 단순해진다) */
+  const externalApp =
+    doc.kind === "xlsx" ? "Excel" : doc.kind === "pptx" ? "PowerPoint" : doc.kind === "hwpx" ? "한글" : previewOnly ? "기본 앱" : null;
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>("rich");
@@ -101,6 +106,9 @@ export default function DocumentCanvas({
   const [initialHtml, setInitialHtml] = useState("");
   const [sourceText, setSourceText] = useState("");
   const [pptx, setPptx] = useState<PptxSession | null>(null);
+  /** 한글 문서: "engine"은 원본 모양 편집기(rhwp), "simple"은 엔진을 쓸 수 없을 때의 단순 편집기 */
+  const [hwpxMode, setHwpxMode] = useState<"engine" | "simple">("engine");
+  const hwpxRef = useRef<HwpxEditorHandle>(null);
 
   // 문서 불러오기
   useEffect(() => {
@@ -130,6 +138,11 @@ export default function DocumentCanvas({
             setMode("rich");
             break;
           }
+          case "hwpx":
+            // 원본 모양 편집기가 스스로 문서를 연다. 실패하면 단순 편집기로 바꾼다(fallbackToSimpleHwpx).
+            setHwpxMode("engine");
+            setMode("rich");
+            break;
           case "pptx": {
             const session = await parsePptx(doc.bytes ?? new Uint8Array());
             if (!cancelled) setPptx(session);
@@ -167,6 +180,33 @@ export default function DocumentCanvas({
 
   const markDirty = useCallback(() => setDirty(true), []);
 
+  /** 한글 문서 엔진을 쓸 수 없으면 단순 편집기(서식 단순화)로 연다. */
+  const fallbackToSimpleHwpx = useCallback(
+    async (err: unknown) => {
+      console.warn("rhwp 엔진으로 열지 못해 단순 편집기로 엽니다", err);
+      try {
+        const html = await hwpxToHtml(doc.bytes ?? new Uint8Array());
+        htmlRef.current = html;
+        setInitialHtml(html);
+        setHwpxMode("simple");
+        setEditorKey((k) => k + 1);
+      } catch (e) {
+        setLoadError(`문서를 열 수 없습니다: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+    [doc.bytes]
+  );
+
+  /** 원본 모양 편집기의 현재 내용 (HWPX 바이트). 엔진 편집기가 아니면 null. */
+  function engineHwpx(): Uint8Array | null {
+    if (doc.kind !== "hwpx" || hwpxMode !== "engine" || !hwpxRef.current) return null;
+    const { bytes, lossCount } = hwpxRef.current.exportBytes();
+    if (lossCount > 0) {
+      onError(`한글 문서 엔진이 저장하면서 ${lossCount}개 요소를 그대로 보존하지 못했다고 알렸습니다. 문제가 있으면 [변경 기록]에서 되돌리세요.`);
+    }
+    return bytes;
+  }
+
   // Markdown 서식 편집 ↔ 원문 편집 전환
   function switchMode(next: Mode) {
     if (next === mode) return;
@@ -191,6 +231,10 @@ export default function DocumentCanvas({
         return mode === "rich" ? htmlToMarkdown(htmlRef.current) : textRef.current;
       case "docx":
         return htmlToMarkdown(htmlRef.current);
+      case "hwpx": {
+        const bytes = engineHwpx();
+        return bytes ? hwpxToMarkdown(bytes) : htmlToMarkdown(htmlRef.current);
+      }
       case "html":
         return htmlToMarkdown(extractBodyHtml(textRef.current));
       case "pptx":
@@ -204,12 +248,16 @@ export default function DocumentCanvas({
     }
   }
 
-  function currentHtml(): string {
+  async function currentHtml(): Promise<string> {
     switch (doc.kind) {
       case "markdown":
         return mode === "rich" ? htmlRef.current : markdownToHtml(textRef.current);
       case "docx":
         return htmlRef.current;
+      case "hwpx": {
+        const bytes = engineHwpx();
+        return bytes ? hwpxToHtml(bytes) : htmlRef.current;
+      }
       case "html":
         return extractBodyHtml(textRef.current);
       default:
@@ -226,9 +274,16 @@ export default function DocumentCanvas({
       case "text":
         return doc.kind === "text" ? textRef.current : currentMarkdown();
       case "html":
-        return doc.kind === "html" ? textRef.current : wrapHtmlDocument(currentHtml(), baseTitle);
+        return doc.kind === "html" ? textRef.current : wrapHtmlDocument(await currentHtml(), baseTitle);
       case "docx":
-        return htmlToDocx(currentHtml(), baseTitle);
+        return htmlToDocx(await currentHtml(), baseTitle);
+      case "hwpx": {
+        // 원본 모양 편집기는 원래 구조를 그대로 내보낸다.
+        const bytes = engineHwpx();
+        if (bytes) return bytes;
+        // 단순 편집기로 다시 저장할 때는 원래 용지 크기·여백을 유지한다.
+        return htmlToHwpx(await currentHtml(), baseTitle, doc.kind === "hwpx" ? { base: doc.bytes } : {});
+      }
       case "pptx":
         if (doc.kind === "pptx") return (doc.bytes ?? new Uint8Array()).slice();
         return markdownToPptx(await currentMarkdown(), baseTitle);
@@ -352,6 +407,10 @@ export default function DocumentCanvas({
   const notice =
     doc.kind === "docx"
       ? "Word 문서를 서식 편집기로 열었습니다. 저장하면 글꼴·색상·머리글/바닥글 같은 복잡한 서식은 단순화됩니다. 저장 전 상태는 위의 [변경 기록]에서 비교하고 되돌릴 수 있습니다."
+      : doc.kind === "hwpx" && hwpxMode === "engine"
+        ? "한글 문서를 원래 모양 그대로 열었습니다. 글자를 눌러 바로 고칠 수 있고(입력·지우기·Enter·Ctrl+Z), 저장해도 서식은 그대로입니다. 글자 모양이나 표 구조를 바꾸려면 [한글에서 열기]를 쓰거나 엑사원에게 요청하세요."
+        : doc.kind === "hwpx"
+          ? "한글 문서 엔진을 쓸 수 없어 단순 편집기로 열었습니다. 저장하면 용지 크기·여백은 유지되고, 글꼴·글상자·머리말/꼬리말·각주 같은 복잡한 서식은 단순화됩니다. 서식을 지키며 문구만 고치려면 엑사원에게 요청하세요."
       : doc.kind === "pptx"
         ? `PowerPoint 파일은 미리보기만 합니다. 고치려면 ${onOpenExternal ? "[PowerPoint에서 열기]를 누르거나 " : ""}엑사원에게 바꿀 내용을 요청하세요.`
         : doc.kind === "xlsx"
@@ -411,16 +470,14 @@ export default function DocumentCanvas({
         )}
 
         <div className="flex items-center gap-0.5 shrink-0 text-stone-600 dark:text-stone-300">
-          {previewOnly && onOpenExternal && (
+          {externalApp && onOpenExternal && (
             <button
               onClick={onOpenExternal}
               className="px-2 py-1 rounded-lg hover:bg-stone-200 dark:hover:bg-[#32322F] cursor-pointer flex items-center gap-1 text-xs font-semibold"
-              title={`${doc.kind === "xlsx" ? "Excel" : doc.kind === "pptx" ? "PowerPoint" : "기본 앱"}에서 열어 고치기`}
+              title={`${externalApp}에서 열어 고치기`}
             >
               <ExternalLink className="w-4 h-4" />
-              <span className="hidden xl:inline">
-                {doc.kind === "xlsx" ? "Excel에서 열기" : doc.kind === "pptx" ? "PowerPoint에서 열기" : "기본 앱으로 열기"}
-              </span>
+              <span className="hidden xl:inline">{externalApp === "기본 앱" ? "기본 앱으로 열기" : `${externalApp}에서 열기`}</span>
             </button>
           )}
           {!previewOnly && (
@@ -545,11 +602,19 @@ export default function DocumentCanvas({
           <PptxViewer deck={pptx.deck} />
         ) : doc.kind === "xlsx" ? (
           <XlsxViewer bytes={doc.bytes ?? new Uint8Array()} onError={onError} />
-        ) : (doc.kind === "markdown" || doc.kind === "docx") && mode === "rich" ? (
+        ) : doc.kind === "hwpx" && hwpxMode === "engine" ? (
+          <HwpxEditor
+            ref={hwpxRef}
+            bytes={doc.bytes ?? new Uint8Array()}
+            onDirty={markDirty}
+            onError={onError}
+            onLoadFailed={fallbackToSimpleHwpx}
+          />
+        ) : (doc.kind === "markdown" || doc.kind === "docx" || doc.kind === "hwpx") && mode === "rich" ? (
           <RichTextEditor
             key={`${doc.id}:${editorKey}`}
             initialHtml={initialHtml}
-            variant={doc.kind === "docx" ? "page" : "plain"}
+            variant={doc.kind === "markdown" ? "plain" : "page"}
             onChange={(html) => {
               htmlRef.current = html;
               markDirty();

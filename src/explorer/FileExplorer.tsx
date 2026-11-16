@@ -529,10 +529,12 @@ export function FileExplorer({
                     label={opensInExternalApp(menuNode.name) ? "기본 앱으로 열기" : "캔버스에서 열기"}
                     onClick={() => { setMenu(null); onOpen(menuNode.relativePath); }}
                   />
-                  {onOpenExternal && !opensInExternalApp(menuNode.name) && isPreviewOnlyKind(docKindOf(menuNode.name)) && (
+                  {onOpenExternal &&
+                    !opensInExternalApp(menuNode.name) &&
+                    (isPreviewOnlyKind(docKindOf(menuNode.name)) || docKindOf(menuNode.name) === "hwpx") && (
                     <MenuItem
                       icon={<ExternalLink className="w-3.5 h-3.5" />}
-                      label="기본 앱으로 열기"
+                      label={docKindOf(menuNode.name) === "hwpx" ? "한글에서 열기" : "기본 앱으로 열기"}
                       onClick={() => { setMenu(null); onOpenExternal(menuNode.relativePath); }}
                     />
                   )}

@@ -12,10 +12,13 @@ Desktop App for LG K-EXAONE은 아래 오픈소스 라이브러리를 사용합�
   "MIT OR Apache-2.0" 형식의 Rust 크레이트는 그중 하나를 따릅니다.
 - MPL-2.0 라이브러리(cssparser, selectors 등 Tauri가 쓰는 크레이트)는 수정하지 않고 그대로 씁니다.
   각 라이브러리의 소스는 아래 표의 저장소에서 받을 수 있습니다.
+- 한글 문서 엔진 @rhwp/core(rhwp, MIT)의 WASM 안에는 rhwp가 함께 묶은 라이브러리(JPEG·JPEG 2000·JBIG2 디코더,
+  qcms, svg2pdf, pdfium 등)가 들어 있습니다. 그 저작권 표시와 라이선스 전문은
+  `node_modules/@rhwp/core/notices/`와 https://github.com/edwardkim/rhwp 에 있습니다.
 
-## 웹 화면 (npm) — 107개
+## 웹 화면 (npm) — 108개
 
-라이선스 분포: MIT 90개, BSD-2-Clause 5개, ISC 4개, BSD-3-Clause 2개, Apache-2.0 OR MIT 1개, (MPL-2.0 OR Apache-2.0) 1개, BSD 1개, (MIT OR GPL-3.0-or-later) 1개, (MIT AND Zlib) 1개, Apache-2.0 1개
+라이선스 분포: MIT 91개, BSD-2-Clause 5개, ISC 4개, BSD-3-Clause 2개, Apache-2.0 OR MIT 1개, (MPL-2.0 OR Apache-2.0) 1개, BSD 1개, (MIT OR GPL-3.0-or-later) 1개, (MIT AND Zlib) 1개, Apache-2.0 1개
 
 | 이름 | 버전 | 라이선스 | 저장소 |
 |---|---|---|---|
@@ -25,6 +28,7 @@ Desktop App for LG K-EXAONE은 아래 오픈소스 라이브러리를 사용합�
 | @mixmark-io/domino | 2.2.0 | BSD-2-Clause | https://github.com/mixmark-io/domino |
 | @napi-rs/canvas | 1.1.1 | MIT | https://github.com/Brooooooklyn/canvas |
 | @napi-rs/canvas-win32-x64-msvc | 1.1.1 | MIT | https://github.com/Brooooooklyn/canvas |
+| @rhwp/core | 0.9.0 | MIT | https://github.com/edwardkim/rhwp |
 | @tauri-apps/api | 2.12.4 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
 | @tiptap/core | 3.32.0 | MIT | https://github.com/ueberdosis/tiptap |
 | @tiptap/extension-blockquote | 3.32.0 | MIT | https://github.com/ueberdosis/tiptap |

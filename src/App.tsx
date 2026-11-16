@@ -2167,6 +2167,7 @@ export default function App() {
                                         {([
                                           ["markdown", "Markdown (.md)", "서식 기호 그대로 텍스트로"],
                                           ["docx", "Word 문서 (.docx)", "제목·표·목록을 Word 서식으로"],
+                                          ["hwpx", "한글 문서 (.hwpx)", "제목·표·목록을 한글 서식으로"],
                                         ] as const).map(([fmt, label, hint], i) => (
                                           <button
                                             key={fmt}

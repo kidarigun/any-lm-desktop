@@ -1,5 +1,6 @@
 import { base64ToBytes, bytesToBase64 } from "./base64";
 import { docxToMarkdown, markdownToDocx } from "./docx";
+import { hwpxToMarkdown, markdownToHwpx, replaceTextInHwpx } from "./hwpx";
 import { stripInlineMarkdown } from "./markdown";
 import { extractPdfText } from "./pdf";
 import { markdownToPptx, pptxToMarkdown, replaceTextInOoxml } from "./pptx";
@@ -9,7 +10,7 @@ import { markdownToXlsx, replaceTextInXlsx, xlsxToMarkdown } from "./xlsx";
 export interface DocBridgeRequest {
   requestId: string;
   op: "extract" | "generate" | "replace";
-  kind: "docx" | "pptx" | "pdf" | "xlsx";
+  kind: "docx" | "pptx" | "pdf" | "xlsx" | "hwpx";
   dataBase64?: string | null;
   markdown?: string | null;
   title?: string | null;
@@ -36,7 +37,9 @@ export async function handleDocBridgeRequest(req: DocBridgeRequest): Promise<Doc
               ? await pptxToMarkdown(bytes)
               : req.kind === "xlsx"
                 ? await xlsxToMarkdown(bytes)
-                : await extractPdfText(bytes);
+                : req.kind === "hwpx"
+                  ? await hwpxToMarkdown(bytes)
+                  : await extractPdfText(bytes);
         return { ok: true, text };
       }
       case "generate": {
@@ -48,7 +51,9 @@ export async function handleDocBridgeRequest(req: DocBridgeRequest): Promise<Doc
             ? await markdownToDocx(md, title)
             : req.kind === "xlsx"
               ? await markdownToXlsx(md, title)
-              : await markdownToPptx(md, title);
+              : req.kind === "hwpx"
+                ? await markdownToHwpx(md, title)
+                : await markdownToPptx(md, title);
         return { ok: true, dataBase64: bytesToBase64(bytes) };
       }
       case "replace": {
@@ -60,14 +65,17 @@ export async function handleDocBridgeRequest(req: DocBridgeRequest): Promise<Doc
           // 엑셀 칸 값에는 Markdown 기호가 없으므로 그대로 찾는다.
           return { ok: true, dataBase64: bytesToBase64(await replaceTextInXlsx(bytes, target, replacement)) };
         }
+        const kind = req.kind;
+        const replace = (t: string, r: string) =>
+          kind === "hwpx" ? replaceTextInHwpx(bytes, t, r) : replaceTextInOoxml(bytes, kind, t, r);
         let out: Uint8Array;
         try {
-          out = await replaceTextInOoxml(bytes, req.kind, target, replacement);
+          out = await replace(target, replacement);
         } catch (first) {
           // AI가 read_file 결과(Markdown)의 기호까지 target에 넣은 경우를 한 번 더 시도한다.
           const plainTarget = stripInlineMarkdown(target);
           if (plainTarget === target) throw first;
-          out = await replaceTextInOoxml(bytes, req.kind, plainTarget, stripInlineMarkdown(replacement));
+          out = await replace(plainTarget, stripInlineMarkdown(replacement));
         }
         return { ok: true, dataBase64: bytesToBase64(out) };
       }
