@@ -149,6 +149,10 @@ function waitsForApproval(conv: Conversation): boolean {
   return !!last && last.role === "assistant" && last.toolRecords.some((r) => r.status === "pending_approval");
 }
 
+function isInterruptedAssistantMessage(content: string): boolean {
+  return content.includes('"계속"이라고 입력');
+}
+
 /** 탭에 표시하는 진행 중인 대화 수 */
 function RunBadge({ count }: { count: number }) {
   if (count <= 0) return null;
@@ -2192,6 +2196,23 @@ export default function App() {
                               <PanelRightOpen className="w-4 h-4 text-stone-500 dark:text-stone-400" />
                             </div>
                           )}
+
+                          {/* Interrupted Continue Button */}
+                          {!isStreaming &&
+                            idx === (activeConversation?.messages.length ?? 0) - 1 &&
+                            !waitsForApproval(activeConversation!) &&
+                            isInterruptedAssistantMessage(msg.content) && (
+                              <div className="pt-1">
+                                <button
+                                  type="button"
+                                  onClick={() => handleSend("계속")}
+                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#A50034] hover:bg-[#8A002B] text-white text-xs font-semibold cursor-pointer transition shadow-2xs"
+                                >
+                                  <Play className="w-3.5 h-3.5" />
+                                  <span>이어서 계속 진행</span>
+                                </button>
+                              </div>
+                            )}
 
                           {/* Assistant Action Bar (Copy, Save, Regenerate) */}
                           {!isStreaming && (

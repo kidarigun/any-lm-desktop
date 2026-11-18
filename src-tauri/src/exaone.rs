@@ -15,7 +15,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 use uuid::Uuid;
 
 /// 한 번의 사용자 요청에서 모델이 도구를 연속 호출할 수 있는 최대 라운드 수.
-pub const MAX_TOOL_ROUNDS: usize = 10;
+pub const MAX_TOOL_ROUNDS: usize = 50;
 /// 모델에게 되돌려 주는 도구 출력의 최대 길이(문자).
 pub const MAX_TOOL_OUTPUT_CHARS: usize = 40_000;
 
@@ -169,13 +169,13 @@ fn quiet_message(quiet: Duration, tool: Option<&str>) -> String {
     }
 }
 const CANCEL_POLL: Duration = Duration::from_millis(200);
-/// 서버 혼잡(429)·일시 장애(502/503/504) 때 기다리는 시간. 모두 합쳐 약 2분 동안 다시 시도한다.
-const RETRY_DELAYS_SEC: [u64; 7] = [2, 4, 6, 10, 15, 25, 40];
+/// 서버 혼잡(429)·일시 장애(408/500/502/503/504) 때 기다리는 시간. 모두 합쳐 약 3분 40초 동안 다시 시도한다.
+const RETRY_DELAYS_SEC: [u64; 9] = [2, 4, 6, 10, 15, 25, 40, 60, 60];
 /// 서버가 Retry-After로 알려 준 대기 시간은 이 값까지만 따른다.
 const MAX_RETRY_AFTER_SEC: u64 = 60;
 
 fn is_retryable_status(code: u16) -> bool {
-    matches!(code, 429 | 502 | 503 | 504)
+    matches!(code, 408 | 429 | 500 | 502 | 503 | 504 | 520..=529)
 }
 
 /// Retry-After 헤더(초 단위)를 읽는다. 날짜 형식이나 잘못된 값은 무시한다.
@@ -895,7 +895,9 @@ fn base_system_prompt(project: Option<&Project>) -> String {
 - 차트 이미지, 차트가 들어간 엑셀, 복잡한 서식처럼 write_file로 만들 수 없는 파일은 그 파일을 만드는 Python 스크립트를 run_python(code 포함)으로 실행해 실제 파일까지 만드세요. 스크립트만 남기고 끝내지 마세요.\n\
 - run_python 스크립트는 프로젝트 루트에서 실행됩니다. 결과 파일은 프로젝트 폴더 안의 상대 경로로 저장하고, 저장한 경로를 print로 출력하세요. 엑셀은 openpyxl을 쓰세요.\n\
 - matplotlib 차트의 한글 글꼴(맑은 고딕)과 화면 없는 저장 방식은 앱이 이미 설정해 두었습니다. 스크립트에 글꼴을 찾거나 지정하는 코드를 넣지 마세요.\n\
-- run_python 결과에 필요한 패키지가 없다고 나오면 패키지 이름을 알려 주고, 도구 카드의 [실행] 창에서 설치 후 다시 실행할 수 있다고 안내하세요.",
+- run_python 결과에 필요한 패키지가 없다고 나오면 패키지 이름을 알려 주고, 도구 카드의 [실행] 창에서 설치 후 다시 실행할 수 있다고 안내하세요.\n\
+- 요청받은 작업은 중간에 멈추어 사용자에게 \"계속할까요?\"라고 되묻거나 계획만 적고 끝내지 말고, 승인 없이 실행 가능한 도구를 이어서 호출해 마지막 결과물까지 끝까지 완수하세요.\n\
+- 도구 호출에서 오류가 나면 오류 메시지를 보고 원인(경로, 인자, 문법, 너무 긴 JSON 분할 등)을 스스로 고쳐 재시도하세요.",
             now, p.name, p.root_path, p.instructions
         ),
         None => format!(
@@ -936,17 +938,21 @@ fn joined_content(rounds: &[String]) -> String {
         .join("\n\n")
 }
 
+fn append_round_to_msg(msg: &mut ChatMessage, content: &str, reasoning: &str, continuing: bool) {
+    match msg.round_contents.last_mut() {
+        Some(last) if continuing => last.push_str(content),
+        _ => msg.round_contents.push(content.to_string()),
+    }
+    let idx = msg.round_contents.len() - 1;
+    msg.push_round_reasoning(idx, reasoning);
+}
+
 /// 지금까지 받은 내용으로 중간 저장용 메시지를 만든다.
 /// `partial`은 아직 끝나지 않은 라운드의 (글, 추론, 앞 라운드에 이어 붙이는 중인지).
 fn checkpoint_message(msg: &ChatMessage, partial: Option<(&str, &str, bool)>) -> ChatMessage {
     let mut m = msg.clone();
     if let Some((content, reasoning, continuing)) = partial {
-        match m.round_contents.last_mut() {
-            Some(last) if continuing => last.push_str(content),
-            _ => m.round_contents.push(content.to_string()),
-        }
-        let idx = m.round_contents.len() - 1;
-        m.push_round_reasoning(idx, reasoning);
+        append_round_to_msg(&mut m, content, reasoning, continuing);
     }
     m.content = joined_content(&m.round_contents);
     m.incomplete = true;
@@ -1027,7 +1033,26 @@ async fn race_cancel<F: Future>(fut: F, flag: &AtomicBool, limit: Duration) -> R
     }
 }
 
-/// 요청을 보내고 429/503이면 잠시 기다렸다 재시도한다. 취소되면 `Ok(None)`.
+struct SendError {
+    message: String,
+    recoverable: bool,
+}
+
+async fn wait_before_retry<R: Runtime>(
+    secs: u64,
+    notice: String,
+    sink: &StreamSink<'_, R>,
+    cancel: &AtomicBool,
+) -> bool {
+    sink.notice(notice);
+    if secs == 0 {
+        return !cancel.load(Ordering::Relaxed);
+    }
+    let sleep = tokio::time::sleep(Duration::from_secs(secs));
+    !matches!(race_cancel(sleep, cancel, Duration::from_secs(secs + 5)).await, Raced::Cancelled)
+}
+
+/// 요청을 보내고 일시 장애·혼잡이면 잠시 기다렸다 재시도한다. 취소되면 `Ok(None)`.
 async fn send_with_retry<R: Runtime>(
     client: &reqwest::Client,
     settings: &AppSettings,
@@ -1035,7 +1060,7 @@ async fn send_with_retry<R: Runtime>(
     sink: &StreamSink<'_, R>,
     cancel: &AtomicBool,
     trace: &mut RoundTrace,
-) -> Result<Option<reqwest::Response>, String> {
+) -> Result<Option<reqwest::Response>, SendError> {
     let started = Instant::now();
     for attempt in 0..=RETRY_DELAYS_SEC.len() {
         trace.attempts = attempt as u32 + 1;
@@ -1048,12 +1073,20 @@ async fn send_with_retry<R: Runtime>(
         let resp = match race_cancel(req, cancel, RESPONSE_HEADER_TIMEOUT).await {
             Raced::Cancelled => return Ok(None),
             Raced::TimedOut => {
-                return Err(format!(
-                    "EXAONE API 서버가 {}초 동안 응답하지 않습니다. 잠시 후 다시 시도해 주세요.",
-                    RESPONSE_HEADER_TIMEOUT.as_secs()
-                ))
+                return Err(SendError {
+                    message: format!(
+                        "EXAONE API 서버가 {}초 동안 응답하지 않습니다. 잠시 후 다시 시도해 주세요.",
+                        RESPONSE_HEADER_TIMEOUT.as_secs()
+                    ),
+                    recoverable: true,
+                })
             }
-            Raced::Done(Err(e)) => return Err(format!("EXAONE API 네트워크 연결 오류: {}", e)),
+            Raced::Done(Err(e)) => {
+                return Err(SendError {
+                    message: format!("EXAONE API 네트워크 연결 오류: {}", e),
+                    recoverable: true,
+                })
+            }
             Raced::Done(Ok(r)) => r,
         };
 
@@ -1082,46 +1115,71 @@ async fn send_with_retry<R: Runtime>(
                 .and_then(|r| r.day_limit)
                 .map(|n| format!("하루 {}회", n))
                 .unwrap_or_else(|| "하루 한도".to_string());
-            return Err(format!(
-                "오늘 쓸 수 있는 K-EXAONE API 호출 한도({})를 모두 썼습니다. 한도가 다시 채워진 뒤(보통 다음 날) 이어서 진행해 주세요. 지금까지 한 작업은 저장되어 있습니다.",
-                limit
-            ));
+            return Err(SendError {
+                message: format!(
+                    "오늘 쓸 수 있는 K-EXAONE API 호출 한도({})를 모두 썼습니다. 한도가 다시 채워진 뒤(보통 다음 날) 이어서 진행해 주세요. 지금까지 한 작업은 저장되어 있습니다.",
+                    limit
+                ),
+                recoverable: false,
+            });
         }
 
         if is_retryable_status(code) && attempt < RETRY_DELAYS_SEC.len() {
             let wait = server_wait.unwrap_or(RETRY_DELAYS_SEC[attempt]);
-            sink.notice(format!(
-                "EXAONE API 서버가 혼잡해 자동으로 다시 시도하는 중입니다... ({}/{}회, {}초 대기)",
+            let notice = format!(
+                "EXAONE API 서버가 혼잡하거나 일시 오류가 발생해 자동으로 다시 시도하는 중입니다... ({}/{}회, {}초 대기)",
                 attempt + 1,
                 RETRY_DELAYS_SEC.len(),
                 wait
-            ));
-            let sleep = tokio::time::sleep(Duration::from_secs(wait));
-            if let Raced::Cancelled = race_cancel(sleep, cancel, Duration::from_secs(wait + 5)).await {
+            );
+            if !wait_before_retry(wait, notice, sink, cancel).await {
                 return Ok(None);
             }
             continue;
         }
 
         if code == 401 || code == 403 {
-            return Err(format!(
-                "EXAONE API 키가 올바르지 않거나 권한이 없습니다 ({}). K-EXAONE API 키는 발급한 지 30일이 지나면 만료됩니다. 만료됐다면 새 키를 발급받아 [API 설정]에 입력해 주세요. {}",
-                status, err_text
-            ));
+            return Err(SendError {
+                message: format!(
+                    "EXAONE API 키가 올바르지 않거나 권한이 없습니다 ({}). K-EXAONE API 키는 발급한 지 30일이 지나면 만료됩니다. 만료됐다면 새 키를 발급받아 [API 설정]에 입력해 주세요. {}",
+                    status, err_text
+                ),
+                recoverable: false,
+            });
         }
         if is_retryable_status(code) {
-            return Err(format!(
-                "EXAONE API 서버가 약 2분 동안 계속 혼잡해 중단했습니다 ({}). 지금까지 한 작업은 저장되어 있으니, 잠시 후 '계속'이라고 보내면 이어서 진행합니다.",
-                status
-            ));
+            return Err(SendError {
+                message: format!(
+                    "EXAONE API 서버가 약 3분 이상 계속 혼잡해 중단했습니다 ({}). 지금까지 한 작업은 저장되어 있으니, 잠시 후 '계속'이라고 보내면 이어서 진행합니다.",
+                    status
+                ),
+                recoverable: false,
+            });
         }
-        return Err(format!("EXAONE API 응답 오류 ({}): {}", status, err_text));
+        return Err(SendError {
+            message: format!("EXAONE API 응답 오류 ({}): {}", status, err_text),
+            recoverable: !(400..500).contains(&code),
+        });
     }
-    Err("EXAONE API 서버가 계속 혼잡합니다. 잠시 후 다시 시도해 주세요.".to_string())
+    Err(SendError {
+        message: "EXAONE API 서버가 계속 혼잡합니다. 잠시 후 다시 시도해 주세요.".to_string(),
+        recoverable: false,
+    })
 }
 
 /// 답변이 길이 제한으로 끊겼을 때 자동으로 이어 받는 최대 횟수
-const MAX_LENGTH_CONTINUES: usize = 3;
+const MAX_LENGTH_CONTINUES: usize = 15;
+/// 스트림 중단·네트워크 오류 시 자동으로 이어서 진행하기 전 대기 시간(초)
+fn recovery_delays() -> &'static [u64] {
+    #[cfg(test)]
+    {
+        &[0, 0]
+    }
+    #[cfg(not(test))]
+    {
+        &[2, 5, 10, 20, 30]
+    }
+}
 /// 요청이 이 글자 수를 넘으면 오래된 도구 결과를 줄여서 보낸다.
 const COMPACT_TRIGGER_CHARS: usize = 400_000;
 /// 이어 쓰기 요청에 붙이는 생각 과정의 끝부분 길이
@@ -1443,14 +1501,17 @@ pub async fn run_exaone_turn<R: Runtime>(
     let mut hit_round_limit = false;
     // 도중에 실패하면 이유를 담는다. 그때까지 받은 글·생각·도구 결과는 버리지 않고 저장한다.
     let mut failure: Option<String> = None;
+    let mut first_failure: Option<String> = None;
     // 답변이 길이 제한으로 끊겨 이어 받는 중이면, 다음 라운드의 글을 앞 글에 바로 이어 붙인다.
     let mut continuing = false;
     let mut continues_used = 0usize;
+    let mut recoveries_used = 0usize;
+    let mut tool_rounds_used = 0usize;
     let mut length_cut = false;
     // 보낼 메시지 줄이기 단계 (컨텍스트 초과 오류를 받으면 2단계로 올린다)
     let mut compact_level = 0u8;
 
-    for local_round in 0..MAX_TOOL_ROUNDS {
+    loop {
         if cancel_flag.load(Ordering::Relaxed) {
             cancelled = true;
             break;
@@ -1499,18 +1560,35 @@ pub async fn run_exaone_turn<R: Runtime>(
                 trace_push(trace);
                 break;
             }
-            Err(e) => {
-                trace.error = Some(e.clone());
+            Err(err) => {
+                trace.error = Some(err.message.clone());
                 trace.total_ms = round_started.elapsed().as_millis() as u64;
                 add_stats(&mut msg, &trace);
                 trace_push(trace);
-                if compact_level < 2 && looks_like_context_overflow(&e) {
+                if compact_level < 2 && looks_like_context_overflow(&err.message) {
                     // 대화가 길어 모델이 받을 수 있는 양을 넘었다: 오래된 내용을 크게 줄여 한 번 더 보낸다.
                     compact_level = 2;
                     sink.notice("대화가 길어 오래된 내용을 줄여서 다시 보내는 중입니다...".to_string());
                     continue;
                 }
-                failure = Some(e);
+                if err.recoverable {
+                    if let Some(&wait) = recovery_delays().get(recoveries_used) {
+                        first_failure.get_or_insert_with(|| err.message.clone());
+                        recoveries_used += 1;
+                        let notice = format!(
+                            "연결 오류가 발생해 자동으로 이어서 시도하는 중입니다... ({}/{}, {}초 대기)",
+                            recoveries_used,
+                            recovery_delays().len(),
+                            wait
+                        );
+                        if !wait_before_retry(wait, notice, &sink, &cancel_flag).await {
+                            cancelled = true;
+                            break;
+                        }
+                        continue;
+                    }
+                }
+                failure = Some(first_failure.unwrap_or(err.message));
                 break;
             }
         };
@@ -1522,6 +1600,7 @@ pub async fn run_exaone_turn<R: Runtime>(
         let mut stream = response.bytes_stream();
         let mut decoder = SseDecoder::default();
         let mut finished = false;
+        let mut stream_err: Option<String> = None;
 
         let mut last_chunk = Instant::now();
         let mut quiet_notice = false;
@@ -1543,7 +1622,7 @@ pub async fn run_exaone_turn<R: Runtime>(
                 Raced::TimedOut => {
                     let quiet = last_chunk.elapsed();
                     if quiet >= STREAM_IDLE_TIMEOUT {
-                        failure = Some(format!(
+                        stream_err = Some(format!(
                             "EXAONE API 응답이 {}분 동안 멈춰 있어 중단했습니다.",
                             STREAM_IDLE_TIMEOUT.as_secs() / 60
                         ));
@@ -1557,7 +1636,7 @@ pub async fn run_exaone_turn<R: Runtime>(
                 }
                 Raced::Done(None) => break,
                 Raced::Done(Some(Err(e))) => {
-                    failure = Some(format!("스트림 수신 오류: {}", e));
+                    stream_err = Some(format!("스트림 수신 오류: {}", e));
                     break;
                 }
                 Raced::Done(Some(Ok(bytes))) => {
@@ -1575,7 +1654,7 @@ pub async fn run_exaone_turn<R: Runtime>(
                             }
                             Ok(false) => {}
                             Err(e) => {
-                                failure = Some(e);
+                                stream_err = Some(e);
                                 finished = true;
                                 break;
                             }
@@ -1597,12 +1676,17 @@ pub async fn run_exaone_turn<R: Runtime>(
         if quiet_notice {
             sink.notice(String::new());
         }
-        if !cancelled && !finished && failure.is_none() {
+        if !cancelled && !finished && stream_err.is_none() {
             if let Some(line) = decoder.finish() {
-                if let Err(e) = streamer.handle_line(&line, &sink) {
-                    failure = Some(e);
+                match streamer.handle_line(&line, &sink) {
+                    Ok(done) => finished = done,
+                    Err(e) => stream_err = Some(e),
                 }
             }
+        }
+        // [DONE]도 finish_reason도 없이 스트림이 끊겼으면 비정상 종료로 보고 자동 복구를 시도한다.
+        if !cancelled && !finished && stream_err.is_none() && streamer.acc.finish_reason.is_none() {
+            stream_err = Some("스트림 응답이 완료 신호 없이 중간에 끊겼습니다.".to_string());
         }
 
         let acc = streamer.acc;
@@ -1621,28 +1705,66 @@ pub async fn run_exaone_turn<R: Runtime>(
                 args_valid_json: serde_json::from_str::<Value>(&t.arguments).is_ok(),
             })
             .collect();
-        trace.error = failure.clone().or_else(|| cancelled.then(|| "cancelled".to_string()));
+        trace.error = stream_err.clone().or_else(|| cancelled.then(|| "cancelled".to_string()));
         add_stats(&mut msg, &trace);
         trace_push(trace);
 
-        match msg.round_contents.last_mut() {
-            Some(last) if continuing => last.push_str(&acc.content),
-            _ => msg.round_contents.push(acc.content.clone()),
-        }
-        // 추론은 한 벌만 저장하고, 이 라운드의 것이 어디인지 위치를 함께 적는다 (다음 요청에 돌려보내기 위해).
-        let round_idx = msg.round_contents.len() - 1;
-        msg.push_round_reasoning(round_idx, &acc.reasoning);
-        continuing = false;
-
-        // 취소되거나 실패하면 끝까지 받지 못한 도구 호출은 실행하지 않는다.
-        if cancelled || failure.is_some() {
+        if cancelled {
+            append_round_to_msg(&mut msg, &acc.content, &acc.reasoning, continuing);
             break;
         }
 
+        if let Some(err) = stream_err {
+            if let Some(&wait) = recovery_delays().get(recoveries_used) {
+                first_failure.get_or_insert_with(|| err.clone());
+                let no_tool_started = acc.tools.iter().all(|t| t.name.is_empty());
+                let has_partial = !acc.content.trim().is_empty() || !acc.reasoning.trim().is_empty();
+                if no_tool_started && has_partial {
+                    append_round_to_msg(&mut msg, &acc.content, &acc.reasoning, continuing);
+                    if let Some(save) = req.checkpoint {
+                        save(&checkpoint_message(&msg, None));
+                    }
+                    let part = if acc.content.is_empty() {
+                        "(답변을 시작하기 전에 끊김)".to_string()
+                    } else {
+                        acc.content.clone()
+                    };
+                    api_messages.push(with_reasoning(
+                        json!({ "role": "assistant", "content": part }),
+                        Some(acc.reasoning.as_str()).filter(|_| keep_thinking),
+                    ));
+                    api_messages.push(json!({ "role": "user", "content": continue_prompt(&acc.content, &acc.reasoning) }));
+                    continuing = true;
+                }
+                recoveries_used += 1;
+                let notice = format!(
+                    "응답이 중간에 끊겨 자동으로 이어서 진행하는 중입니다... ({}/{}, {}초 대기)",
+                    recoveries_used,
+                    recovery_delays().len(),
+                    wait
+                );
+                if !wait_before_retry(wait, notice, &sink, &cancel_flag).await {
+                    cancelled = true;
+                    break;
+                }
+                continue;
+            }
+            append_round_to_msg(&mut msg, &acc.content, &acc.reasoning, continuing);
+            failure = Some(first_failure.unwrap_or(err));
+            break;
+        }
+
+        // 라운드가 정상 완료되었으므로 연속 복구 상태를 초기화한다.
+        recoveries_used = 0;
+        first_failure = None;
+        append_round_to_msg(&mut msg, &acc.content, &acc.reasoning, continuing);
+        continuing = false;
+
+        let finished_with_length = acc.finish_reason.as_deref() == Some("length");
         let calls: Vec<PendingToolCall> =
             acc.tools.into_iter().filter(|t| !t.name.is_empty()).collect();
         // 출력 길이 제한으로 끊겼다: 끊긴 곳부터 자동으로 이어 받는다.
-        if calls.is_empty() && acc.finish_reason.as_deref() == Some("length") {
+        if calls.is_empty() && finished_with_length {
             if continues_used < MAX_LENGTH_CONTINUES {
                 continues_used += 1;
                 sink.notice(format!(
@@ -1668,6 +1790,9 @@ pub async fn run_exaone_turn<R: Runtime>(
             // 도구를 켜지 않았는데 도구 호출이 온 경우: 텍스트 답변만 남긴다.
             break;
         }
+
+        tool_rounds_used += 1;
+        continues_used = 0;
 
         let mut round_records: Vec<ToolExecutionRecord> = Vec::new();
         let mut paused_for_approval = false;
@@ -1755,19 +1880,25 @@ pub async fn run_exaone_turn<R: Runtime>(
                             false,
                         ),
                     },
-                    Err(e) => (
-                        tool_record(
-                            &call_id,
-                            &call.name,
-                            call.arguments.clone(),
-                            "error",
-                            format!("도구 인자가 올바른 JSON이 아닙니다 ({}). 인자를 다시 확인해 호출하세요.", e),
+                    Err(e) => {
+                        let truncated = finished_with_length || call.arguments.chars().count() >= 2_000;
+                        let msg = if truncated {
+                            format!(
+                                "도구 인자 JSON이 출력 길이 제한으로 중간에 잘렸습니다 ({}). 한 번에 전체를 쓰려 하지 말고 나누어서 호출하세요. 파일을 저장할 때는 write_file로 앞부분만 먼저 저장한 뒤 modify_file(target을 빈 문자열 \"\"로 지정)로 나머지 내용을 여러 번에 나누어 덧붙이세요.",
+                                e
+                            )
+                        } else {
+                            format!(
+                                "도구 인자가 올바른 JSON이 아닙니다 ({}). 인자를 다시 확인해 호출하세요.",
+                                e
+                            )
+                        };
+                        (
+                            tool_record(&call_id, &call.name, call.arguments.clone(), "error", msg, None, None),
                             None,
-                            None,
-                        ),
-                        None,
-                        false,
-                    ),
+                            false,
+                        )
+                    }
                 };
             // 이어 받기로 라운드 글이 합쳐질 수 있어, 방금 넣은 글의 위치를 라운드 번호로 쓴다.
             record.round = msg.round_contents.len().saturating_sub(1) as u32;
@@ -1815,8 +1946,9 @@ pub async fn run_exaone_turn<R: Runtime>(
         if paused_for_approval {
             break;
         }
-        if local_round + 1 == MAX_TOOL_ROUNDS {
+        if tool_rounds_used >= MAX_TOOL_ROUNDS {
             hit_round_limit = true;
+            break;
         }
     }
 
@@ -2863,7 +2995,8 @@ mod tests {
         assert_eq!(retry_after_secs(&h), Some(MAX_RETRY_AFTER_SEC));
         h.insert(reqwest::header::RETRY_AFTER, "Wed, 21 Oct 2026 07:28:00 GMT".parse().unwrap());
         assert_eq!(retry_after_secs(&h), None);
-        assert!(is_retryable_status(429) && is_retryable_status(502) && !is_retryable_status(400));
+        assert!(is_retryable_status(408) && is_retryable_status(429) && is_retryable_status(500) && is_retryable_status(502) && is_retryable_status(524));
+        assert!(!is_retryable_status(400) && !is_retryable_status(401) && !is_retryable_status(404));
     }
 
     #[tokio::test]
@@ -3527,5 +3660,95 @@ mod tests {
         let b = bodies.lock().unwrap();
         let first_len = |i: usize| b[i]["messages"][1]["content"].as_str().unwrap().chars().count();
         assert!(first_len(1) < first_len(0), "두 번째 요청은 오래된 글을 줄여서 보낸다");
+    }
+
+    #[tokio::test]
+    async fn stream_error_recovers_and_continues_automatically() {
+        let r1 = vec![
+            sse(json!({"choices":[{"delta":{"reasoning_content":"생각 중"}}]})),
+            sse(json!({"choices":[{"delta":{"content":"부분 답변"}}]})),
+            sse(json!({"error":{"message":"upstream disconnected"}})),
+        ];
+        let r2 = vec![
+            sse(json!({"choices":[{"delta":{"content":"이 이어서 완성되었습니다."}}]})),
+            sse(json!({"choices":[{"delta":{},"finish_reason":"stop"}]})),
+            sse_done(),
+        ];
+        let (url, bodies) = mock_server(vec![r1, r2], 0).await;
+        let out = turn(url, vec![msg("user", "길게 써줘")]).await.unwrap();
+        assert_eq!(out.content, "부분 답변이 이어서 완성되었습니다.");
+        assert_eq!(out.reasoning_content.as_deref(), Some("생각 중"));
+        assert!(!out.content.contains("오류로 답변이 중간에 멈췄습니다"));
+        let b = bodies.lock().unwrap();
+        assert_eq!(b.len(), 2);
+        let last = b[1]["messages"].as_array().unwrap().last().unwrap();
+        assert!(last["content"].as_str().unwrap().starts_with("[이어서 작성 요청]"));
+    }
+
+    #[tokio::test]
+    async fn abrupt_eof_during_tool_call_retries_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        // [DONE]과 finish_reason 없이 도구 호출 도중 스트림이 끊긴 경우
+        let r1 = vec![
+            sse(json!({"choices":[{"delta":{"content":"잠시만요."}}]})),
+            sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"write_file","arguments":"{\"relative_path\":\"a.txt\""}}]}}]})),
+        ];
+        let r2 = vec![
+            sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c2","function":{"name":"write_file","arguments":"{\"relative_path\":\"a.txt\",\"content\":\"완료\"}"}}]}}]})),
+            sse_done(),
+        ];
+        let r3 = vec![
+            sse(json!({"choices":[{"delta":{"content":"a.txt에 저장했습니다."}}]})),
+            sse(json!({"choices":[{"delta":{},"finish_reason":"stop"}]})),
+            sse_done(),
+        ];
+        let (url, bodies) = mock_server(vec![r1, r2, r3], 0).await;
+        let app = tauri::test::mock_app();
+        let settings = test_settings(url);
+        let project = test_project(dir.path());
+        let history = vec![msg("user", "a.txt 써줘")];
+        let (out, _) = run_exaone_turn(
+            app.handle(),
+            TurnRequest { settings: &settings, project: Some(&project), conversation_id: "c-eof", history: &history, continue_from: None, mode: "", checkpoint: None },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "완료");
+        assert_eq!(out.content, "a.txt에 저장했습니다.");
+        assert_eq!(bodies.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn truncated_tool_call_json_instructs_split_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let long_arg = format!("{{\"relative_path\":\"big.md\",\"content\":\"{}", "가".repeat(2500));
+        let r1 = vec![
+            sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"write_file","arguments":long_arg}}]}}]})),
+            sse(json!({"choices":[{"delta":{},"finish_reason":"length"}]})),
+            sse_done(),
+        ];
+        let r2 = vec![
+            sse(json!({"choices":[{"delta":{"content":"나누어 작성할 수 있습니다."}}]})),
+            sse_done(),
+        ];
+        let (url, bodies) = mock_server(vec![r1, r2], 0).await;
+        let app = tauri::test::mock_app();
+        let settings = test_settings(url);
+        let project = test_project(dir.path());
+        let history = vec![msg("user", "긴 문서 써줘")];
+        let (out, _) = run_exaone_turn(
+            app.handle(),
+            TurnRequest { settings: &settings, project: Some(&project), conversation_id: "c-trunc", history: &history, continue_from: None, mode: "", checkpoint: None },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.tool_records[0].status, "error");
+        assert!(out.tool_records[0].output.contains("modify_file"));
+        assert!(bodies.lock().unwrap()[1]["messages"].as_array().unwrap().iter().any(|m| {
+            m["role"] == "tool" && m["content"].as_str().unwrap_or("").contains("나누어서 호출하세요")
+        }));
+        assert_eq!(out.content, "나누어 작성할 수 있습니다.");
     }
 }
