@@ -22,6 +22,7 @@ import {
   KIND_EXTENSION,
   KIND_LABEL,
   SAVE_AS_TARGETS,
+  extensionOf,
   isPreviewOnlyKind,
   replaceExtension,
   type DocKind,
@@ -33,6 +34,7 @@ import { markdownToXlsx, xlsxToMarkdown } from "../docs/xlsx";
 import type { FileSnapshot } from "../types";
 import type { CanvasDoc, CanvasSavedInfo } from "./canvasDoc";
 import { HtmlPreview } from "./HtmlWebPreview";
+import { ImageViewer } from "./ImageViewer";
 import { PdfViewer } from "./PdfViewer";
 import { PptxViewer } from "./PptxViewer";
 import HwpxEditor, { type HwpxEditorHandle } from "./hwpx/HwpxEditor";
@@ -163,6 +165,7 @@ export default function DocumentCanvas({
           }
           case "xlsx":
           case "pdf":
+          case "image":
             break;
         }
         if (!cancelled) setEditorKey((k) => k + 1);
@@ -293,6 +296,8 @@ export default function DocumentCanvas({
         return markdownToXlsx(await currentMarkdown(), baseTitle);
       case "pdf":
         return (doc.bytes ?? new Uint8Array()).slice();
+      case "image":
+        return (doc.bytes ?? new Uint8Array()).slice();
     }
   }
 
@@ -338,8 +343,10 @@ export default function DocumentCanvas({
   async function saveAs(target: DocKind) {
     setSaveAsOpen(false);
     if (saving || loading) return;
-    const ext = KIND_EXTENSION[target];
     const currentName = (doc.filePath || doc.absolutePath || doc.title).split(/[\\/]/).pop() || doc.title;
+    const origExt = target === "image" ? extensionOf(currentName) : "";
+    const ext = origExt || KIND_EXTENSION[target];
+    const defaultName = origExt ? currentName : replaceExtension(currentName, target);
     const initialDir = doc.absolutePath
       ? dirOf(doc.absolutePath)
       : projectRoot
@@ -350,7 +357,7 @@ export default function DocumentCanvas({
     try {
       const picked = await BackendAPI.pickSavePath(
         initialDir,
-        replaceExtension(currentName, target),
+        defaultName,
         `${KIND_LABEL[target]} (*.${ext})|*.${ext}|모든 파일 (*.*)|*.*`
       );
       if (!picked) return;
@@ -505,15 +512,18 @@ export default function DocumentCanvas({
             {saveAsOpen && (
               <div className="absolute right-0 top-full mt-1 z-20 w-52 rounded-xl border border-stone-200 dark:border-[#3A3A36] bg-white dark:bg-[#262624] shadow-lg py-1 text-xs">
                 <div className="px-3 py-1 text-stone-400">다른 이름으로 저장</div>
-                {SAVE_AS_TARGETS[doc.kind].map((t) => (
-                  <button
-                    key={t}
-                    onClick={() => saveAs(t)}
-                    className="w-full text-left px-3 py-1.5 hover:bg-stone-100 dark:hover:bg-[#32322F] text-stone-800 dark:text-stone-100 cursor-pointer"
-                  >
-                    {KIND_LABEL[t]} <span className="text-stone-400">(.{KIND_EXTENSION[t]})</span>
-                  </button>
-                ))}
+                {SAVE_AS_TARGETS[doc.kind].map((t) => {
+                  const optExt = (t === "image" ? extensionOf(doc.title) : "") || KIND_EXTENSION[t];
+                  return (
+                    <button
+                      key={t}
+                      onClick={() => saveAs(t)}
+                      className="w-full text-left px-3 py-1.5 hover:bg-stone-100 dark:hover:bg-[#32322F] text-stone-800 dark:text-stone-100 cursor-pointer"
+                    >
+                      {KIND_LABEL[t]} <span className="text-stone-400">(.{optExt})</span>
+                    </button>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -543,9 +553,11 @@ export default function DocumentCanvas({
               <span className="text-[10px] font-semibold tabular-nums">{historyCount}</span>
             </button>
           )}
-          <button onClick={copyContent} className="p-1.5 rounded-lg hover:bg-stone-200 dark:hover:bg-[#32322F] cursor-pointer" title="내용 복사 (Markdown)">
-            {copied ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
-          </button>
+          {doc.kind !== "image" && (
+            <button onClick={copyContent} className="p-1.5 rounded-lg hover:bg-stone-200 dark:hover:bg-[#32322F] cursor-pointer" title="내용 복사 (Markdown)">
+              {copied ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
+            </button>
+          )}
           {onAttach && absoluteForAttach && (
             <button onClick={() => onAttach(absoluteForAttach)} className="p-1.5 rounded-lg hover:bg-stone-200 dark:hover:bg-[#32322F] cursor-pointer" title="채팅에 첨부">
               <Paperclip className="w-4 h-4" />
@@ -603,6 +615,8 @@ export default function DocumentCanvas({
           <PptxViewer deck={pptx.deck} />
         ) : doc.kind === "xlsx" ? (
           <XlsxViewer bytes={doc.bytes ?? new Uint8Array()} onError={onError} />
+        ) : doc.kind === "image" ? (
+          <ImageViewer bytes={doc.bytes ?? new Uint8Array()} title={doc.title} onError={onError} />
         ) : doc.kind === "hwpx" && hwpxMode === "engine" ? (
           <HwpxEditor
             ref={hwpxRef}

@@ -590,7 +590,7 @@ export function McpDialog({ onClose }: { onClose: () => void }) {
         </>
       )}
       <p className="text-[11px] text-stone-500 dark:text-stone-400">
-        환경 변수·헤더 값은 설정 파일이 아니라 Windows 자격 증명 관리자에 저장됩니다. 로그인(OAuth)이 필요한 원격 서버는 아직 지원하지 않습니다.
+        환경 변수·헤더 값은 설정 파일이 아니라 Windows 자격 증명 관리자에 저장됩니다.
       </p>
       <div className="flex justify-end gap-1.5">
         <button onClick={() => setDraft(null)} className={btn}>

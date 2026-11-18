@@ -24,4 +24,9 @@ describe("캔버스 폭", () => {
     expect(wideCanvasWidth(1440)).toBe(784); // 64%=922이지만 채팅창 400px을 남겨야 함
     expect(wideCanvasWidth(2560)).toBe(1180);
   });
+
+  it("사이드바를 접으면 그만큼 가용 폭이 넓어진다", () => {
+    expect(availableWidth(1440, true)).toBe(1440);
+    expect(wideCanvasWidth(1440, true)).toBe(922);
+  });
 });

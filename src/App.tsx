@@ -13,6 +13,8 @@ import {
   MessageSquare,
   Moon,
   Paperclip,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plug,
   PanelRightClose,
   PanelRightOpen,
@@ -80,19 +82,24 @@ import {
 type ArtifactRef = Omit<CanvasDoc, "id">;
 
 function extractArtifactFromMessage(msg: ChatMessage): ArtifactRef | null {
-  // 가장 마지막에 작성/수정한 파일을 연다.
-  const fileRecords = (msg.toolRecords || []).filter(
-    (tr) =>
-      (tr.toolName === "write_file" || tr.toolName === "modify_file") &&
-      tr.status === "completed" &&
-      tr.filePath
-  );
-  const last = fileRecords[fileRecords.length - 1];
-  if (last?.filePath) {
+  // 가장 마지막에 작성·수정·생성한 파일(캔버스로 열 수 있는 형식)을 연다.
+  let lastPath: string | null = null;
+  for (const tr of msg.toolRecords || []) {
+    if (tr.status !== "completed") continue;
+    if ((tr.toolName === "write_file" || tr.toolName === "modify_file") && tr.filePath && !opensInExternalApp(tr.filePath)) {
+      lastPath = tr.filePath;
+    }
+    if (tr.producedFiles && tr.producedFiles.length > 0) {
+      for (const f of tr.producedFiles) {
+        if (f && !opensInExternalApp(f)) lastPath = f;
+      }
+    }
+  }
+  if (lastPath) {
     return {
-      title: last.filePath.split("/").pop() || last.filePath,
-      kind: docKindOf(last.filePath),
-      filePath: last.filePath,
+      title: lastPath.split("/").pop() || lastPath,
+      kind: docKindOf(lastPath),
+      filePath: lastPath,
     };
   }
 
@@ -306,6 +313,37 @@ export default function App() {
       document.documentElement.classList.remove("dark");
     }
   }, [isDark]);
+
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("exaone_sidebar_collapsed") === "true";
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("exaone_sidebar_collapsed", sidebarCollapsed ? "true" : "false");
+    } catch {
+      // 저장하지 못해도 이번 실행에서는 그대로 동작한다.
+    }
+  }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "b") {
+        const target = e.target as HTMLElement | null;
+        if (target && (target.isContentEditable || target.closest(".ProseMirror") || target.closest("[role='dialog']"))) {
+          return;
+        }
+        e.preventDefault();
+        setSidebarCollapsed((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   const [settings, setSettings] = useState<AppSettings>({
     apiKey: "",
@@ -785,7 +823,7 @@ export default function App() {
     }
   }
 
-  /** 프로젝트 파일 열기: 이미지·옛 Office 형식처럼 캔버스로 못 여는 파일은 Windows 기본 앱으로 연다. */
+  /** 프로젝트 파일 열기: 옛 Office·미디어 형식처럼 캔버스로 못 여는 파일은 Windows 기본 앱으로 연다. */
   function openAnyProjectFile(filePath: string) {
     if (opensInExternalApp(filePath) && activeProject) {
       BackendAPI.openProjectFileExternal(activeProject.id, filePath).catch((err) => setErrorBanner(String(err)));
@@ -1048,6 +1086,11 @@ export default function App() {
           )
         );
       }
+      const lastMsg = updated.messages[updated.messages.length - 1];
+      if (approve && !waitsForApproval(updated) && lastMsg && lastMsg.role === "assistant" && shownConvIdRef.current === convId) {
+        const art = extractArtifactFromMessage(lastMsg);
+        if (art) openArtifactRef(art);
+      }
     } catch (err: any) {
       failure = { error: String(err) };
       // 도구 결과는 저장됐지만 이어가기가 실패했을 수 있으므로 이 대화만 저장된 상태로 다시 맞춘다.
@@ -1092,13 +1135,14 @@ export default function App() {
   }, []);
 
   // 창 크기가 바뀌어도 채팅창이 너무 좁아지지 않도록 화면에 쓰는 폭만 줄인다 (저장된 폭은 그대로).
-  const canvasMaxWidth = maxCanvasWidth(availableWidth(windowWidth));
+  const availWidth = availableWidth(windowWidth, sidebarCollapsed);
+  const canvasMaxWidth = maxCanvasWidth(availWidth);
   const shownCanvasWidth = canvasExpanded
-    ? wideCanvasWidth(windowWidth)
-    : clampCanvasWidth(canvasWidth, availableWidth(windowWidth));
+    ? wideCanvasWidth(windowWidth, sidebarCollapsed)
+    : clampCanvasWidth(canvasWidth, availWidth);
 
   function changeCanvasWidth(width: number) {
-    const w = clampCanvasWidth(width, availableWidth(window.innerWidth));
+    const w = clampCanvasWidth(width, availableWidth(window.innerWidth, sidebarCollapsed));
     setCanvasWidth(w);
     setCanvasExpanded(false);
     saveCanvasWidth(w);
@@ -1263,6 +1307,7 @@ export default function App() {
       }`}
     >
       {/* Left Sidebar (Claude Desktop Light & Dark) */}
+      {!sidebarCollapsed && (
       <aside className="w-64 bg-[#F0EFEA] dark:bg-[#171715] border-r border-[#E2E0D8] dark:border-[#2C2C29] flex flex-col justify-between shrink-0 select-none transition-colors duration-150">
         <div className="p-3.5 space-y-4 flex-1 flex flex-col min-h-0">
           {/* Brand & Theme Toggle & New Chat */}
@@ -1283,17 +1328,29 @@ export default function App() {
                 </span>
               </div>
 
-              <button
-                onClick={() => setIsDark(!isDark)}
-                className="p-1.5 rounded-lg bg-stone-200/70 dark:bg-[#262624] hover:bg-stone-300/70 dark:hover:bg-[#32322F] text-stone-700 dark:text-stone-200 transition cursor-pointer"
-                title={isDark ? "밝은 모드로 전환" : "다크 모드로 전환"}
-              >
-                {isDark ? (
-                  <Sun className="w-3.5 h-3.5 text-amber-400" />
-                ) : (
-                  <Moon className="w-3.5 h-3.5 text-stone-600" />
-                )}
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setIsDark(!isDark)}
+                  className="p-1.5 rounded-lg bg-stone-200/70 dark:bg-[#262624] hover:bg-stone-300/70 dark:hover:bg-[#32322F] text-stone-700 dark:text-stone-200 transition cursor-pointer"
+                  title={isDark ? "밝은 모드로 전환" : "다크 모드로 전환"}
+                >
+                  {isDark ? (
+                    <Sun className="w-3.5 h-3.5 text-amber-400" />
+                  ) : (
+                    <Moon className="w-3.5 h-3.5 text-stone-600" />
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSidebarCollapsed(true)}
+                  className="p-1.5 rounded-lg bg-stone-200/70 dark:bg-[#262624] hover:bg-stone-300/70 dark:hover:bg-[#32322F] text-stone-700 dark:text-stone-200 transition cursor-pointer"
+                  title="사이드바 접기 (Ctrl+B)"
+                  aria-label="사이드바 접기"
+                >
+                  <PanelLeftClose className="w-3.5 h-3.5" />
+                </button>
+              </div>
             </div>
 
             <button
@@ -1570,12 +1627,47 @@ export default function App() {
           </button>
         </div>
       </aside>
+      )}
 
       {/* Center Main Area */}
       <main className="flex-1 flex flex-col min-w-0 bg-[#FAF9F5] dark:bg-[#1E1E1C] transition-colors duration-150">
         {/* Clean Header */}
         <header className="h-13 border-b border-[#E5E3DB] dark:border-[#2E2E2A] px-6 flex items-center justify-between gap-3 shrink-0 bg-[#FAF9F5]/90 dark:bg-[#1E1E1C]/90 backdrop-blur-xs">
           <div className="flex items-center gap-2.5 text-xs min-w-0">
+            {sidebarCollapsed && (() => {
+              const hasOtherRunning = Object.keys(runs).some((id) => id !== shownConvId);
+              const hasUnseenDone = Object.keys(unseenDone).length > 0;
+              return (
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setSidebarCollapsed(false)}
+                    className="relative p-1.5 rounded-lg bg-stone-200/70 dark:bg-[#262624] hover:bg-stone-300/70 dark:hover:bg-[#32322F] text-stone-700 dark:text-stone-200 transition cursor-pointer"
+                    title="사이드바 펼치기 (Ctrl+B)"
+                    aria-label="사이드바 펼치기"
+                  >
+                    <PanelLeftOpen className="w-4 h-4" />
+                    {(hasOtherRunning || hasUnseenDone) && (
+                      <span
+                        className={`absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full ring-2 ring-[#FAF9F5] dark:ring-[#1E1E1C] ${
+                          hasOtherRunning ? "bg-[#A50034] dark:bg-[#FF5C8D] animate-pulse" : "bg-emerald-500"
+                        }`}
+                        title={hasOtherRunning ? "다른 대화에서 답변 생성 중" : "다른 대화에 새 답변이 있습니다"}
+                      />
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleNewChat}
+                    className="p-1.5 rounded-lg bg-stone-200/70 dark:bg-[#262624] hover:bg-stone-300/70 dark:hover:bg-[#32322F] text-stone-700 dark:text-stone-200 transition cursor-pointer"
+                    title="새 채팅"
+                    aria-label="새 채팅"
+                  >
+                    <Plus className="w-4 h-4" />
+                  </button>
+                </div>
+              );
+            })()}
             <span className="font-bold text-sm text-stone-900 dark:text-stone-100 truncate">
               {activeMode === "chat" &&
                 (activeConversation ? activeConversation.title : "새 채팅")}
@@ -1630,7 +1722,7 @@ export default function App() {
             <button
               onClick={handleOpenDocument}
               className="px-2.5 py-1.5 rounded-lg bg-stone-200/80 dark:bg-[#2C2C28] hover:bg-stone-300 dark:hover:bg-[#383833] text-xs font-semibold text-stone-700 dark:text-stone-200 flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
-              title="Markdown, Word, PowerPoint, PDF, HTML, 텍스트 파일을 문서 캔버스에서 엽니다"
+              title="Markdown, Word, PowerPoint, PDF, HTML, 이미지, 텍스트 파일을 문서 캔버스에서 엽니다"
             >
               <FileText className="w-3.5 h-3.5" />
               <span>문서 열기</span>

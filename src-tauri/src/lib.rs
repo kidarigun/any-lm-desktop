@@ -1829,7 +1829,7 @@ async fn install_python_package(
 /// 기본 앱으로 열어도 되는 파일 (실행 파일·스크립트는 제외)
 const OPENABLE_EXTENSIONS: &[&str] = &[
     "xlsx", "xls", "csv", "tsv", "docx", "doc", "pptx", "ppt", "pdf", "hwp", "hwpx", "txt", "md", "json", "xml",
-    "png", "jpg", "jpeg", "gif", "bmp", "webp", "svg", "mp3", "wav", "mp4", "zip",
+    "png", "jpg", "jpeg", "gif", "bmp", "webp", "svg", "ico", "mp3", "wav", "mp4", "zip",
 ];
 
 pub fn is_openable_with_default_app(path: &Path) -> bool {

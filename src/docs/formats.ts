@@ -1,11 +1,11 @@
 /** 캔버스와 AI 도구가 다루는 문서 종류 */
-export type DocKind = "markdown" | "docx" | "hwpx" | "pptx" | "xlsx" | "pdf" | "html" | "text";
+export type DocKind = "markdown" | "docx" | "hwpx" | "pptx" | "xlsx" | "pdf" | "html" | "image" | "text";
 
 /** 바이너리로 읽고 써야 하는 문서 종류 */
-export const BINARY_KINDS: readonly DocKind[] = ["docx", "hwpx", "pptx", "xlsx", "pdf"];
+export const BINARY_KINDS: readonly DocKind[] = ["docx", "hwpx", "pptx", "xlsx", "pdf", "image"];
 
 /** 캔버스에서 미리보기만 하는 문서 종류 (고치기는 원래 앱이나 엑사원에게 맡긴다) */
-export const PREVIEW_ONLY_KINDS: readonly DocKind[] = ["pptx", "xlsx", "pdf"];
+export const PREVIEW_ONLY_KINDS: readonly DocKind[] = ["pptx", "xlsx", "pdf", "image"];
 
 export function isPreviewOnlyKind(kind: DocKind): boolean {
   return PREVIEW_ONLY_KINDS.includes(kind);
@@ -14,8 +14,26 @@ export function isPreviewOnlyKind(kind: DocKind): boolean {
 /** 캔버스로 열 수 없어 Windows 기본 앱(엑셀 등)으로 여는 파일 */
 const EXTERNAL_APP_EXTENSIONS = new Set([
   "xls", "doc", "ppt", "hwp",
-  "png", "jpg", "jpeg", "gif", "bmp", "webp", "mp3", "wav", "mp4", "zip",
+  "mp3", "wav", "mp4", "zip",
 ]);
+
+/** 캔버스 이미지 뷰어에서 미리보기로 여는 이미지 확장자 */
+const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "bmp", "webp", "svg", "ico"]);
+
+const IMAGE_MIME_TYPES: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  bmp: "image/bmp",
+  webp: "image/webp",
+  svg: "image/svg+xml",
+  ico: "image/x-icon",
+};
+
+export function imageMimeType(path: string): string {
+  return IMAGE_MIME_TYPES[extensionOf(path)] ?? "application/octet-stream";
+}
 
 export function opensInExternalApp(path: string): boolean {
   return EXTERNAL_APP_EXTENSIONS.has(extensionOf(path));
@@ -33,7 +51,9 @@ export function extensionOf(path: string): string {
 }
 
 export function docKindOf(path: string): DocKind {
-  switch (extensionOf(path)) {
+  const ext = extensionOf(path);
+  if (IMAGE_EXTENSIONS.has(ext)) return "image";
+  switch (ext) {
     case "md":
     case "markdown":
       return "markdown";
@@ -75,6 +95,7 @@ export const KIND_LABEL: Record<DocKind, string> = {
   xlsx: "Excel",
   pdf: "PDF",
   html: "HTML",
+  image: "이미지",
   text: "텍스트",
 };
 
@@ -86,6 +107,7 @@ export const KIND_EXTENSION: Record<DocKind, string> = {
   xlsx: "xlsx",
   pdf: "pdf",
   html: "html",
+  image: "png",
   text: "txt",
 };
 
@@ -98,6 +120,7 @@ export const SAVE_AS_TARGETS: Record<DocKind, DocKind[]> = {
   xlsx: ["xlsx", "markdown"],
   pdf: ["pdf", "markdown"],
   html: ["html", "markdown", "docx", "hwpx"],
+  image: ["image"],
   text: ["text"],
 };
 

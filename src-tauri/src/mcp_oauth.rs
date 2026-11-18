@@ -301,7 +301,11 @@ fn token_from_response(v: &Value, prev: Option<&TokenSet>, requested: &[String],
     }
     let access = v.get("access_token").and_then(|a| a.as_str()).ok_or("토큰 응답에 access_token이 없습니다.")?;
     let scopes = match v.get("scope").and_then(|s| s.as_str()) {
-        Some(s) => s.split_whitespace().map(String::from).collect(),
+        Some(s) => s
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter(|x| !x.is_empty())
+            .map(String::from)
+            .collect(),
         None => prev.map(|p| p.scopes.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| requested.to_vec()),
     };
     Ok(TokenSet {
@@ -522,6 +526,16 @@ mod tests {
         let r = token_from_response(&v, Some(&t), &[], "https://t", "c").unwrap();
         assert_eq!(r.refresh_token.as_deref(), Some("r"), "갱신 응답에 새 갱신 토큰이 없으면 이전 것을 쓴다");
         assert_eq!(r.scopes, t.scopes);
+        let gh = token_from_response(
+            &serde_json::json!({ "access_token": "gho_1", "scope": "repo,read:user" }),
+            None,
+            &[],
+            "https://github.com/login/oauth/access_token",
+            "cid",
+        )
+        .unwrap();
+        assert_eq!(gh.scopes, vec!["repo", "read:user"]);
+        assert!(gh.covers(&["repo".into(), "read:user".into()]));
         assert!(token_from_response(&serde_json::json!({ "error": "invalid_grant" }), None, &[], "", "").is_err());
     }
 }

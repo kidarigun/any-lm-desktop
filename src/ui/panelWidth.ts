@@ -12,8 +12,8 @@ export const SIDEBAR_WIDTH = 256;
 const STORAGE_KEY = "exaone_canvas_width";
 
 /** 사이드바를 뺀, 채팅창과 캔버스가 나눠 쓰는 폭 */
-export function availableWidth(windowWidth: number): number {
-  return Math.max(0, windowWidth - SIDEBAR_WIDTH);
+export function availableWidth(windowWidth: number, sidebarCollapsed = false): number {
+  return Math.max(0, windowWidth - (sidebarCollapsed ? 0 : SIDEBAR_WIDTH));
 }
 
 /** 채팅창 최소 폭을 남기는 캔버스 최대 폭 (화면이 아주 좁으면 최소 폭) */
@@ -27,8 +27,8 @@ export function clampCanvasWidth(width: number, available: number): number {
 }
 
 /** 넓게 보기: 화면의 64%, 최대 1180px */
-export function wideCanvasWidth(windowWidth: number): number {
-  return clampCanvasWidth(Math.min(windowWidth * 0.64, CANVAS_WIDE_MAX), availableWidth(windowWidth));
+export function wideCanvasWidth(windowWidth: number, sidebarCollapsed = false): number {
+  return clampCanvasWidth(Math.min(windowWidth * 0.64, CANVAS_WIDE_MAX), availableWidth(windowWidth, sidebarCollapsed));
 }
 
 export function loadCanvasWidth(): number {
