@@ -2,6 +2,7 @@ pub mod catalog;
 pub mod doc_bridge;
 pub mod exaone;
 pub mod fs_ops;
+pub mod html_preview;
 pub mod mcp;
 pub mod mcp_oauth;
 pub mod python_runner;
@@ -1253,6 +1254,48 @@ fn read_absolute_file_base64(grants: State<'_, PathGrants>, path: String) -> Res
     Ok(doc_bridge::encode_base64(&bytes))
 }
 
+/// HTML 캔버스용 격리 웹뷰를 준비한다. 편집 중인 HTML은 메모리에서 제공하고,
+/// 연결 리소스는 프로젝트(또는 사용자가 직접 고른 파일의 폴더) 안에서만 읽는다.
+#[tauri::command]
+fn prepare_html_preview(
+    state: State<'_, AppState>,
+    grants: State<'_, PathGrants>,
+    previews: State<'_, Result<html_preview::PreviewServer, String>>,
+    project_id: Option<String>,
+    relative_path: Option<String>,
+    absolute_path: Option<String>,
+    html: String,
+) -> Result<html_preview::PreviewHandle, String> {
+    let (root, entry_path) = if let (Some(pid), Some(rel)) = (project_id.as_deref(), relative_path.as_deref()) {
+        let (root, _) = project_root(&state, pid)?;
+        let target = fs_ops::resolve_safe_path(&root, rel)?;
+        if !target.is_file() {
+            return Err(format!("HTML 파일을 찾을 수 없습니다: {}", rel));
+        }
+        (Some(root), rel.replace('\\', "/"))
+    } else if let Some(path) = absolute_path.as_deref() {
+        let target = PathBuf::from(path);
+        if !target.is_absolute() || !target.is_file() || !grants.is_granted(&target) {
+            return Err(not_granted(path));
+        }
+        let root = target.parent().ok_or_else(|| "HTML 파일의 폴더를 찾을 수 없습니다.".to_string())?.to_path_buf();
+        let name = target.file_name().and_then(|n| n.to_str()).ok_or_else(|| "HTML 파일 이름을 읽을 수 없습니다.".to_string())?;
+        (Some(root), name.to_string())
+    } else if relative_path.is_none() {
+        (None, "index.html".to_string())
+    } else {
+        return Err("HTML 파일의 프로젝트를 찾을 수 없습니다.".to_string());
+    };
+    previews.inner().as_ref().map_err(Clone::clone)?.create(root, entry_path, html.into_bytes())
+}
+
+#[tauri::command]
+fn close_html_preview(previews: State<'_, Result<html_preview::PreviewServer, String>>, token: String) {
+    if let Ok(previews) = previews.inner().as_ref() {
+        previews.close(&token);
+    }
+}
+
 /// 바이너리 문서를 프로젝트에 저장한다 (되돌리기용 백업 포함).
 #[tauri::command]
 fn write_project_file_base64(
@@ -1952,6 +1995,7 @@ pub fn run() {
             });
             app.manage(doc_bridge::DocBridge::default());
             app.manage(PathGrants::default());
+            app.manage(html_preview::PreviewServer::start().map_err(|err| format!("HTML 미리보기 서버를 시작할 수 없습니다: {err}")));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -2014,6 +2058,8 @@ pub fn run() {
             run_manual_terminal_command,
             read_project_file_base64,
             read_absolute_file_base64,
+            prepare_html_preview,
+            close_html_preview,
             write_project_file_base64,
             save_file_to_path,
             pick_save_path_dialog,
@@ -2057,6 +2103,7 @@ mod tests {
         let ok = |u: &str| is_app_url(&tauri::Url::parse(u).unwrap());
         assert!(ok("tauri://localhost/index.html"));
         assert!(ok("http://tauri.localhost/"));
+        assert!(!ok("http://exaone-preview.localhost:12345/token/site/index.html"));
         assert!(!ok("https://evil.example.com/"));
         assert!(!ok("http://tauri.localhost.evil.com/"));
         assert!(!ok("file:///C:/Windows/win.ini"));

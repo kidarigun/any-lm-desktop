@@ -1,6 +1,6 @@
 [package]
 name = "exaone-desktop"
-version = "0.4.0"
+version = "0.4.1"
 description = "Unofficial desktop app for LG K-EXAONE"
 authors = ["kidarigun"]
 license = "Apache-2.0"
@@ -28,6 +28,9 @@ keyring = { version = "3.6", features = ["windows-native"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
 tauri-plugin-updater = "2"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

@@ -303,6 +303,20 @@ export const BackendAPI = {
     throw new Error("Tauri 데스크톱 창에서만 문서 파일을 열 수 있습니다.");
   },
 
+  async prepareHtmlPreview(params: {
+    projectId: string | null;
+    relativePath: string | null;
+    absolutePath: string | null;
+    html: string;
+  }): Promise<{ token: string; url: string }> {
+    if (!isTauri()) throw new Error("HTML 리소스 미리보기는 Tauri 데스크톱 창에서만 사용할 수 있습니다.");
+    return await invoke<{ token: string; url: string }>("prepare_html_preview", params);
+  },
+
+  async closeHtmlPreview(token: string): Promise<void> {
+    await invoke("close_html_preview", { token });
+  },
+
   async listProjectDir(projectId: string, relativePath: string): Promise<FileNode[]> {
     if (isTauri()) {
       return await invoke<FileNode[]>("list_project_dir", { projectId, relativePath });

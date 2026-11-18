@@ -32,6 +32,7 @@ import { deckToMarkdown, markdownToPptx, parsePptx, type PptxSession } from "../
 import { markdownToXlsx, xlsxToMarkdown } from "../docs/xlsx";
 import type { FileSnapshot } from "../types";
 import type { CanvasDoc, CanvasSavedInfo } from "./canvasDoc";
+import { HtmlPreview } from "./HtmlWebPreview";
 import { PdfViewer } from "./PdfViewer";
 import { PptxViewer } from "./PptxViewer";
 import HwpxEditor, { type HwpxEditorHandle } from "./hwpx/HwpxEditor";
@@ -621,12 +622,7 @@ export default function DocumentCanvas({
             }}
           />
         ) : doc.kind === "html" && mode === "preview" ? (
-          <iframe
-            title={doc.title}
-            sandbox=""
-            srcDoc={sourceText}
-            className="w-full h-full bg-white border-0"
-          />
+          <HtmlPreview key={doc.id} doc={doc} projectId={projectId} html={sourceText} />
         ) : (
           <textarea
             value={sourceText}
