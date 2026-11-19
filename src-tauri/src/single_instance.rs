@@ -6,6 +6,9 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 const PORT: u16 = 45788;
@@ -42,11 +45,42 @@ fn acquire_on(port: u16) -> Instance {
     }
 }
 
+pub struct ListenerGuard {
+    stopped: Arc<AtomicBool>,
+    addr: Option<SocketAddr>,
+    handle: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl ListenerGuard {
+    /// 업데이트 설치·재시작 전에 리스너를 멈추고 포트 점유를 즉시 해제한다.
+    pub fn shutdown(&self) {
+        if !self.stopped.swap(true, Ordering::SeqCst) {
+            if let Some(addr) = self.addr {
+                let _ = TcpStream::connect_timeout(&addr, Duration::from_millis(200));
+            }
+        }
+        if let Ok(mut guard) = self.handle.lock() {
+            if let Some(h) = guard.take() {
+                let _ = h.join();
+            }
+        }
+    }
+}
+
 /// 다른 실행이 보낸 요청을 받으면 `on_show`를 부른다.
-pub fn listen(listener: TcpListener, on_show: impl Fn() + Send + 'static) {
-    std::thread::spawn(move || {
+pub fn listen(listener: TcpListener, on_show: impl Fn() + Send + 'static) -> ListenerGuard {
+    let stopped = Arc::new(AtomicBool::new(false));
+    let addr = listener.local_addr().ok();
+    let stopped_flag = stopped.clone();
+    let handle = std::thread::spawn(move || {
         for stream in listener.incoming() {
+            if stopped_flag.load(Ordering::SeqCst) {
+                break;
+            }
             let Ok(mut s) = stream else { continue };
+            if stopped_flag.load(Ordering::SeqCst) {
+                break;
+            }
             let _ = s.set_read_timeout(Some(Duration::from_millis(1000)));
             let mut buf = [0u8; 32];
             if matches!(s.read(&mut buf), Ok(n) if &buf[..n] == HELLO) {
@@ -55,6 +89,11 @@ pub fn listen(listener: TcpListener, on_show: impl Fn() + Send + 'static) {
             }
         }
     });
+    ListenerGuard {
+        stopped,
+        addr,
+        handle: Mutex::new(Some(handle)),
+    }
 }
 
 #[cfg(test)]
@@ -70,12 +109,17 @@ mod tests {
         let Instance::First(l) = acquire_on(port) else { panic!("처음 실행이어야 함") };
         let shown = Arc::new(AtomicUsize::new(0));
         let s = shown.clone();
-        listen(l, move || {
+        let guard = listen(l, move || {
             s.fetch_add(1, Ordering::SeqCst);
         });
         assert!(matches!(acquire_on(port), Instance::AlreadyRunning));
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(shown.load(Ordering::SeqCst), 1);
+
+        // 업데이트 전 shutdown 시 포트를 즉시 재바인딩할 수 있어야 한다.
+        guard.shutdown();
+        let rebound = TcpListener::bind(("127.0.0.1", port));
+        assert!(rebound.is_ok(), "shutdown 후 포트가 해제되어야 함");
     }
 
     #[test]

@@ -61,17 +61,18 @@ export function useUpdater(autoCheck: boolean | undefined): Updater {
     setStatus("downloading");
     setPercent(null);
     setError(null);
-    const unlisten = await BackendAPI.onUpdateProgress((p) => {
-      setPercent(p.total ? Math.min(100, Math.round((p.downloaded / p.total) * 100)) : null);
-    });
+    let unlisten: (() => void) | undefined;
     try {
+      unlisten = await BackendAPI.onUpdateProgress((p) => {
+        setPercent(p.total ? Math.min(100, Math.round((p.downloaded / p.total) * 100)) : null);
+      });
       // 성공하면 설치 프로그램이 앱을 닫으므로 이 뒤로는 돌아오지 않는다.
       await BackendAPI.installUpdate();
     } catch (err) {
       setStatus("error");
       setError(String(err));
     } finally {
-      unlisten();
+      unlisten?.();
     }
   }, []);
 
@@ -92,22 +93,69 @@ export function confirmInstall(info: UpdateInfo, runningCount: number): boolean 
 /** 사이드바에 보여 주는 새 버전 알림 */
 export function UpdateBanner({ updater, runningCount }: { updater: Updater; runningCount: number }) {
   const { status, info, percent, error } = updater;
+  const [confirming, setConfirming] = useState(false);
+
+  useEffect(() => {
+    if (status === "downloading" || !info) setConfirming(false);
+  }, [status, info]);
+
   if (!info || (status !== "available" && status !== "downloading" && status !== "error")) return null;
   const downloading = status === "downloading";
+
   return (
     <div className="rounded-xl border border-[#A50034]/30 dark:border-[#FF5C8D]/30 bg-[#A50034]/5 dark:bg-[#FF5C8D]/10 px-3 py-2 text-xs space-y-1.5">
       <div className="flex items-center justify-between gap-2">
         <span className="font-semibold text-stone-800 dark:text-stone-100">새 버전 {info.version}</span>
-        <button
-          disabled={downloading}
-          onClick={() => confirmInstall(info, runningCount) && void updater.install()}
-          className="px-2 py-1 rounded-lg bg-[#A50034] hover:bg-[#8A002B] disabled:opacity-60 text-white font-semibold flex items-center gap-1 cursor-pointer disabled:cursor-default"
-        >
-          {downloading ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
-          {downloading ? (percent === null ? "받는 중" : `${percent}%`) : "업데이트"}
-        </button>
+        {confirming ? (
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => {
+                setConfirming(false);
+                void updater.install();
+              }}
+              className="px-2 py-1 rounded-lg bg-[#A50034] hover:bg-[#8A002B] text-white font-semibold cursor-pointer"
+            >
+              설치 시작
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirming(false)}
+              className="px-1.5 py-1 rounded-lg bg-stone-200 dark:bg-[#32322F] text-stone-700 dark:text-stone-200 cursor-pointer"
+            >
+              취소
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            disabled={downloading}
+            onClick={() => setConfirming(true)}
+            className="px-2 py-1 rounded-lg bg-[#A50034] hover:bg-[#8A002B] disabled:opacity-60 text-white font-semibold flex items-center gap-1 cursor-pointer disabled:cursor-default"
+          >
+            {downloading ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
+            {downloading ? (percent === null ? "받는 중" : `${percent}%`) : status === "error" ? "다시 시도" : "업데이트"}
+          </button>
+        )}
       </div>
-      {error && <div className="text-red-600 dark:text-red-400 break-words">{error}</div>}
+      {confirming && (
+        <div className="text-[11px] text-stone-600 dark:text-stone-300 leading-snug">
+          설치하는 동안 앱이 닫혔다가 새 버전으로 다시 열립니다.
+          {runningCount > 0 && ` (진행 중인 대화 ${runningCount}개는 받은 데까지 저장됩니다)`}
+        </div>
+      )}
+      {error && (
+        <div className="text-red-600 dark:text-red-400 break-words space-y-1">
+          <div>{error}</div>
+          <button
+            type="button"
+            onClick={() => void updater.check()}
+            className="text-[11px] underline text-stone-600 dark:text-stone-300 cursor-pointer"
+          >
+            다시 확인
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -125,10 +173,16 @@ export function UpdateSettings({
   onAutoCheckChange: (value: boolean) => void;
 }) {
   const { version, status, info, percent, error } = updater;
+  const [confirming, setConfirming] = useState(false);
+
+  useEffect(() => {
+    if (status === "downloading" || status === "checking" || !info) setConfirming(false);
+  }, [status, info]);
+
   const busy = status === "checking" || status === "downloading";
   return (
     <div className="space-y-2">
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="text-stone-600 dark:text-stone-300">
           현재 버전 <span className="font-semibold tabular-nums">{version || "(미리보기)"}</span>
           {status === "latest" && <span className="ml-2 text-emerald-700 dark:text-emerald-400">최신 버전입니다</span>}
@@ -136,26 +190,65 @@ export function UpdateSettings({
             <span className="ml-2 text-[#A50034] dark:text-[#FF5C8D] font-semibold">새 버전 {info.version} 있음</span>
           )}
         </span>
-        {info && status !== "checking" ? (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => confirmInstall(info, runningCount) && void updater.install()}
-            className="px-2.5 py-1 rounded-lg bg-[#A50034] hover:bg-[#8A002B] disabled:opacity-60 text-white font-semibold cursor-pointer disabled:cursor-default"
-          >
-            {status === "downloading" ? (percent === null ? "받는 중..." : `받는 중 ${percent}%`) : "지금 업데이트"}
-          </button>
-        ) : (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => void updater.check()}
-            className="px-2.5 py-1 rounded-lg bg-stone-100 dark:bg-[#32322F] hover:bg-stone-200 dark:hover:bg-[#3C3C38] disabled:opacity-60 text-stone-800 dark:text-stone-200 font-semibold cursor-pointer disabled:cursor-default"
-          >
-            {status === "checking" ? "확인하는 중..." : "업데이트 확인"}
-          </button>
-        )}
+        <div className="flex items-center gap-1.5">
+          {info && status !== "checking" && (
+            confirming ? (
+              <>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    setConfirming(false);
+                    void updater.install();
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-[#A50034] hover:bg-[#8A002B] disabled:opacity-60 text-white font-semibold cursor-pointer"
+                >
+                  설치 시작
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => setConfirming(false)}
+                  className="px-2 py-1 rounded-lg bg-stone-100 dark:bg-[#32322F] text-stone-700 dark:text-stone-200 font-semibold cursor-pointer"
+                >
+                  취소
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setConfirming(true)}
+                className="px-2.5 py-1 rounded-lg bg-[#A50034] hover:bg-[#8A002B] disabled:opacity-60 text-white font-semibold cursor-pointer disabled:cursor-default"
+              >
+                {status === "downloading"
+                  ? percent === null
+                    ? "받는 중..."
+                    : `받는 중 ${percent}%`
+                  : status === "error"
+                    ? "다시 시도"
+                    : "지금 업데이트"}
+              </button>
+            )
+          )}
+          {(!info || status === "checking" || status === "error") && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void updater.check()}
+              className="px-2.5 py-1 rounded-lg bg-stone-100 dark:bg-[#32322F] hover:bg-stone-200 dark:hover:bg-[#3C3C38] disabled:opacity-60 text-stone-800 dark:text-stone-200 font-semibold cursor-pointer disabled:cursor-default"
+            >
+              {status === "checking" ? "확인하는 중..." : "업데이트 확인"}
+            </button>
+          )}
+        </div>
       </div>
+      {confirming && (
+        <div className="rounded-lg bg-[#FAF9F5] dark:bg-[#1E1E1C] border border-[#A50034]/25 dark:border-[#FF5C8D]/30 px-2.5 py-2 text-[11px] text-stone-700 dark:text-stone-200">
+          설치하는 동안 앱이 닫혔다가 새 버전으로 다시 열립니다.
+          {runningCount > 0 && ` (답변 중인 대화 ${runningCount}개는 받은 데까지만 저장됩니다)`}
+        </div>
+      )}
       {info?.notes && (
         <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-lg bg-[#FAF9F5] dark:bg-[#1E1E1C] border border-stone-200 dark:border-[#383834] px-2.5 py-2 text-[11px] text-stone-600 dark:text-stone-300 font-sans">
           {info.notes}

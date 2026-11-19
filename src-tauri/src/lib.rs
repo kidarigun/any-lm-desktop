@@ -984,8 +984,23 @@ fn app_version(app: AppHandle) -> String {
 
 async fn find_update(app: &AppHandle) -> Result<Option<tauri_plugin_updater::Update>, String> {
     use tauri_plugin_updater::UpdaterExt;
+    let before_exit = app.clone();
     let updater = app
-        .updater()
+        .updater_builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .on_before_exit(move || {
+            if let Some(s) = before_exit.try_state::<AppState>() {
+                s.runs.cancel_all();
+            }
+            if let Some(m) = before_exit.try_state::<Arc<mcp::McpManager>>() {
+                m.shutdown_all();
+            }
+            if let Some(g) = before_exit.try_state::<single_instance::ListenerGuard>() {
+                g.shutdown();
+            }
+            before_exit.cleanup_before_exit();
+        })
+        .build()
         .map_err(|e| format!("업데이트 확인을 준비하지 못했습니다: {}", e))?;
     updater
         .check()
@@ -1007,9 +1022,10 @@ async fn check_update(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
 /// 새 버전을 내려받아 설치한다. 설치가 시작되면 앱이 닫히고, 설치가 끝나면 새 버전이 다시 열린다.
 #[tauri::command]
 async fn install_update(app: AppHandle) -> Result<(), String> {
-    let update = find_update(&app)
+    let mut update = find_update(&app)
         .await?
         .ok_or_else(|| "이미 최신 버전입니다.".to_string())?;
+    update.timeout = Some(std::time::Duration::from_secs(180));
     use tauri::Emitter;
     let progress = app.clone();
     let mut downloaded: u64 = 0;
@@ -1023,9 +1039,15 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
         )
         .await
         .map_err(|e| format!("새 버전을 내려받지 못했습니다: {}", e))?;
-    // 설치 프로그램이 앱을 닫으므로, 로컬 MCP 서버 프로세스를 먼저 끝낸다.
+    // 설치 프로그램이 앱을 닫기 전에 진행 중인 작업·로컬 MCP 서버·단일 인스턴스 포트를 먼저 정리한다.
+    if let Some(s) = app.try_state::<AppState>() {
+        s.runs.cancel_all();
+    }
     if let Some(m) = app.try_state::<Arc<mcp::McpManager>>() {
         m.shutdown_all();
+    }
+    if let Some(g) = app.try_state::<single_instance::ListenerGuard>() {
+        g.shutdown();
     }
     update
         .install(bytes)
@@ -2091,13 +2113,14 @@ pub fn run() {
         .setup(move |app| {
             if let Some(listener) = instance.take() {
                 let handle = app.handle().clone();
-                single_instance::listen(listener, move || {
+                let guard = single_instance::listen(listener, move || {
                     if let Some(w) = handle.get_webview_window("main") {
                         let _ = w.unminimize();
                         let _ = w.show();
                         let _ = w.set_focus();
                     }
                 });
+                app.manage(guard);
             }
             let app_data_dir = app
                 .path()
@@ -2222,10 +2245,16 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while running Desktop App for LG K-EXAONE")
         .run(|app, event| {
-            // 앱을 끝낼 때 로컬 MCP 서버 프로세스도 함께 끝낸다.
+            // 앱을 끝낼 때 진행 중인 작업·로컬 MCP 서버·단일 인스턴스 포트를 정리한다.
             if let tauri::RunEvent::Exit = event {
+                if let Some(s) = app.try_state::<AppState>() {
+                    s.runs.cancel_all();
+                }
                 if let Some(m) = app.try_state::<Arc<mcp::McpManager>>() {
                     m.shutdown_all();
+                }
+                if let Some(g) = app.try_state::<single_instance::ListenerGuard>() {
+                    g.shutdown();
                 }
             }
         });
