@@ -368,6 +368,7 @@ async fn live() {
                         project: project.as_ref(),
                         conversation_id: &sc.id,
                         history: &history,
+                        compaction: None,
                         continue_from: continue_from.take(),
                         mode: &sc.mode,
                         checkpoint: None,

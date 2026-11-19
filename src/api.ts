@@ -687,6 +687,38 @@ export const BackendAPI = {
     throw new Error("Tauri 환경에서만 지원됩니다.");
   },
 
+  async compactConversation(
+    conversationId: string,
+    options: {
+      useAi: boolean;
+      keepRecent: number;
+      focus?: string;
+    }
+  ): Promise<Conversation> {
+    if (isTauri()) {
+      return await invoke<Conversation>("compact_conversation", {
+        conversationId,
+        useAi: options.useAi,
+        keepRecent: options.keepRecent,
+        focus: options.focus?.trim() ? options.focus.trim() : null,
+      });
+    }
+    throw new Error("Tauri 환경에서만 지원됩니다.");
+  },
+
+  async updateConversationCompaction(
+    conversationId: string,
+    summary: string | null
+  ): Promise<Conversation> {
+    if (isTauri()) {
+      return await invoke<Conversation>("update_conversation_compaction", {
+        conversationId,
+        summary,
+      });
+    }
+    throw new Error("Tauri 환경에서만 지원됩니다.");
+  },
+
   async runManualTerminalCommand(
     projectId: string,
     command: string

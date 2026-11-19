@@ -2,7 +2,7 @@ use crate::doc_bridge::{self, DocKind};
 use crate::fs_ops;
 use crate::mcp;
 use crate::skills;
-use crate::store::{AppSettings, ChatMessage, FileSnapshot, Project, ToolExecutionRecord, TurnStats};
+use crate::store::{AppSettings, ChatMessage, ContextCompaction, FileSnapshot, Project, ToolExecutionRecord, TurnStats};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -716,8 +716,39 @@ pub fn build_api_messages_with(
     include_tools: bool,
     keep_reasoning: bool,
 ) -> Vec<Value> {
+    build_api_messages_with_compaction(sys_prompt, history, None, include_tools, keep_reasoning)
+}
+
+/// 이전 대화가 `compaction`으로 압축되어 있으면 `history[..covered_messages]`를 요약 쌍으로 대체하고,
+/// 그 뒤의 최근 메시지만 원문 그대로 이어 붙인다.
+pub fn build_api_messages_with_compaction(
+    sys_prompt: &str,
+    history: &[ChatMessage],
+    compaction: Option<&ContextCompaction>,
+    include_tools: bool,
+    keep_reasoning: bool,
+) -> Vec<Value> {
     let mut out = vec![json!({ "role": "system", "content": sys_prompt })];
-    for msg in history {
+    let skip = match compaction.filter(|c| c.covered_messages > 0 && !c.summary.trim().is_empty()) {
+        Some(c) => {
+            let covered = c.covered_messages.min(history.len());
+            out.push(json!({
+                "role": "user",
+                "content": format!(
+                    "[이전 대화 컨텍스트 압축 요약 — {}개 메시지 압축됨]\n대화가 길어 앞선 대화를 아래 핵심 요약으로 압축했습니다. 아래 요약과 뒤따르는 최근 메시지를 이어받아 작업을 계속하세요.\n\n{}",
+                    covered,
+                    c.summary.trim()
+                )
+            }));
+            out.push(json!({
+                "role": "assistant",
+                "content": "네, 압축된 이전 대화의 핵심 맥락(목표, 작업한 파일, 결정 사항, 남은 작업)을 확인했습니다. 이어서 진행하겠습니다."
+            }));
+            covered
+        }
+        None => 0,
+    };
+    for msg in &history[skip..] {
         let reasoning_of = |round: usize| -> Option<&str> {
             if keep_reasoning {
                 msg.round_reasoning(round)
@@ -918,6 +949,8 @@ pub struct TurnRequest<'a> {
     pub conversation_id: &'a str,
     /// 전체 대화 기록. `continue_from`이 있으면 그 메시지도 마지막에 포함되어 있어야 한다.
     pub history: &'a [ChatMessage],
+    /// 이전 대화를 요약·대체한 컨텍스트 압축 정보.
+    pub compaction: Option<&'a ContextCompaction>,
     /// 승인 대기로 멈췄던 어시스턴트 메시지. 주어지면 새 메시지를 만들지 않고 이어서 진행한다.
     pub continue_from: Option<ChatMessage>,
     /// 메시지를 보낸 화면 ("chat" | "project" | "code"). 화면에 맞는 지침을 고른다. 모르면 빈 문자열.
@@ -1181,9 +1214,11 @@ fn recovery_delays() -> &'static [u64] {
     }
 }
 /// 요청이 이 글자 수를 넘으면 오래된 도구 결과를 줄여서 보낸다.
-const COMPACT_TRIGGER_CHARS: usize = 400_000;
+const COMPACT_TRIGGER_CHARS: usize = 120_000;
 /// 이어 쓰기 요청에 붙이는 생각 과정의 끝부분 길이
 const REASONING_TAIL_CHARS: usize = 6_000;
+/// AI 요약 압축 시 모델에 넘기는 대화 발췌 최대 길이
+const SUMMARIZE_TRANSCRIPT_MAX_CHARS: usize = 60_000;
 
 fn total_chars(msgs: &[Value]) -> usize {
     msgs.iter()
@@ -1211,11 +1246,16 @@ fn shorten_middle(text: &str, cap: usize) -> String {
 /// 보낼 메시지를 줄인다 (원본은 그대로 둔다).
 /// - 1단계: 최근 4개를 뺀 오래된 도구 결과를 3천 자로
 /// - 2단계(컨텍스트 초과 오류 뒤): 최근 2개를 뺀 도구 결과를 8백 자로, 최근 8개를 뺀 대화 글을 2천 자로
+/// - 3단계(긴급 추가 압축): 최근 1개를 뺀 도구 결과를 3백 자로, 최근 4개를 뺀 대화 글을 4백 자로
 fn compact_messages(msgs: &[Value], level: u8) -> Vec<Value> {
     if level == 0 {
         return msgs.to_vec();
     }
-    let (keep_tools, tool_cap, keep_msgs, msg_cap) = if level == 1 { (4, 3_000, 0, usize::MAX) } else { (2, 800, 8, 2_000) };
+    let (keep_tools, tool_cap, keep_msgs, msg_cap) = match level {
+        1 => (4, 3_000, 0, usize::MAX),
+        2 => (2, 800, 8, 2_000),
+        _ => (1, 300, 4, 400),
+    };
     let tool_idx: Vec<usize> = msgs
         .iter()
         .enumerate()
@@ -1228,6 +1268,15 @@ fn compact_messages(msgs: &[Value], level: u8) -> Vec<Value> {
         .enumerate()
         .map(|(i, m)| {
             let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("");
+            let is_compaction_pair = matches!(i, 1 | 2)
+                && msgs
+                    .get(1)
+                    .and_then(|v| v.get("content"))
+                    .and_then(|c| c.as_str())
+                    .is_some_and(|s| s.starts_with("[이전 대화 컨텍스트 압축 요약"));
+            if is_compaction_pair {
+                return m.clone();
+            }
             let cap = match role {
                 "tool" if !recent_tools.contains(&i) => Some(tool_cap),
                 "user" | "assistant" if i < old_before => Some(msg_cap),
@@ -1243,6 +1292,250 @@ fn compact_messages(msgs: &[Value], level: u8) -> Vec<Value> {
             }
         })
         .collect()
+}
+
+/// 메시지 배열의 총 문자 수(시스템/압축 요약 제외 대화 원문 분량 참고용)
+pub fn conversation_source_chars(prev: Option<&ContextCompaction>, messages: &[ChatMessage]) -> usize {
+    let prev_chars = prev.map_or(0, |p| p.summary.chars().count());
+    let msg_chars: usize = messages
+        .iter()
+        .map(|m| {
+            m.content.chars().count()
+                + m.tool_records
+                    .iter()
+                    .map(|r| r.arguments_json.chars().count() + r.output.chars().count())
+                    .sum::<usize>()
+        })
+        .sum();
+    prev_chars + msg_chars
+}
+
+fn compaction_source_transcript(
+    prev: Option<&ContextCompaction>,
+    messages: &[ChatMessage],
+    focus: Option<&str>,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(f) = focus.map(str::trim).filter(|s| !s.is_empty()) {
+        parts.push(format!("[우선 보존할 초점]\n{}", f));
+    }
+    if let Some(p) = prev.filter(|p| !p.summary.trim().is_empty()) {
+        parts.push(format!("[기존 압축 요약 ({}개 메시지까지 반영됨)]\n{}", p.covered_messages, p.summary.trim()));
+    }
+
+    let mut touched_files: Vec<String> = Vec::new();
+    for m in messages {
+        for tr in &m.tool_records {
+            if let Some(fp) = tr.file_path.as_deref().filter(|s| !s.is_empty()) {
+                let entry = format!("{} ({} - {})", fp, tr.tool_name, tr.status);
+                if !touched_files.contains(&entry) {
+                    touched_files.push(entry);
+                }
+            }
+            for pf in &tr.produced_files {
+                let entry = format!("{} (생성됨)", pf);
+                if !touched_files.contains(&entry) {
+                    touched_files.push(entry);
+                }
+            }
+        }
+    }
+    if !touched_files.is_empty() {
+        parts.push(format!("[다룬 파일 및 도구 작업]\n- {}", touched_files.join("\n- ")));
+    }
+
+    let mut turn_lines: Vec<String> = Vec::new();
+    for (idx, m) in messages.iter().enumerate() {
+        match m.role.as_str() {
+            "user" => {
+                turn_lines.push(format!("### 턴 {} [사용자]\n{}", idx + 1, shorten_middle(m.content.trim(), 1_400)));
+            }
+            "assistant" => {
+                let mut block = format!("### 턴 {} [엑사원]\n", idx + 1);
+                if !m.tool_records.is_empty() {
+                    let tools: Vec<String> = m
+                        .tool_records
+                        .iter()
+                        .map(|tr| {
+                            let target = tr.file_path.as_deref().unwrap_or("");
+                            let out_short = shorten_middle(tr.output.trim(), 280).replace('\n', " ");
+                            if target.is_empty() {
+                                format!("- `{}` [{}]: {}", tr.tool_name, tr.status, out_short)
+                            } else {
+                                format!("- `{}` ({}) [{}]: {}", tr.tool_name, target, tr.status, out_short)
+                            }
+                        })
+                        .collect();
+                    block.push_str(&format!("[도구 기록]\n{}\n", tools.join("\n")));
+                }
+                if !m.content.trim().is_empty() {
+                    block.push_str(&shorten_middle(m.content.trim(), 1_600));
+                }
+                turn_lines.push(block);
+            }
+            _ => {}
+        }
+    }
+    if !turn_lines.is_empty() {
+        parts.push(format!("[대화 내용]\n{}", turn_lines.join("\n\n")));
+    }
+
+    shorten_middle(&parts.join("\n\n"), SUMMARIZE_TRANSCRIPT_MAX_CHARS)
+}
+
+/// API 호출 없이 로컬 규칙으로 이전 대화의 핵심 맥락을 압축 요약한다.
+pub fn build_local_compaction_summary(
+    prev: Option<&ContextCompaction>,
+    messages: &[ChatMessage],
+    focus: Option<&str>,
+) -> String {
+    let mut sections: Vec<String> = Vec::new();
+    if let Some(f) = focus.map(str::trim).filter(|s| !s.is_empty()) {
+        sections.push(format!("### 우선 보존 지침\n{}", f));
+    }
+    if let Some(p) = prev.filter(|p| !p.summary.trim().is_empty()) {
+        sections.push(format!("### 이전 누적 요약\n{}", shorten_middle(p.summary.trim(), 4_000)));
+    }
+
+    let mut files: Vec<String> = Vec::new();
+    for m in messages {
+        for tr in &m.tool_records {
+            if let Some(fp) = tr.file_path.as_deref().filter(|s| !s.is_empty()) {
+                let item = format!("`{}` ({}: {})", fp, tr.tool_name, tr.status);
+                if !files.contains(&item) {
+                    files.push(item);
+                }
+            }
+            for pf in &tr.produced_files {
+                let item = format!("`{}` (생성 파일)", pf);
+                if !files.contains(&item) {
+                    files.push(item);
+                }
+            }
+        }
+    }
+    if !files.is_empty() {
+        sections.push(format!("### 다룬 파일 및 산출물\n- {}", files.join("\n- ")));
+    }
+
+    let mut digest: Vec<String> = Vec::new();
+    for (i, m) in messages.iter().enumerate() {
+        let text = m.content.trim();
+        if text.is_empty() && m.tool_records.is_empty() {
+            continue;
+        }
+        match m.role.as_str() {
+            "user" => digest.push(format!("- **요청 #{}**: {}", i + 1, shorten_middle(text, 500).replace('\n', " "))),
+            "assistant" => {
+                let body = if text.is_empty() {
+                    format!("도구 {}개 실행", m.tool_records.len())
+                } else {
+                    shorten_middle(text, 700).replace('\n', " ")
+                };
+                digest.push(format!("- **응답 #{}**: {}", i + 1, body));
+            }
+            _ => {}
+        }
+    }
+    if !digest.is_empty() {
+        sections.push(format!("### 주요 대화 요약\n{}", shorten_middle(&digest.join("\n"), 8_000)));
+    }
+
+    if sections.is_empty() {
+        "이전 대화 내용이 비어 있습니다.".to_string()
+    } else {
+        sections.join("\n\n")
+    }
+}
+
+/// K-EXAONE API를 호출해 이전 대화를 다음 작업에 바로 이어 쓸 수 있는 구조화 요약으로 압축한다.
+pub async fn summarize_for_compaction(
+    settings: &AppSettings,
+    prev: Option<&ContextCompaction>,
+    messages: &[ChatMessage],
+    focus: Option<&str>,
+    cancel_flag: &AtomicBool,
+) -> Result<String, String> {
+    if settings.api_key.trim().is_empty() {
+        return Err("EXAONE API 키가 설정되지 않았습니다. '빠른 로컬 압축'을 선택하거나 API 키를 입력해 주세요.".to_string());
+    }
+    validate_base_url(&settings.base_url)?;
+
+    let transcript = compaction_source_transcript(prev, messages, focus);
+    let focus_line = focus
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|f| format!("\n- 특히 사용자가 지정한 다음 항목은 빠뜨리지 말고 구체적으로 보존하세요: {}", f))
+        .unwrap_or_default();
+
+    let sys = format!(
+        "당신은 긴 작업 대화를 다음 모델 호출에서 바로 이어갈 수 있도록 핵심 컨텍스트만 남기고 정밀하게 압축하는 어시스턴트입니다.\n\
+불필요한 인사말이나 서론 없이 아래 4개 섹션으로 간결하고 정확하게 한국어 요약을 작성하세요:{}\n\
+1. **핵심 목표 및 요구사항**\n\
+2. **확정된 결정 사항 및 제약 조건**\n\
+3. **생성·수정·확인한 파일 경로 및 작업 결과** (파일 경로·함수명·오류 내역을 그대로 보존)\n\
+4. **현재 진행 상태 및 남은 작업**",
+        focus_line
+    );
+
+    let mut body = json!({
+        "model": settings.model,
+        "messages": [
+            { "role": "system", "content": sys },
+            { "role": "user", "content": format!("다음 대화 기록을 이어서 작업할 수 있게 압축 요약해 주세요.\n\n{}", transcript) }
+        ],
+        "stream": false
+    });
+    if !settings.reasoning_effort.is_empty() {
+        body["reasoning_effort"] = json!("low");
+    }
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .build()
+        .map_err(|e| format!("HTTP 클라이언트 생성 실패: {}", e))?;
+
+    let req = client
+        .post(&settings.base_url)
+        .bearer_auth(settings.api_key.trim())
+        .json(&body)
+        .send();
+
+    let resp = match race_cancel(req, cancel_flag, RESPONSE_HEADER_TIMEOUT).await {
+        Raced::Cancelled => return Err("컨텍스트 압축이 취소되었습니다.".to_string()),
+        Raced::TimedOut => return Err("EXAONE API 서버 응답 시간이 초과되었습니다. '빠른 로컬 압축'으로 진행할 수 있습니다.".to_string()),
+        Raced::Done(Err(e)) => return Err(format!("EXAONE API 연결 오류 ({}). '빠른 로컬 압축'을 선택해 보세요.", e)),
+        Raced::Done(Ok(r)) => r,
+    };
+
+    let status = resp.status();
+    let rate = parse_rate_info(resp.headers());
+    if let Some(info) = &rate {
+        remember_rate(info);
+    }
+    let text_body = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        let code = status.as_u16();
+        if code == 401 || code == 403 {
+            return Err("API 키가 올바르지 않거나 만료되었습니다. 설정에서 확인하거나 '빠른 로컬 압축'을 이용하세요.".to_string());
+        }
+        if code == 429 && rate.as_ref().and_then(|r| r.day_remaining) == Some(0) {
+            return Err("오늘의 K-EXAONE API 호출 한도를 모두 사용했습니다. '빠른 로컬 압축'은 한도를 쓰지 않습니다.".to_string());
+        }
+        return Err(format!("요약 생성 실패 ({}): {}", status, api_error_text(&text_body)));
+    }
+
+    let parsed: Value = serde_json::from_str(&text_body).map_err(|e| format!("요약 응답 해석 오류: {}", e))?;
+    let summary = parsed
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "모델이 빈 요약을 반환했습니다.".to_string())?;
+    Ok(summary.to_string())
 }
 
 /// 길이 제한으로 끊긴 답변을 이어 쓰게 하는 요청. 답변을 시작하기 전에 끊겼으면
@@ -1461,7 +1754,13 @@ pub async fn run_exaone_turn<R: Runtime>(
     let tune = tuning();
     // 다른 OpenAI 호환 서버는 모르는 항목을 거부할 수 있어 K-EXAONE 모델에만 쓴다.
     let keep_thinking = tune.preserve_thinking && settings.model.to_lowercase().contains("exaone");
-    let mut api_messages = build_api_messages_with(&sys_prompt, req.history, tools_enabled, keep_thinking);
+    let mut api_messages = build_api_messages_with_compaction(
+        &sys_prompt,
+        req.history,
+        req.compaction,
+        tools_enabled,
+        keep_thinking,
+    );
 
     let resuming = req.continue_from.is_some();
     let mut msg = req.continue_from.unwrap_or_else(|| ChatMessage {
@@ -1565,10 +1864,13 @@ pub async fn run_exaone_turn<R: Runtime>(
                 trace.total_ms = round_started.elapsed().as_millis() as u64;
                 add_stats(&mut msg, &trace);
                 trace_push(trace);
-                if compact_level < 2 && looks_like_context_overflow(&err.message) {
-                    // 대화가 길어 모델이 받을 수 있는 양을 넘었다: 오래된 내용을 크게 줄여 한 번 더 보낸다.
-                    compact_level = 2;
-                    sink.notice("대화가 길어 오래된 내용을 줄여서 다시 보내는 중입니다...".to_string());
+                if compact_level < 3 && looks_like_context_overflow(&err.message) {
+                    // 대화가 길어 모델이 받을 수 있는 양을 넘었다: 오래된 내용을 단계별로 크게 줄여 다시 보낸다.
+                    compact_level = if compact_level < 2 { 2 } else { 3 };
+                    sink.notice(format!(
+                        "대화가 컨텍스트 한도를 넘어 이전 내용을 {}단계로 압축해 다시 보내는 중입니다...",
+                        compact_level
+                    ));
                     continue;
                 }
                 if err.recoverable {
@@ -2945,6 +3247,7 @@ mod tests {
                 project: None,
                 conversation_id: "conv-busy",
                 history: &history,
+                compaction: None,
                 continue_from: None,
                 mode: "",
                 checkpoint: None,
@@ -3030,6 +3333,7 @@ mod tests {
                 project: Some(&project),
                 conversation_id: "conv-1",
                 history: &history,
+                compaction: None,
                 continue_from: None,
                 mode: "",
                 checkpoint: None,
@@ -3092,6 +3396,7 @@ mod tests {
                 project: Some(&project),
                 conversation_id: "conv-2",
                 history: &[user.clone()],
+                compaction: None,
                 continue_from: None,
                 mode: "",
                 checkpoint: None,
@@ -3114,6 +3419,7 @@ mod tests {
                 project: Some(&project),
                 conversation_id: "conv-2",
                 history: &history,
+                compaction: None,
                 continue_from: Some(paused.clone()),
                 mode: "",
                 checkpoint: None,
@@ -3160,6 +3466,7 @@ mod tests {
                 project: None,
                 conversation_id: "conv-3",
                 history: &[msg("user", "길게 말해줘")],
+                compaction: None,
                 continue_from: None,
                 mode: "",
                 checkpoint: None,
@@ -3195,6 +3502,8 @@ mod tests {
         assert!(len(&l2[1]) < 2_200, "2단계는 오래된 사용자 글도 줄인다");
         assert!(l2[1]["content"].as_str().unwrap().contains("줄였습니다"));
         assert_eq!(l2[0]["content"], "sys");
+        let l3 = compact_messages(&msgs, 3);
+        assert!(len(&l3[1]) < 600, "3단계는 더 짧게 줄인다");
     }
 
     #[test]
@@ -3332,7 +3641,7 @@ mod tests {
         let history = vec![msg("user", "a.txt 읽어 줘")];
         let (out, _) = run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, project: Some(&project), conversation_id: "c", history: &history, continue_from: None, mode: "", checkpoint: None },
+            TurnRequest { settings: &settings, project: Some(&project), conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -3493,6 +3802,7 @@ mod tests {
                 project: Some(&project),
                 conversation_id: "c",
                 history: &history,
+                compaction: None,
                 continue_from: None,
                 mode: "project",
                 checkpoint: Some(&checkpoint),
@@ -3530,7 +3840,7 @@ mod tests {
             async move {
                 run_exaone_turn(
                     app.handle(),
-                    TurnRequest { settings, project: Some(&project), conversation_id: "c", history, continue_from: None, mode: "", checkpoint: None },
+                    TurnRequest { settings, project: Some(&project), conversation_id: "c", history, compaction: None, continue_from: None, mode: "", checkpoint: None },
                     Arc::new(AtomicBool::new(false)),
                 )
                 .await
@@ -3573,7 +3883,7 @@ mod tests {
         let settings = test_settings(url);
         run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, project: None, conversation_id: "conv-r", history: &history, continue_from: None, mode: "", checkpoint: None },
+            TurnRequest { settings: &settings, project: None, conversation_id: "conv-r", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -3709,7 +4019,7 @@ mod tests {
         let history = vec![msg("user", "a.txt 써줘")];
         let (out, _) = run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, project: Some(&project), conversation_id: "c-eof", history: &history, continue_from: None, mode: "", checkpoint: None },
+            TurnRequest { settings: &settings, project: Some(&project), conversation_id: "c-eof", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -3739,7 +4049,7 @@ mod tests {
         let history = vec![msg("user", "긴 문서 써줘")];
         let (out, _) = run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, project: Some(&project), conversation_id: "c-trunc", history: &history, continue_from: None, mode: "", checkpoint: None },
+            TurnRequest { settings: &settings, project: Some(&project), conversation_id: "c-trunc", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -3750,5 +4060,97 @@ mod tests {
             m["role"] == "tool" && m["content"].as_str().unwrap_or("").contains("나누어서 호출하세요")
         }));
         assert_eq!(out.content, "나누어 작성할 수 있습니다.");
+    }
+
+    #[test]
+    fn compaction_replaces_covered_prefix_with_summary_handoff() {
+        let history = vec![
+            msg("user", "첫 번째 오래된 질문"),
+            msg("assistant", "첫 번째 긴 답변"),
+            msg("user", "두 번째 오래된 질문"),
+            msg("assistant", "두 번째 긴 답변"),
+            msg("user", "지금 할 새 질문"),
+        ];
+        let comp = ContextCompaction {
+            covered_messages: 4,
+            created_at: "2026-11-19T18:00:00+09:00".into(),
+            summary: "## 목표\nAPI 설계 완료".into(),
+            focus: Some("API 설계".into()),
+            source_chars: Some(100),
+        };
+        let out = build_api_messages_with_compaction("sys", &history, Some(&comp), true, false);
+        assert_eq!(out.len(), 4, "system + compaction(user/assistant) + latest user");
+        assert_eq!(out[0]["role"], "system");
+        assert_eq!(out[1]["role"], "user");
+        assert!(out[1]["content"].as_str().unwrap().contains("4개 메시지 압축됨"));
+        assert!(out[1]["content"].as_str().unwrap().contains("API 설계 완료"));
+        assert_eq!(out[2]["role"], "assistant");
+        assert_eq!(out[3]["role"], "user");
+        assert_eq!(out[3]["content"], "지금 할 새 질문");
+
+        // 긴급 압축 단계에서도 요약 쌍(인덱스 1·2)은 보존된다.
+        let compacted = compact_messages(&out, 3);
+        assert!(compacted[1]["content"].as_str().unwrap().contains("API 설계 완료"));
+    }
+
+    #[test]
+    fn local_compaction_summary_preserves_files_focus_and_prev_summary() {
+        let prev = ContextCompaction {
+            covered_messages: 2,
+            created_at: String::new(),
+            summary: "이전 결정: PostgreSQL 사용".into(),
+            focus: None,
+            source_chars: None,
+        };
+        let mut assistant = msg("assistant", "src/db.rs에 연결 코드를 작성했습니다.");
+        assistant.tool_records.push(tool_record(
+            "c1",
+            "write_file",
+            "{}".into(),
+            "completed",
+            "저장됨".into(),
+            Some("src/db.rs".into()),
+            None,
+        ));
+        let summary = build_local_compaction_summary(
+            Some(&prev),
+            &[msg("user", "DB 연결 구현해 줘"), assistant],
+            Some("PostgreSQL 포트 설정 유지"),
+        );
+        assert!(summary.contains("PostgreSQL 포트 설정 유지"));
+        assert!(summary.contains("PostgreSQL 사용"));
+        assert!(summary.contains("`src/db.rs`"));
+        assert!(summary.contains("DB 연결 구현해 줘"));
+    }
+
+    #[tokio::test]
+    async fn ai_compaction_summarizes_via_api() {
+        let payload = json!({
+            "choices": [{
+                "message": { "role": "assistant", "content": "1. 목표: 웹 UI 완성\n3. 파일: src/App.tsx" }
+            }]
+        })
+        .to_string();
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            payload.len(),
+            payload
+        );
+        let (url, bodies) = mock_server(vec![vec![resp.into_bytes()]], 0).await;
+        let settings = test_settings(url);
+        let summary = summarize_for_compaction(
+            &settings,
+            None,
+            &[msg("user", "화면 개선해 줘"), msg("assistant", "src/App.tsx 수정 완료")],
+            Some("UI 변경점"),
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+        assert!(summary.contains("src/App.tsx"));
+        let b = bodies.lock().unwrap();
+        assert_eq!(b[0]["stream"], false);
+        assert_eq!(b[0]["reasoning_effort"], "low");
+        assert!(b[0]["messages"][0]["content"].as_str().unwrap().contains("UI 변경점"));
     }
 }

@@ -153,6 +153,46 @@ function isInterruptedAssistantMessage(content: string): boolean {
   return content.includes('"계속"이라고 입력');
 }
 
+function estimateContextInfo(conv: Conversation | null) {
+  if (!conv) {
+    return {
+      totalMessages: 0,
+      coveredMessages: 0,
+      activeMessages: 0,
+      activeChars: 0,
+      approxTokens: 0,
+      percent: 0,
+      hasCompaction: false,
+    };
+  }
+  const covered = Math.min(conv.compaction?.coveredMessages ?? 0, conv.messages.length);
+  const active = conv.messages.slice(covered);
+  const summaryChars = conv.compaction?.summary.length ?? 0;
+  let activeChars = summaryChars;
+  let lastActivePromptTokens = 0;
+  for (const m of active) {
+    activeChars += m.content?.length ?? 0;
+    for (const tr of m.toolRecords ?? []) {
+      activeChars += tr.output?.length ?? 0;
+    }
+    if (m.stats && m.stats.promptTokens > 0) {
+      lastActivePromptTokens = m.stats.promptTokens;
+    }
+  }
+  const approxTokens =
+    lastActivePromptTokens > 0 ? lastActivePromptTokens : Math.round(activeChars / 3.2);
+  const percent = Math.min(100, Math.round((activeChars / 120000) * 100));
+  return {
+    totalMessages: conv.messages.length,
+    coveredMessages: covered,
+    activeMessages: active.length,
+    activeChars,
+    approxTokens,
+    percent,
+    hasCompaction: !!conv.compaction && covered > 0,
+  };
+}
+
 /** 탭에 표시하는 진행 중인 대화 수 */
 function RunBadge({ count }: { count: number }) {
   if (count <= 0) return null;
@@ -453,6 +493,16 @@ export default function App() {
     Record<string, boolean>
   >({});
 
+  // Context compaction modal & inline summary viewer/editor
+  const [showCompactModal, setShowCompactModal] = useState(false);
+  const [compactUseAi, setCompactUseAi] = useState(true);
+  const [compactKeepRecent, setCompactKeepRecent] = useState<number>(2);
+  const [compactFocus, setCompactFocus] = useState("");
+  const [compacting, setCompacting] = useState(false);
+  const [compactError, setCompactError] = useState<string | null>(null);
+  const [compactionExpanded, setCompactionExpanded] = useState(false);
+  const [editingCompactionSummary, setEditingCompactionSummary] = useState<string | null>(null);
+
   const chatEndRef = useRef<HTMLDivElement | null>(null);
 
   const activeProject = useMemo(
@@ -491,6 +541,10 @@ export default function App() {
   const shownConvId = activeConversation?.id ?? "";
   const shownConvIdRef = useRef(shownConvId);
   shownConvIdRef.current = shownConvId;
+  const contextInfo = useMemo(
+    () => estimateContextInfo(activeConversation),
+    [activeConversation]
+  );
   const activeRun = shownConvId ? runs[shownConvId] : undefined;
   const isStreaming = !!activeRun;
   const streamingReasoning = activeRun?.reasoning ?? "";
@@ -509,6 +563,8 @@ export default function App() {
   // 대화를 열면 '끝남' 표시를 지우고, 실패해서 돌려줄 입력이 있으면 채운다.
   useEffect(() => {
     if (!shownConvId) return;
+    setEditingCompactionSummary(null);
+    setCompactionExpanded(false);
     setUnseenDone((prev) => {
       if (!prev[shownConvId]) return prev;
       const next = { ...prev };
@@ -887,9 +943,85 @@ export default function App() {
     }
   }
 
+  function openCompactModal(presetFocus?: string) {
+    if (!activeConversation) return;
+    const msgCount = activeConversation.messages.length;
+    setCompactKeepRecent(msgCount <= 2 ? 0 : 2);
+    setCompactFocus(presetFocus ?? activeConversation.compaction?.focus ?? "");
+    setCompactError(null);
+    setShowCompactModal(true);
+  }
+
+  async function handleRunCompaction() {
+    if (!activeConversation || compacting || isStreaming) return;
+    setCompacting(true);
+    setCompactError(null);
+    try {
+      const updated = await BackendAPI.compactConversation(activeConversation.id, {
+        useAi: compactUseAi,
+        keepRecent: compactKeepRecent,
+        focus: compactFocus,
+      });
+      setConversations((prev) =>
+        prev.map((c) => (c.id === updated.id ? updated : c))
+      );
+      setEditingCompactionSummary(null);
+      setCompactionExpanded(false);
+      setShowCompactModal(false);
+    } catch (err: any) {
+      setCompactError(String(err));
+    } finally {
+      setCompacting(false);
+    }
+  }
+
+  async function handleSaveCompactionEdit() {
+    if (!activeConversation || editingCompactionSummary === null || isStreaming) return;
+    try {
+      const updated = await BackendAPI.updateConversationCompaction(
+        activeConversation.id,
+        editingCompactionSummary
+      );
+      setConversations((prev) =>
+        prev.map((c) => (c.id === updated.id ? updated : c))
+      );
+      setEditingCompactionSummary(null);
+    } catch (err: any) {
+      setErrorBanner(String(err));
+    }
+  }
+
+  async function handleClearCompaction() {
+    if (!activeConversation || isStreaming) return;
+    try {
+      const updated = await BackendAPI.updateConversationCompaction(
+        activeConversation.id,
+        null
+      );
+      setConversations((prev) =>
+        prev.map((c) => (c.id === updated.id ? updated : c))
+      );
+      setEditingCompactionSummary(null);
+      setCompactionExpanded(false);
+    } catch (err: any) {
+      setErrorBanner(String(err));
+    }
+  }
+
   async function handleSend(overrideText?: string) {
     const text = (overrideText ?? inputPrompt).trim();
     if (!text || !currentScopeId || isStreaming) return;
+
+    const compactMatch = text.match(/^\/compact(?:\s+([\s\S]+))?$/i);
+    if (compactMatch) {
+      if (!activeConversation || activeConversation.messages.length === 0) {
+        setErrorBanner("압축할 대화 기록이 없습니다.");
+        return;
+      }
+      if (!overrideText) setInputPrompt("");
+      openCompactModal((compactMatch[1] ?? "").trim());
+      return;
+    }
 
     let convId: string | null = null;
     let failure: { error: string; text?: string } | undefined;
@@ -962,8 +1094,14 @@ export default function App() {
 
     const convId = activeConversation.id;
     const previousMessages = [...activeConversation.messages];
+    const previousCompaction = activeConversation.compaction ?? null;
     const msgIdx = previousMessages.findIndex((m) => m.id === messageId);
     if (msgIdx < 0) return;
+
+    const nextCompaction =
+      previousCompaction && previousCompaction.coveredMessages > msgIdx
+        ? null
+        : previousCompaction;
 
     const truncated = [
       ...previousMessages.slice(0, msgIdx),
@@ -974,7 +1112,9 @@ export default function App() {
     ];
 
     setConversations((prev) =>
-      prev.map((c) => (c.id === convId ? { ...c, messages: truncated } : c))
+      prev.map((c) =>
+        c.id === convId ? { ...c, messages: truncated, compaction: nextCompaction } : c
+      )
     );
 
     setEditingMessageId(null);
@@ -995,7 +1135,9 @@ export default function App() {
     } catch (err: any) {
       setConversations((prev) =>
         prev.map((c) =>
-          c.id === convId ? { ...c, messages: previousMessages } : c
+          c.id === convId
+            ? { ...c, messages: previousMessages, compaction: previousCompaction }
+            : c
         )
       );
       failure = { error: String(err) };
@@ -2311,6 +2453,108 @@ export default function App() {
                           )}
                         </div>
                       )}
+
+                      {activeConversation.compaction &&
+                        activeConversation.compaction.coveredMessages > 0 &&
+                        idx ===
+                          Math.min(
+                            activeConversation.compaction.coveredMessages,
+                            activeConversation.messages.length
+                          ) -
+                            1 && (
+                          <div className="my-3 rounded-2xl border border-[#A50034]/25 dark:border-[#FF5C8D]/30 bg-[#FAF9F5] dark:bg-[#1E1E1C] px-4 py-3 text-xs space-y-2.5">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex flex-wrap items-center gap-2 text-stone-700 dark:text-stone-200 font-semibold">
+                                <Sparkles className="w-3.5 h-3.5 text-[#A50034] dark:text-[#FF5C8D]" />
+                                <span>
+                                  이전 {activeConversation.compaction.coveredMessages}개 메시지 컨텍스트 압축 적용됨
+                                </span>
+                                {activeConversation.compaction.focus && (
+                                  <span className="px-2 py-0.5 rounded-full bg-stone-200/70 dark:bg-[#2D2D2A] text-[11px] font-medium text-stone-600 dark:text-stone-300">
+                                    초점: {activeConversation.compaction.focus}
+                                  </span>
+                                )}
+                                <span className="text-[11px] font-normal text-stone-500 dark:text-stone-400">
+                                  ({(activeConversation.compaction.sourceChars ?? 0).toLocaleString()}자 →{" "}
+                                  {activeConversation.compaction.summary.length.toLocaleString()}자)
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setCompactionExpanded((v) => !v);
+                                    setEditingCompactionSummary(null);
+                                  }}
+                                  className="px-2.5 py-1 rounded-lg bg-white dark:bg-[#262624] border border-stone-200 dark:border-[#383834] text-stone-700 dark:text-stone-200 hover:bg-stone-100 dark:hover:bg-[#2F2F2C] font-medium cursor-pointer transition"
+                                >
+                                  {compactionExpanded ? "요약 접기" : "요약 보기/수정"}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={isStreaming}
+                                  onClick={handleClearCompaction}
+                                  className="px-2.5 py-1 rounded-lg text-stone-500 dark:text-stone-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30 disabled:opacity-40 font-medium cursor-pointer transition"
+                                  title="압축을 해제하고 원본 전체 대화를 모델에 다시 전달합니다"
+                                >
+                                  압축 해제
+                                </button>
+                              </div>
+                            </div>
+
+                            {compactionExpanded && (
+                              <div className="pt-2 border-t border-stone-200/80 dark:border-[#32322E] space-y-2">
+                                {editingCompactionSummary !== null ? (
+                                  <>
+                                    <textarea
+                                      rows={8}
+                                      value={editingCompactionSummary}
+                                      onChange={(e) => setEditingCompactionSummary(e.target.value)}
+                                      className="w-full rounded-xl bg-white dark:bg-[#262624] border border-stone-300 dark:border-[#3A3A36] p-2.5 text-xs text-stone-800 dark:text-stone-100 focus:outline-none focus:border-[#A50034] font-mono leading-relaxed"
+                                    />
+                                    <div className="flex justify-end gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => setEditingCompactionSummary(null)}
+                                        className="px-2.5 py-1 rounded-lg bg-stone-200/70 dark:bg-[#2D2D2A] text-stone-700 dark:text-stone-200 font-medium cursor-pointer"
+                                      >
+                                        취소
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={handleSaveCompactionEdit}
+                                        className="px-3 py-1 rounded-lg bg-[#A50034] hover:bg-[#8A002B] text-white font-semibold cursor-pointer flex items-center gap-1"
+                                      >
+                                        <Check className="w-3.5 h-3.5" /> 수정 적용
+                                      </button>
+                                    </div>
+                                  </>
+                                ) : (
+                                  <>
+                                    <div className="rounded-xl bg-white dark:bg-[#262624] border border-stone-200 dark:border-[#363632] p-3 text-xs text-stone-700 dark:text-stone-300 whitespace-pre-wrap leading-relaxed max-h-64 overflow-y-auto">
+                                      {activeConversation.compaction.summary}
+                                    </div>
+                                    <div className="flex justify-between items-center text-[11px] text-stone-400 dark:text-stone-500">
+                                      <span>다음 요청부터 이 요약 이후의 대화만 모델에 전송됩니다.</span>
+                                      <button
+                                        type="button"
+                                        disabled={isStreaming}
+                                        onClick={() =>
+                                          setEditingCompactionSummary(
+                                            activeConversation.compaction?.summary ?? ""
+                                          )
+                                        }
+                                        className="px-2.5 py-1 rounded-lg text-stone-600 dark:text-stone-300 hover:bg-stone-200/60 dark:hover:bg-[#2D2D2A] disabled:opacity-40 font-medium flex items-center gap-1 cursor-pointer"
+                                      >
+                                        <Edit2 className="w-3 h-3" /> 요약 수정
+                                      </button>
+                                    </div>
+                                  </>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
                     </div>
                   );
                 })}
@@ -2485,6 +2729,29 @@ export default function App() {
                         );
                       })}
                     </div>
+                    {activeConversation && activeConversation.messages.length > 0 && (
+                      <button
+                        type="button"
+                        disabled={isStreaming}
+                        onClick={() => openCompactModal()}
+                        title={`지금까지의 대화를 요약해 컨텍스트 창을 비웁니다 (/compact)\n현재 활성 컨텍스트: 약 ${contextInfo.approxTokens.toLocaleString()} 토큰 (${contextInfo.activeChars.toLocaleString()}자)`}
+                        className={`ml-0.5 pl-2 pr-2.5 py-1 rounded-lg border-l border-stone-200 dark:border-[#383834] text-xs font-medium flex items-center gap-1.5 cursor-pointer transition disabled:opacity-40 ${
+                          contextInfo.percent >= 80
+                            ? "text-[#A50034] dark:text-[#FF5C8D] bg-[#A50034]/10 dark:bg-[#FF5C8D]/15"
+                            : contextInfo.percent >= 55
+                              ? "text-amber-700 dark:text-amber-300 bg-amber-500/10"
+                              : "text-stone-600 dark:text-stone-300 hover:bg-stone-100 dark:hover:bg-[#32322F]"
+                        }`}
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>컨텍스트 압축</span>
+                        <span className="text-[10px] opacity-75">
+                          {contextInfo.hasCompaction
+                            ? `${contextInfo.coveredMessages}개 요약됨`
+                            : `~${Math.max(1, Math.round(contextInfo.approxTokens / 1000))}k`}
+                        </span>
+                      </button>
+                    )}
                   </div>
 
                   <div className="flex items-center gap-2.5">
@@ -2902,6 +3169,148 @@ export default function App() {
                   저장
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal 3: Context Compaction */}
+      {showCompactModal && activeConversation && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white dark:bg-[#262624] border border-stone-200 dark:border-[#3A3A36] rounded-2xl w-full max-w-md p-6 shadow-xl space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-[#A50034] dark:text-[#FF5C8D]" />
+                <h3 className="text-sm font-bold text-stone-900 dark:text-stone-100">
+                  컨텍스트 압축
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => !compacting && setShowCompactModal(false)}
+                className="cursor-pointer"
+              >
+                <X className="w-4 h-4 text-stone-400" />
+              </button>
+            </div>
+
+            <div className="rounded-xl bg-[#FAF9F5] dark:bg-[#1E1E1C] border border-stone-200 dark:border-[#383834] p-3 text-xs text-stone-600 dark:text-stone-300 space-y-1 leading-relaxed">
+              <p>
+                화면의 대화 기록은 그대로 보존하면서, 이전 대화를 핵심 요약으로 압축해 다음 요청부터 모델의 컨텍스트 부담을 줄입니다.
+              </p>
+              <p className="text-[11px] text-stone-500 dark:text-stone-400">
+                전체 {contextInfo.totalMessages}개 메시지 중 현재 활성 컨텍스트: 약{" "}
+                {contextInfo.approxTokens.toLocaleString()} 토큰 ({contextInfo.activeChars.toLocaleString()}자)
+              </p>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="font-semibold text-stone-700 dark:text-stone-300 block mb-1.5">
+                  압축 방식
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setCompactUseAi(true)}
+                    className={`p-2.5 rounded-xl border text-left cursor-pointer transition ${
+                      compactUseAi
+                        ? "border-[#A50034] bg-[#A50034]/8 dark:border-[#FF5C8D] dark:bg-[#FF5C8D]/12 text-stone-900 dark:text-stone-100"
+                        : "border-stone-200 dark:border-[#383834] text-stone-600 dark:text-stone-400 hover:bg-stone-50 dark:hover:bg-[#2C2C29]"
+                    }`}
+                  >
+                    <div className="font-semibold">AI 요약 압축 (권장)</div>
+                    <div className="text-[11px] opacity-80 mt-0.5">
+                      EXAONE이 결정사항·파일·작업 맥락을 정밀 요약 (1회 호출)
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCompactUseAi(false)}
+                    className={`p-2.5 rounded-xl border text-left cursor-pointer transition ${
+                      !compactUseAi
+                        ? "border-[#A50034] bg-[#A50034]/8 dark:border-[#FF5C8D] dark:bg-[#FF5C8D]/12 text-stone-900 dark:text-stone-100"
+                        : "border-stone-200 dark:border-[#383834] text-stone-600 dark:text-stone-400 hover:bg-stone-50 dark:hover:bg-[#2C2C29]"
+                    }`}
+                  >
+                    <div className="font-semibold">빠른 로컬 압축</div>
+                    <div className="text-[11px] opacity-80 mt-0.5">
+                      API 호출 없이 요청·파일·결과를 즉시 압축
+                    </div>
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="font-semibold text-stone-700 dark:text-stone-300 block mb-1.5">
+                  압축하지 않고 그대로 유지할 최근 메시지
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  {[
+                    { value: 0, label: "전체 압축 (0개)" },
+                    { value: 2, label: "최근 2개 유지" },
+                    { value: 4, label: "최근 4개 유지" },
+                  ].map((opt) => {
+                    const disabled =
+                      opt.value > 0 && activeConversation.messages.length <= opt.value;
+                    const selected = compactKeepRecent === opt.value;
+                    return (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        disabled={disabled}
+                        onClick={() => setCompactKeepRecent(opt.value)}
+                        className={`px-2.5 py-2 rounded-xl border text-center font-medium cursor-pointer transition disabled:opacity-35 disabled:cursor-not-allowed ${
+                          selected
+                            ? "border-[#A50034] bg-[#A50034]/10 text-[#A50034] dark:border-[#FF5C8D] dark:bg-[#FF5C8D]/15 dark:text-[#FF5C8D]"
+                            : "border-stone-200 dark:border-[#383834] text-stone-600 dark:text-stone-300 hover:bg-stone-50 dark:hover:bg-[#2C2C29]"
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div>
+                <label className="font-semibold text-stone-700 dark:text-stone-300 block mb-1">
+                  중점 보존 내용 / 초점 (선택)
+                </label>
+                <input
+                  type="text"
+                  value={compactFocus}
+                  onChange={(e) => setCompactFocus(e.target.value)}
+                  placeholder="예: 수정된 파일 경로, API 엔드포인트 스펙, 미완료 TODO"
+                  className="w-full bg-white dark:bg-[#1E1E1C] border border-stone-300 dark:border-[#3A3A36] rounded-xl px-3 py-2 text-stone-900 dark:text-stone-100 focus:outline-none focus:border-[#A50034]"
+                />
+              </div>
+
+              {compactError && (
+                <div className="rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900 px-3 py-2 text-red-700 dark:text-red-300">
+                  {compactError}
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button"
+                disabled={compacting}
+                onClick={() => setShowCompactModal(false)}
+                className="px-4 py-2 rounded-xl bg-stone-100 dark:bg-[#32322F] text-stone-700 dark:text-stone-200 text-xs font-semibold cursor-pointer disabled:opacity-50"
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                disabled={compacting}
+                onClick={handleRunCompaction}
+                className="px-4 py-2 rounded-xl bg-[#A50034] hover:bg-[#8A002B] text-white text-xs font-bold cursor-pointer disabled:opacity-60 flex items-center gap-1.5"
+              >
+                {compacting && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                <span>{compacting ? "압축 중..." : "압축 적용"}</span>
+              </button>
             </div>
           </div>
         </div>

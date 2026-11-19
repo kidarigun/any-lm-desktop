@@ -168,7 +168,21 @@ impl ChatMessage {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 대화 중간에 이전 메시지를 요약·대체한 컨텍스트 압축 정보.
+/// 원본 `messages`는 화면 표시·되돌리기용으로 유지하고, 모델 요청 시 `messages[..covered_messages]`를 `summary`로 대체한다.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextCompaction {
+    pub covered_messages: usize,
+    pub created_at: String,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_chars: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Conversation {
     pub id: String,
@@ -179,6 +193,9 @@ pub struct Conversation {
     /// 마지막으로 메시지를 보낸 화면 ("chat" | "project" | "code"). 화면에 맞는 지침을 고르는 데 쓴다.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+    /// 이전 대화 컨텍스트 압축 상태 (없으면 전체 대화 전송)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<ContextCompaction>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -407,9 +424,7 @@ mod tests {
             id: "c1".into(),
             project_id: "general-chat".into(),
             title: "지킬 대화".into(),
-            messages: vec![],
-            updated_at: String::new(),
-            mode: None,
+            ..Default::default()
         });
         store.save(&db).unwrap();
         assert!(!dir.path().join("exaone_desktop_store.json.tmp").exists(), "임시 파일은 남지 않는다");
@@ -507,8 +522,7 @@ mod tests {
                 incomplete: true,
                 ..Default::default()
             }],
-            updated_at: String::new(),
-            mode: None,
+            ..Default::default()
         });
         store.save(&db).unwrap();
         let m = &store.load().conversations[0].messages[0];

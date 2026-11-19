@@ -189,6 +189,14 @@ export interface TurnStats {
   elapsedMs: number;
 }
 
+export interface ContextCompaction {
+  coveredMessages: number;
+  createdAt: string;
+  summary: string;
+  focus?: string | null;
+  sourceChars?: number | null;
+}
+
 export interface Conversation {
   id: string;
   projectId: string;
@@ -197,6 +205,8 @@ export interface Conversation {
   updatedAt: string;
   /** 마지막으로 메시지를 보낸 화면 */
   mode?: "chat" | "project" | "code" | null;
+  /** 적용된 컨텍스트 압축 요약 */
+  compaction?: ContextCompaction | null;
 }
 
 export interface FileSnapshot {

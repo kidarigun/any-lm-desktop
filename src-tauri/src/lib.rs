@@ -610,6 +610,7 @@ fn create_conversation(
         messages: Vec::new(),
         updated_at: chrono::Local::now().to_rfc3339(),
         mode: None,
+        compaction: None,
     };
     db.conversations.insert(0, conv.clone());
     state.store.save(&db)?;
@@ -652,7 +653,7 @@ async fn send_chat_message(
     };
     let attachments_block = read_attachments(&app, attach_project.as_ref(), &attached_files).await;
 
-    let (settings, project, history_for_api, turn_mode) = {
+    let (settings, project, history_for_api, turn_mode, compaction) = {
         let mut db = state.db.lock().map_err(|e| e.to_string())?;
         let settings = db.settings.clone();
         let conv_idx = db
@@ -691,8 +692,9 @@ async fn send_chat_message(
         }
         let turn_mode = conv.mode.clone().unwrap_or_default();
         let history = conv.messages.clone();
+        let compaction = conv.compaction.clone();
         state.store.save(&db)?;
-        (settings, project, history, turn_mode)
+        (settings, project, history, turn_mode, compaction)
     };
     let checkpoint = |m: &ChatMessage| save_checkpoint(&state, &conversation_id, m);
 
@@ -705,6 +707,7 @@ async fn send_chat_message(
             history: &history_for_api,
             continue_from: None,
             mode: &turn_mode,
+            compaction: compaction.as_ref(),
             checkpoint: Some(&checkpoint),
         },
         cancel_flag,
@@ -749,7 +752,7 @@ async fn edit_and_resend_message(
     let run = state.runs.begin(&conversation_id)?;
     let cancel_flag = run.cancel_flag();
 
-    let (settings, project, history_for_api, backup_messages, turn_mode) = {
+    let (settings, project, history_for_api, backup_messages, backup_compaction, turn_mode, compaction) = {
         let mut db = state.db.lock().map_err(|e| e.to_string())?;
         let settings = db.settings.clone();
         let conv_idx = db
@@ -768,6 +771,12 @@ async fn edit_and_resend_message(
             .ok_or_else(|| "수정할 메시지를 찾을 수 없습니다.".to_string())?;
 
         let backup = conv.messages.clone();
+        let backup_compaction = conv.compaction.clone();
+        if let Some(ref c) = conv.compaction {
+            if c.covered_messages > msg_pos {
+                conv.compaction = None;
+            }
+        }
         conv.messages.truncate(msg_pos);
         expire_pending_approvals(conv);
 
@@ -792,8 +801,9 @@ async fn edit_and_resend_message(
         conv.updated_at = chrono::Local::now().to_rfc3339();
         let turn_mode = conv.mode.clone().unwrap_or_default();
         let history = conv.messages.clone();
+        let compaction = conv.compaction.clone();
         state.store.save(&db)?;
-        (settings, project, history, backup, turn_mode)
+        (settings, project, history, backup, backup_compaction, turn_mode, compaction)
     };
     let checkpoint = |m: &ChatMessage| save_checkpoint(&state, &conversation_id, m);
 
@@ -806,6 +816,7 @@ async fn edit_and_resend_message(
             history: &history_for_api,
             continue_from: None,
             mode: &turn_mode,
+            compaction: compaction.as_ref(),
             checkpoint: Some(&checkpoint),
         },
         cancel_flag,
@@ -822,6 +833,7 @@ async fn edit_and_resend_message(
                     .find(|c| c.id == conversation_id)
                 {
                     conv.messages = backup_messages;
+                    conv.compaction = backup_compaction;
                     let _ = state.store.save(&db);
                 }
             }
@@ -1153,7 +1165,13 @@ async fn resolve_tool_approval(
         // 사용자가 그사이 새 메시지를 보냈다면 이 메시지는 더 이상 마지막이 아니므로 이어가지 않는다.
         let is_last = msg_idx + 1 == conv.messages.len();
         let continuation = if all_resolved && is_last {
-            Some((settings, conv.messages.clone(), msg.clone(), conv.mode.clone().unwrap_or_default()))
+            Some((
+                settings,
+                conv.messages.clone(),
+                msg.clone(),
+                conv.mode.clone().unwrap_or_default(),
+                conv.compaction.clone(),
+            ))
         } else {
             None
         };
@@ -1166,7 +1184,7 @@ async fn resolve_tool_approval(
     };
 
     // 4) 도구 결과를 모델에 전달해 같은 메시지에 이어서 답변을 받는다.
-    let (settings, history, assistant_msg, turn_mode) = continuation;
+    let (settings, history, assistant_msg, turn_mode, compaction) = continuation;
     let checkpoint = |m: &ChatMessage| save_checkpoint(&state, &conversation_id, m);
     let (updated_msg, new_snapshots) = exaone::run_exaone_turn(
         &app,
@@ -1177,6 +1195,7 @@ async fn resolve_tool_approval(
             history: &history,
             continue_from: Some(assistant_msg),
             mode: &turn_mode,
+            compaction: compaction.as_ref(),
             checkpoint: Some(&checkpoint),
         },
         run.cancel_flag(),
@@ -1202,6 +1221,132 @@ async fn run_manual_terminal_command(
         PathBuf::from(&proj.root_path)
     };
     fs_ops::execute_shell_command(&root, &command, SHELL_TIMEOUT).await
+}
+
+/// 대화 히스토리의 앞부분을 요약해 컨텍스트 압축 지점을 생성·갱신한다.
+/// 기존 메시지는 화면 표시와 기록 보존을 위해 삭제하지 않고 그대로 둔다.
+#[tauri::command]
+async fn compact_conversation(
+    state: State<'_, AppState>,
+    conversation_id: String,
+    use_ai: bool,
+    keep_recent: usize,
+    focus: Option<String>,
+) -> Result<Conversation, String> {
+    let run = state.runs.begin(&conversation_id)?;
+    let cancel_flag = run.cancel_flag();
+    let focus_clean = focus
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let (settings, covered, prev_ctx, slice_to_summarize, source_chars) = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        let conv = db
+            .conversations
+            .iter()
+            .find(|c| c.id == conversation_id)
+            .ok_or_else(|| "대화 세션을 찾을 수 없습니다.".to_string())?;
+
+        let total = conv.messages.len();
+        let mut covered = total.saturating_sub(keep_recent);
+        // 남은 최근 구간이 assistant 메시지로 시작하지 않도록 직전 user 경계에 맞춘다.
+        while covered > 0
+            && covered < total
+            && conv.messages.get(covered).map(|m| m.role.as_str()) != Some("user")
+        {
+            covered -= 1;
+        }
+        if covered == 0 {
+            return Err(
+                "압축할 이전 대화가 부족합니다. 최근 유지 메시지 수를 줄이거나 대화를 더 진행한 후 압축하세요."
+                    .to_string(),
+            );
+        }
+
+        let (prev_ctx, slice) = match conv.compaction.as_ref() {
+            Some(prev) if prev.covered_messages > 0 && prev.covered_messages < covered => {
+                (Some(prev.clone()), conv.messages[prev.covered_messages..covered].to_vec())
+            }
+            _ => (None, conv.messages[..covered].to_vec()),
+        };
+
+        let source_chars = exaone::conversation_source_chars(prev_ctx.as_ref(), &slice);
+        (db.settings.clone(), covered, prev_ctx, slice, source_chars)
+    };
+
+    let summary = if use_ai {
+        exaone::summarize_for_compaction(
+            &settings,
+            prev_ctx.as_ref(),
+            &slice_to_summarize,
+            focus_clean.as_deref(),
+            &cancel_flag,
+        )
+        .await?
+    } else {
+        exaone::build_local_compaction_summary(
+            prev_ctx.as_ref(),
+            &slice_to_summarize,
+            focus_clean.as_deref(),
+        )
+    };
+
+    let mut db = state.db.lock().map_err(|e| e.to_string())?;
+    let conv = db
+        .conversations
+        .iter_mut()
+        .find(|c| c.id == conversation_id)
+        .ok_or_else(|| "대화 세션을 찾을 수 없습니다.".to_string())?;
+    let safe_covered = covered.min(conv.messages.len());
+    conv.compaction = Some(crate::store::ContextCompaction {
+        covered_messages: safe_covered,
+        created_at: chrono::Local::now().to_rfc3339(),
+        summary,
+        focus: focus_clean,
+        source_chars: Some(source_chars),
+    });
+    conv.updated_at = chrono::Local::now().to_rfc3339();
+    let updated = conv.clone();
+    state.store.save(&db)?;
+    Ok(updated)
+}
+
+/// 적용된 컨텍스트 압축 요약을 직접 수정하거나(Some) 압축을 해제(None)한다.
+#[tauri::command]
+fn update_conversation_compaction(
+    state: State<'_, AppState>,
+    conversation_id: String,
+    summary: Option<String>,
+) -> Result<Conversation, String> {
+    let mut db = state.db.lock().map_err(|e| e.to_string())?;
+    let conv = db
+        .conversations
+        .iter_mut()
+        .find(|c| c.id == conversation_id)
+        .ok_or_else(|| "대화 세션을 찾을 수 없습니다.".to_string())?;
+
+    match summary {
+        Some(text) => {
+            let trimmed = text.trim().to_string();
+            if trimmed.is_empty() {
+                return Err("압축 요약 내용이 비어 있을 수 없습니다.".to_string());
+            }
+            let comp = conv
+                .compaction
+                .as_mut()
+                .ok_or_else(|| "적용된 컨텍스트 압축이 없습니다.".to_string())?;
+            comp.summary = trimmed;
+            comp.created_at = chrono::Local::now().to_rfc3339();
+        }
+        None => {
+            conv.compaction = None;
+        }
+    }
+
+    conv.updated_at = chrono::Local::now().to_rfc3339();
+    let updated = conv.clone();
+    state.store.save(&db)?;
+    Ok(updated)
 }
 
 // ---------------------------------------------------------------------------
@@ -2055,6 +2200,8 @@ pub fn run() {
             send_chat_message,
             edit_and_resend_message,
             resolve_tool_approval,
+            compact_conversation,
+            update_conversation_compaction,
             run_manual_terminal_command,
             read_project_file_base64,
             read_absolute_file_base64,
