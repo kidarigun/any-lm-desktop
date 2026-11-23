@@ -4,4 +4,5 @@
 
 - 2026-11-23 | claude-code | 원본 K-EXAONE Desktop 0.4.4(e885b02)를 복제해 저장소를 만들고 인계 문서를 작성함(작업 1) | c15fab8
 - 2026-11-23 | claude-code | 정체성 분리(이름·identifier·버전·포트·자격 증명 서비스명 등)와 업데이트 기능 제거(작업 2). 원본과 동시 실행 확인 | (작업 2 커밋)
-- 2026-11-23 | claude-code | 설정을 LM Studio 연결로 교체(작업 3): lmstudio.rs, AppSettings 개편, API 키 필수 검사·추론 강도 UI 삭제 | 94d00cb
+- 2026-11-23 | claude-code | 설정을 LM Studio 연결로 교체(작업 3): lmstudio.rs, AppSettings 개편, API 키 필수 검사·추론 강도 UI 삭제 | c7a87c1
+- 2026-11-23 | claude-code | 모델 목록·로드 계획·로드/언로드·서버 상태/시작 구현(작업 4), 실측 결정 기록 0002, lm_* 명령과 TS 바인딩 | (이 커밋)

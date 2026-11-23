@@ -216,9 +216,9 @@ async fn connection_refused_is_friendly() {
   - Tauri 명령: `lm_list_models`, `lm_plan_load { key }`, `lm_load_model { key, contextLength }`, `lm_unload { instanceId }`, `lm_server_running`, `lm_start_server`
   - TS `BackendAPI.listModels()`, `planLoad(key)`, `loadModel(key, contextLength)`, `unloadModel(instanceId)`, `serverRunning()`, `startServer()`; 타입 `LmModel`, `LoadedInstance`, `LoadPlan`
 
-- [ ] **Step 1: load/unload 요청 형식 확인.** https://lmstudio.ai/docs/developer/rest 에서 `POST /api/v1/models/load`·`unload` 본문 형식을 확인하고, 9B로 실측한다(`context_length` 지정 로드 → `GET /api/v1/models`에 그 값이 보이는지). 같은 요청이 LM Studio 화면에 저장해 둔 모델별 GPU 설정(전문가 가중치 CPU 보내기)을 덮어쓰는지도 35B로 확인한다. 결과를 `docs/decisions/0002-lmstudio-load-api.md`에 남긴다.
+- [x] **Step 1: load/unload 요청 형식 확인.** https://lmstudio.ai/docs/developer/rest 에서 `POST /api/v1/models/load`·`unload` 본문 형식을 확인하고, 9B로 실측한다(`context_length` 지정 로드 → `GET /api/v1/models`에 그 값이 보이는지). 같은 요청이 LM Studio 화면에 저장해 둔 모델별 GPU 설정(전문가 가중치 CPU 보내기)을 덮어쓰는지도 35B로 확인한다. 결과를 `docs/decisions/0002-lmstudio-load-api.md`에 남긴다.
 
-- [ ] **Step 2: 실패하는 테스트**
+- [x] **Step 2: 실패하는 테스트**
 
 ```rust
 fn fixture() -> Vec<LmModel> { parse_models(&serde_json::from_str(include_str!("testdata/lmstudio_models.json")).unwrap()) }
@@ -253,13 +253,13 @@ fn plan_load_missing_model() {
 fn wanted_context_respects_prefs_and_max() { /* pref 없음 → 32768, pref 8192 → 8192, pref 999999 → 262144 */ }
 ```
 
-- [ ] **Step 3: 실패 확인** — `cargo test --lib lmstudio::` → FAIL
+- [x] **Step 3: 실패 확인** — `cargo test --lib lmstudio::` → FAIL
 
-- [ ] **Step 4: 구현** — 위 Interfaces 그대로. `start_server`는 `CREATE_NO_WINDOW`로 실행(원본 `runtime.rs`의 방식 참고). `lms_path`가 없으면 `"LM Studio 명령줄 도구를 찾지 못했습니다. LM Studio를 한 번 실행한 뒤 다시 시도해 주세요."`.
+- [x] **Step 4: 구현** — 위 Interfaces 그대로. `start_server`는 `CREATE_NO_WINDOW`로 실행(원본 `runtime.rs`의 방식 참고). `lms_path`가 없으면 `"LM Studio 명령줄 도구를 찾지 못했습니다. LM Studio를 한 번 실행한 뒤 다시 시도해 주세요."`.
 
-- [ ] **Step 5: 통과 확인** — 세 검증 명령 PASS. 실측: 앱 개발 실행에서 개발자 도구 콘솔로 `await window.__TAURI__.core.invoke("lm_list_models")` → 두 모델.
+- [x] **Step 5: 통과 확인** — 세 검증 명령 PASS. 실측: 앱 개발 실행에서 개발자 도구 콘솔로 `await window.__TAURI__.core.invoke("lm_list_models")` → 두 모델.
 
-- [ ] **Step 6: 커밋** — `feat: list, plan and load LM Studio models`
+- [x] **Step 6: 커밋** — `feat: list, plan and load LM Studio models`
 
 ---
 

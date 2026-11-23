@@ -257,6 +257,32 @@ export interface FileNode {
   children?: FileNode[] | null;
 }
 
+export interface LoadedInstance {
+  id: string;
+  contextLength: number;
+}
+
+/** LM Studio에 설치된 LLM 한 개 */
+export interface LmModel {
+  key: string;
+  displayName: string;
+  params?: string | null;
+  quantization?: string | null;
+  sizeBytes: number;
+  maxContextLength: number;
+  loaded: LoadedInstance[];
+  vision: boolean;
+  toolUse: boolean;
+  reasoningOptions: string[];
+}
+
+/** 요청 전에 모델을 쓸 수 있는지에 대한 판단 */
+export type LoadPlan =
+  | { kind: "ready"; instanceId: string; contextLength: number }
+  | { kind: "smallerLoaded"; instanceId: string; loaded: number; wanted: number }
+  | { kind: "notLoaded"; others: string[] }
+  | { kind: "missing" };
+
 export interface AppDatabase {
   settings: AppSettings;
   projects: Project[];

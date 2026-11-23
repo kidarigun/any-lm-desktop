@@ -184,6 +184,54 @@ fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> Result<Ap
     Ok(db.settings.clone())
 }
 
+fn settings_snapshot(state: &State<'_, AppState>) -> Result<AppSettings, String> {
+    Ok(state.db.lock().map_err(|e| e.to_string())?.settings.clone())
+}
+
+#[tauri::command]
+async fn lm_list_models(state: State<'_, AppState>) -> Result<Vec<lmstudio::LmModel>, String> {
+    lmstudio::list_models(&settings_snapshot(&state)?).await
+}
+
+/// 선택한 모델이 원하는 컨텍스트로 쓸 수 있는지 확인한다(로드는 하지 않는다).
+#[tauri::command]
+async fn lm_plan_load(state: State<'_, AppState>, key: String) -> Result<lmstudio::LoadPlan, String> {
+    let settings = settings_snapshot(&state)?;
+    let models = lmstudio::list_models(&settings).await?;
+    let wanted = models
+        .iter()
+        .find(|m| m.key == key)
+        .map(|m| lmstudio::wanted_context(&settings, m))
+        .unwrap_or(lmstudio::DEFAULT_CONTEXT);
+    Ok(lmstudio::plan_load(&models, &key, wanted))
+}
+
+#[tauri::command]
+async fn lm_load_model(
+    state: State<'_, AppState>,
+    key: String,
+    context_length: u32,
+) -> Result<lmstudio::LoadedInstance, String> {
+    lmstudio::load_model(&settings_snapshot(&state)?, &key, context_length).await
+}
+
+#[tauri::command]
+async fn lm_unload(state: State<'_, AppState>, instance_id: String) -> Result<(), String> {
+    lmstudio::unload_instance(&settings_snapshot(&state)?, &instance_id).await
+}
+
+#[tauri::command]
+async fn lm_server_running(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(lmstudio::server_running(&settings_snapshot(&state)?).await)
+}
+
+#[tauri::command]
+async fn lm_start_server() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(lmstudio::start_server)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 fn clear_api_key(state: State<'_, AppState>) -> Result<AppSettings, String> {
     secrets::delete_api_key()?;
@@ -2046,6 +2094,12 @@ pub fn run() {
             get_initial_state,
             save_settings,
             clear_api_key,
+            lm_list_models,
+            lm_plan_load,
+            lm_load_model,
+            lm_unload,
+            lm_server_running,
+            lm_start_server,
             open_external_url,
             pick_folder_dialog,
             pick_files_dialog,

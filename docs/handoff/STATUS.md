@@ -10,15 +10,17 @@
 
 - 작업 3(설정을 LM Studio 연결로 바꾸기): 완료. `lmstudio.rs`(server_urls·authorize·friendly_error) 추가, `AppSettings`를 serverUrl/선택 토큰/autoCompact/modelPrefs로 교체, exaone.rs의 API 키 필수 검사·reasoning_effort 삭제, 추론 강도 선택 UI 삭제(작업 6에서 모델 선택기가 들어갈 자리). 설정 대화상자는 최소 수정만 했다(작업 5에서 재구성).
 
+- 작업 4(모델 목록·로드·서버 상태): 완료. `lmstudio.rs`에 parse_models·plan_load·wanted_context·list/load/unload·server_running·lms_path·start_server, Tauri 명령 `lm_*` 6개, TS `BackendAPI`(listModels 등)와 타입 추가. 결정 기록 `docs/decisions/0002-lmstudio-load-api.md`. 실측 후 LM Studio는 qwen3.5-9b(32768)만 로드된 상태로 복구함.
+
 ## 마지막 확인
-2026-11-23, 작업 3 완료 시점:
+2026-11-23, 작업 4 완료 시점:
 - `npm test` → 통과 (16 파일, 102 통과, 1 건너뜀)
 - `npx tsc --noEmit` → 통과 (오류 없음)
-- `cd src-tauri && cargo test --lib` → 통과 (128 통과, 0 실패, 7 무시)
-- LM Studio 실서버 `GET /v1/models` 응답 확인(qwen3.5-9b 등).
+- `cd src-tauri && cargo test --lib` → 통과 (136 통과, 0 실패, 8 무시)
+- `cargo test --lib live_list_models -- --ignored --nocapture` → 실서버에서 모델 2개(9B 로드됨 32768, 35B 미로드) 확인.
 
 ## 다음 할 일
-1. 계획의 작업 4부터 이어서 진행한다(`docs/superpowers/plans/2026-11-23-any-lm-desktop.md`의 작업 4 첫 단계부터).
+1. 계획의 작업 5부터 이어서 진행한다(`docs/superpowers/plans/2026-11-23-any-lm-desktop.md`의 작업 5 첫 단계부터).
 2. 작업 1의 단계 6은 사용자가 승인하면 한다: "`kidarigun/any-lm-desktop` 비공개 저장소를 만들고 main을 올릴까요?" → 승인 시 `gh repo create kidarigun/any-lm-desktop --private --source . --remote origin --push`.
 
 ## 결정 필요
@@ -34,6 +36,8 @@
 ## 수동 확인 목록
 (사람이 화면에서 직접 확인해야 하는 항목을 이후 작업이 여기에 덧붙인다.)
 - 원본 앱과 새 앱 창이 동시에 뜨는지 눈으로 확인 (작업 2: 프로세스·포트·데이터 폴더만 확인했고 창 모양은 보지 못했다)
+- 앱 개발자 도구에서 lm_list_models 결과 확인: `await window.__TAURI__.core.invoke("lm_list_models")` → 모델 2개(작업 4는 GUI를 못 봐서 `#[ignore]` 실서버 테스트로 대신 확인)
+- LM Studio 화면에서 모델별 GPU 설정(전문가 가중치 CPU로)을 저장해 둔 뒤 앱으로 로드해도 그 값이 유지되는지 (작업 4: 저장값이 없는 상태에서만 확인, 결정 기록 0002)
 
 ## 마지막 작업자
 - 도구: claude-code

@@ -6,6 +6,9 @@ import {
   Conversation,
   FileNode,
   FileSnapshot,
+  LmModel,
+  LoadedInstance,
+  LoadPlan,
   Project,
   SaveResult,
   SnapshotDiff,
@@ -67,6 +70,40 @@ export const BackendAPI = {
       return await invoke<AppDatabase>("get_initial_state");
     }
     return loadFallbackDb();
+  },
+
+  /** LM Studio에 설치된 LLM 목록 */
+  async listModels(): Promise<LmModel[]> {
+    if (isTauri()) return await invoke<LmModel[]>("lm_list_models");
+    return [];
+  },
+
+  /** 선택한 모델을 원하는 컨텍스트로 쓸 수 있는지 확인한다(로드는 하지 않는다). */
+  async planLoad(key: string): Promise<LoadPlan> {
+    if (isTauri()) return await invoke<LoadPlan>("lm_plan_load", { key });
+    return { kind: "missing" };
+  },
+
+  async loadModel(key: string, contextLength: number): Promise<LoadedInstance> {
+    if (isTauri()) return await invoke<LoadedInstance>("lm_load_model", { key, contextLength });
+    throw new Error("모델 로드는 데스크톱 앱에서만 쓸 수 있습니다.");
+  },
+
+  async unloadModel(instanceId: string): Promise<void> {
+    if (isTauri()) {
+      await invoke("lm_unload", { instanceId });
+    }
+  },
+
+  async serverRunning(): Promise<boolean> {
+    if (isTauri()) return await invoke<boolean>("lm_server_running");
+    return false;
+  },
+
+  async startServer(): Promise<void> {
+    if (isTauri()) {
+      await invoke("lm_start_server");
+    }
   },
 
   /** 저장된 API 키를 Windows 자격 증명 관리자에서 지운다. */
