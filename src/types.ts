@@ -131,7 +131,7 @@ export interface SkillInfo {
   /** 표시용 위치 */
   location: string;
   enabled: boolean;
-  /** SKILL.md에 문제가 있으면 그 내용 (엑사원에게 알려 주지 않음) */
+  /** SKILL.md에 문제가 있으면 그 내용 (모델에게 알려 주지 않음) */
   error?: string | null;
   /** 같은 이름의 프로젝트 Skill에 가려졌는지 */
   shadowed: boolean;

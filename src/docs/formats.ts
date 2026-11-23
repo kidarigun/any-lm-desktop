@@ -4,7 +4,7 @@ export type DocKind = "markdown" | "docx" | "hwpx" | "pptx" | "xlsx" | "pdf" | "
 /** 바이너리로 읽고 써야 하는 문서 종류 */
 export const BINARY_KINDS: readonly DocKind[] = ["docx", "hwpx", "pptx", "xlsx", "pdf", "image"];
 
-/** 캔버스에서 미리보기만 하는 문서 종류 (고치기는 원래 앱이나 엑사원에게 맡긴다) */
+/** 캔버스에서 미리보기만 하는 문서 종류 (고치기는 원래 앱이나 모델에게 맡긴다) */
 export const PREVIEW_ONLY_KINDS: readonly DocKind[] = ["pptx", "xlsx", "pdf", "image"];
 
 export function isPreviewOnlyKind(kind: DocKind): boolean {

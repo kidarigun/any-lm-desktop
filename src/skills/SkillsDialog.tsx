@@ -234,7 +234,7 @@ export function SkillsDialog({
               <Sparkles className="w-4 h-4 text-[#A50034] dark:text-[#FF5C8D]" /> Skill
             </h3>
             <p className="mt-1 text-stone-500 dark:text-stone-400 leading-relaxed">
-              엑사원이 요청에 맞는 Skill을 골라 그 지침대로 작업합니다. 켜 둔 Skill은 이름과 설명만 먼저 전달되고, 필요할 때 본문을 읽습니다.
+              모델이 요청에 맞는 Skill을 골라 그 지침대로 작업합니다. 켜 둔 Skill은 이름과 설명만 먼저 전달되고, 필요할 때 본문을 읽습니다.
               {activeCount > 0 && <> 지금 <b className="text-stone-700 dark:text-stone-200">{activeCount}개</b> 사용 중.</>}
             </p>
           </div>
@@ -328,7 +328,7 @@ export function SkillsDialog({
               installed={skills ?? []}
               onInstalled={(name) => {
                 setError("");
-                setNotice(`'${name}' Skill을 설치했습니다. 이제 엑사원이 필요할 때 이 Skill을 씁니다.`);
+                setNotice(`'${name}' Skill을 설치했습니다. 이제 모델이 필요할 때 이 Skill을 씁니다.`);
                 void refresh();
               }}
             />
@@ -345,7 +345,7 @@ export function SkillsDialog({
                     <ul className="space-y-1.5">{projectSkills.map(row)}</ul>
                   ) : (
                     <p className="text-stone-500 dark:text-stone-400 leading-relaxed">
-                      프로젝트의 <code className="font-mono">.skills\&lt;이름&gt;\SKILL.md</code>에 둔 Skill은 이 프로젝트 대화에서만 쓰입니다. 엑사원에게 "○○ Skill을 만들어 줘"라고 요청해도 됩니다.
+                      프로젝트의 <code className="font-mono">.skills\&lt;이름&gt;\SKILL.md</code>에 둔 Skill은 이 프로젝트 대화에서만 쓰입니다. 모델에게 "○○ Skill을 만들어 줘"라고 요청해도 됩니다.
                     </p>
                   )}
                 </section>

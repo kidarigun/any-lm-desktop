@@ -276,7 +276,7 @@ function conversationToMarkdown(conv: Conversation): string {
   const lines: string[] = [`# ${conv.title || "대화"}`, ""];
   for (const m of conv.messages) {
     if (m.role !== "user" && m.role !== "assistant") continue;
-    lines.push(m.role === "user" ? "## 사용자" : "## 엑사원", "");
+    lines.push(m.role === "user" ? "## 사용자" : "## 어시스턴트", "");
     lines.push(m.content.trim() || "(내용 없음)", "");
     const files = m.toolRecords.filter((r) => r.filePath && r.status === "completed").map((r) => r.filePath);
     if (files.length) lines.push(`> 이 답변에서 다룬 파일: ${Array.from(new Set(files)).join(", ")}`, "");
@@ -1443,7 +1443,7 @@ export default function App() {
     setTimeout(() => setCopiedId(null), 1800);
   }
 
-  /** 답변을 .md 또는 .docx 파일로 저장한다 (엑사원을 거치지 않고 앱이 직접 변환). */
+  /** 답변을 .md 또는 .docx 파일로 저장한다 (모델을 거치지 않고 앱이 직접 변환). */
   async function handleSaveAnswer(msgIndex: number, format: AnswerFormat) {
     setAnswerSaveMenu(null);
     const messages = activeConversation?.messages ?? [];
@@ -2148,7 +2148,7 @@ export default function App() {
                 <div className="p-4 rounded-xl bg-[#FAF9F5] dark:bg-[#1E1E1C] border border-stone-200/80 dark:border-[#343430] space-y-2">
                   <div className="text-xs font-bold text-stone-700 dark:text-stone-300">묻지 않고 실행</div>
                   <p className="text-xs text-stone-500 dark:text-stone-400 leading-relaxed">
-                    켜 두면 이 프로젝트에서는 엑사원이 만든 스크립트나 명령을 승인 없이 바로 실행합니다. 호출과 시간을 아끼지만,
+                    켜 두면 이 프로젝트에서는 모델이 만든 스크립트나 명령을 승인 없이 바로 실행합니다. 호출과 시간을 아끼지만,
                     실행 전에 내용을 확인할 수 없습니다. 파일 삭제는 항상 묻습니다.
                   </p>
                   {AUTO_APPROVE_TOOLS.map((t) => (

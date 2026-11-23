@@ -9,7 +9,7 @@ const walk = (d: string): string[] =>
 describe("branding", () => {
   it("has no K-EXAONE branding in UI sources", () => {
     const files = walk("src").filter((f) => /\.(tsx|ts)$/.test(f) && !f.endsWith(".test.ts"));
-    const hits = files.filter((f) => /K-EXAONE|EXAONE|LG AI/.test(readFileSync(f, "utf8").replace(/onExaoneStream|exaone-stream/g, "")));
+    const hits = files.filter((f) => /K-EXAONE|EXAONE|LG AI|엑사원/.test(readFileSync(f, "utf8").replace(/onExaoneStream|exaone-stream/g, "")));
     expect(hits).toEqual([]);
   });
 });

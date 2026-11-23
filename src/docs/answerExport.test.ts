@@ -25,14 +25,14 @@ describe("답변 파일 이름", () => {
 
   it("제목이 없으면 질문 첫 줄, 그것도 없으면 날짜", () => {
     expect(suggestAnswerFileName("그냥 본문입니다.", "**보고서** 써줘\n자세히")).toBe("보고서 써줘");
-    expect(suggestAnswerFileName("본문", undefined, new Date(2026, 10, 4))).toBe("엑사원 답변 2026-11-04");
+    expect(suggestAnswerFileName("본문", undefined, new Date(2026, 10, 4))).toBe("답변 2026-11-04");
   });
 
   it("Windows에서 못 쓰는 글자와 이름을 걸러 낸다", () => {
     expect(sanitizeFileName('A/B: "견적"? <초안>|*.')).toBe("A B 견적 초안");
     expect(sanitizeFileName("con")).toBe("");
     expect(sanitizeFileName("가".repeat(80))).toHaveLength(50);
-    expect(suggestAnswerFileName("# ...", "???")).toMatch(/^엑사원 답변 \d{4}-\d\d-\d\d$/);
+    expect(suggestAnswerFileName("# ...", "???")).toMatch(/^답변 \d{4}-\d\d-\d\d$/);
   });
 
   it("고른 경로의 폴더를 기억한다", () => {

@@ -49,7 +49,7 @@ export interface PythonRunDialogProps {
   onAskFix?: (prompt: string) => void;
 }
 
-/** 실패한 실행을 엑사원에게 고쳐 달라고 할 때 보낼 문장 */
+/** 실패한 실행을 모델에게 고쳐 달라고 할 때 보낼 문장 */
 export function fixRequestPrompt(o: PythonRunOutcome): string {
   // 오류 설명은 보통 끝에 있으므로 마지막 25줄만 보낸다.
   // 들여쓰기(Traceback의 "  File …")는 살리고, 앞뒤 빈 줄만 걷어 낸다.
@@ -341,13 +341,13 @@ export default function PythonRunDialog({
           {!ok && !o.missingModule && onAskFix && (
             <div className="flex items-center gap-2 rounded-lg border border-stone-200 dark:border-[#3A3A36] px-3 py-2">
               <span className="flex-1 text-stone-600 dark:text-stone-300">
-                스크립트 자체의 오류입니다. 오류 내용을 엑사원에게 보내 고치게 할 수 있습니다.
+                스크립트 자체의 오류입니다. 오류 내용을 모델에게 보내 고치게 할 수 있습니다.
               </span>
               <button
                 onClick={() => onAskFix(fixRequestPrompt(o))}
                 className="px-2.5 py-1.5 rounded-lg bg-stone-800 hover:bg-stone-700 dark:bg-stone-200 dark:hover:bg-white text-white dark:text-stone-900 font-semibold flex items-center gap-1.5 shrink-0 cursor-pointer"
               >
-                <MessageSquareShare className="w-3.5 h-3.5" /> 엑사원에게 고쳐 달라고 하기
+                <MessageSquareShare className="w-3.5 h-3.5" /> 모델에게 고쳐 달라고 하기
               </button>
             </div>
           )}

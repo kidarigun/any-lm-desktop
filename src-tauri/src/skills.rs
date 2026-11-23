@@ -249,7 +249,7 @@ fn inspect(dir: &Path, id: String, scope: &str, location: String, disabled: &Has
                 Some(d) => info.description = d.chars().take(MAX_DESCRIPTION_CHARS).collect(),
                 None => {
                     info.error = Some(
-                        "SKILL.md 머리말에 description(언제 쓰는 Skill인지)이 없어 엑사원에게 알려 줄 수 없습니다."
+                        "SKILL.md 머리말에 description(언제 쓰는 Skill인지)이 없어 모델에게 알려 줄 수 없습니다."
                             .to_string(),
                     )
                 }
@@ -745,7 +745,7 @@ pub fn create_user_skill(name: &str) -> Result<SkillInfo, String> {
         name.to_string()
     };
     let template = format!(
-        "---\nname: {yaml_name}\ndescription: 이 Skill이 무엇을 하는지, 어떤 요청일 때 써야 하는지 한두 문장으로 적으세요. 엑사원은 이 설명을 보고 Skill을 쓸지 정합니다.\n---\n\n# {name}\n\n## 언제 쓰나요\n- (예: 주간 업무 보고서를 써 달라고 할 때)\n\n## 지침\n1. (엑사원이 따라야 할 순서와 규칙을 적으세요)\n2. \n\n## 결과물 형식\n- (예: 제목, 요약 3줄, 세부 항목 표)\n"
+        "---\nname: {yaml_name}\ndescription: 이 Skill이 무엇을 하는지, 어떤 요청일 때 써야 하는지 한두 문장으로 적으세요. 모델은 이 설명을 보고 Skill을 쓸지 정합니다.\n---\n\n# {name}\n\n## 언제 쓰나요\n- (예: 주간 업무 보고서를 써 달라고 할 때)\n\n## 지침\n1. (모델이 따라야 할 순서와 규칙을 적으세요)\n2. \n\n## 결과물 형식\n- (예: 제목, 요약 3줄, 세부 항목 표)\n"
     );
     fs::write(dir.join(SKILL_FILE), template).map_err(|e| format!("SKILL.md를 만들지 못했습니다: {}", e))?;
     info_for_user_folder(&folder)

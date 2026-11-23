@@ -1,6 +1,6 @@
 //! MCP(Model Context Protocol) 클라이언트.
 //!
-//! 사용자가 추가한 MCP 서버에 연결해, 그 서버가 알려 주는 도구를 엑사원의 도구 목록에 더한다.
+//! 사용자가 추가한 MCP 서버에 연결해, 그 서버가 알려 주는 도구를 모델의 도구 목록에 더한다.
 //! - 로컬 서버(stdio): 프로그램을 직접 실행하고 표준 입출력으로 JSON-RPC 메시지를 주고받는다.
 //! - 원격 서버(Streamable HTTP): URL로 POST하고, 응답은 JSON 또는 SSE 스트림으로 받는다.
 //!
@@ -66,7 +66,7 @@ pub struct McpServerConfig {
     /// HTTP 헤더 이름 (값은 자격 증명 관리자에)
     #[serde(default)]
     pub header_keys: Vec<String>,
-    /// 엑사원에게 주지 않을 도구
+    /// 모델에게 주지 않을 도구
     #[serde(default)]
     pub disabled_tools: Vec<String>,
     /// 승인 없이 실행할 도구
@@ -191,7 +191,7 @@ pub struct RemoteTool {
     pub input_schema: Value,
 }
 
-/// 엑사원에게 줄 MCP 도구 하나
+/// 모델에게 줄 MCP 도구 하나
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolSpec {
     /// 모델에 보이는 이름 (mcp__서버__도구)
@@ -297,7 +297,7 @@ pub fn result_text(result: &Value) -> (String, bool) {
         let mime = c.get("mimeType").and_then(|m| m.as_str()).unwrap_or("");
         match c.get("type").and_then(|t| t.as_str()).unwrap_or("") {
             "text" => parts.push(c.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string()),
-            "image" => parts.push(format!("[이미지 {} — 엑사원은 이미지 내용을 볼 수 없습니다]", mime)),
+            "image" => parts.push(format!("[이미지 {} — 모델은 이미지 내용을 볼 수 없습니다]", mime)),
             "audio" => parts.push(format!("[오디오 {}]", mime)),
             "resource" => {
                 let r = c.get("resource").unwrap_or(&Value::Null);
@@ -1364,7 +1364,7 @@ impl McpManager {
         }
     }
 
-    /// 지금 엑사원에게 줄 MCP 도구 (연결된 서버의 켜진 도구)
+    /// 지금 모델에게 줄 MCP 도구 (연결된 서버의 켜진 도구)
     pub async fn tool_specs(&self) -> Vec<ToolSpec> {
         self.refresh_dirty().await;
         let configs = self.configs.lock().map(|c| c.clone()).unwrap_or_default();
@@ -2120,8 +2120,8 @@ rl.on('line', (line) => {
             secrets.set(&header_account("h1", "Authorization"), "Bearer tok").unwrap();
             let c = Client::connect(&cfg, &secrets, None).await.unwrap();
             assert_eq!(c.tools.len(), 1);
-            let (out, _) = c.client.call_tool("search", &json!({ "q": "엑사원" })).await.unwrap();
-            assert_eq!(out, "찾음: 엑사원");
+            let (out, _) = c.client.call_tool("search", &json!({ "q": "모델" })).await.unwrap();
+            assert_eq!(out, "찾음: 모델");
         }
     }
 }

@@ -138,7 +138,7 @@ describe("hwpx", () => {
     expect(hpf).toContain('href="BinData/image1.png"');
     const html = await hwpxToHtml(bytes);
     expect(html).toMatch(/<img src="data:image\/png;base64,/);
-    // 엑사원에게는 그림 데이터 대신 파일 이름만
+    // 모델에게는 그림 데이터 대신 파일 이름만
     expect(await hwpxToMarkdown(bytes)).toContain("image1.png");
   });
 

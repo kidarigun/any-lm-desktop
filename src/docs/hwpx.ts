@@ -11,7 +11,7 @@
  *   BinData/… (그림 파일)
  *   Preview/PrvText.txt (미리보기 글)
  *
- * 읽기는 HTML(캔버스 편집기)과 Markdown(엑사원)으로, 만들기는 HTML·Markdown에서 한다.
+ * 읽기는 HTML(캔버스 편집기)과 Markdown(모델)으로, 만들기는 HTML·Markdown에서 한다.
  * 만든 문서는 한글 기본 글꼴(함초롬바탕·함초롬돋움)과 A4 용지를 쓴다.
  */
 import JSZip from "jszip";
@@ -256,7 +256,7 @@ export function headingLevelOfStyle(style: StyleInfo | undefined): number | null
 // ---------------------------------------------------------------------------
 
 export interface HwpxReadOptions {
-  /** 그림을 data URL로 넣을지(캔버스), 파일 이름만 남길지(엑사원에게 보낼 글) */
+  /** 그림을 data URL로 넣을지(캔버스), 파일 이름만 남길지(모델에게 보낼 글) */
   images?: "data" | "placeholder";
 }
 
@@ -515,7 +515,7 @@ export async function hwpxToHtml(bytes: Uint8Array, opts: HwpxReadOptions = {}):
   return html;
 }
 
-/** 엑사원에게 보낼 Markdown. 그림은 파일 이름만 남긴다. */
+/** 모델에게 보낼 Markdown. 그림은 파일 이름만 남긴다. */
 export async function hwpxToMarkdown(bytes: Uint8Array): Promise<string> {
   return compactMarkdownTables(htmlToMarkdown(await hwpxToHtml(bytes, { images: "placeholder" })));
 }

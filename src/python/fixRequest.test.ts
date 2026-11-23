@@ -16,7 +16,7 @@ const base: PythonRunOutcome = {
   suggestedPackage: null,
 };
 
-describe("엑사원에게 고쳐 달라고 하기", () => {
+describe("모델에게 고쳐 달라고 하기", () => {
   it("같은 파일을 고쳐 다시 실행하라는 요청과 오류 끝부분을 담는다", () => {
     const p = fixRequestPrompt(base);
     expect(p).toContain("`collect_samsung_2025_f.py`을 실행했더니 오류가 났어 (종료 코드 1)");

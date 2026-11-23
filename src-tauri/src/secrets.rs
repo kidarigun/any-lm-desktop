@@ -12,20 +12,20 @@ pub fn load_api_key() -> Result<Option<String>, String> {
     match entry()?.get_password() {
         Ok(k) => Ok(Some(k)),
         Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(format!("API 키를 읽지 못했습니다: {}", e)),
+        Err(e) => Err(format!("API 토큰을 읽지 못했습니다: {}", e)),
     }
 }
 
 pub fn store_api_key(key: &str) -> Result<(), String> {
     entry()?
         .set_password(key)
-        .map_err(|e| format!("API 키를 Windows 자격 증명 관리자에 저장하지 못했습니다: {}", e))
+        .map_err(|e| format!("API 토큰을 Windows 자격 증명 관리자에 저장하지 못했습니다: {}", e))
 }
 
 pub fn delete_api_key() -> Result<(), String> {
     match entry()?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(format!("API 키를 삭제하지 못했습니다: {}", e)),
+        Err(e) => Err(format!("API 토큰을 삭제하지 못했습니다: {}", e)),
     }
 }
 

@@ -640,7 +640,7 @@ export function McpDialog({ onClose }: { onClose: () => void }) {
               {draft && <span className="font-normal text-stone-500">· {draft.config.id ? "편집" : "추가"}</span>}
             </h3>
             <p className="mt-1 text-stone-500 dark:text-stone-400 leading-relaxed">
-              외부 도구 서버를 연결하면 엑사원이 그 도구를 쓸 수 있습니다. 모든 화면(채팅·프로젝트·코드)에서 쓰입니다.
+              외부 도구 서버를 연결하면 모델이 그 도구를 쓸 수 있습니다. 모든 화면(채팅·프로젝트·코드)에서 쓰입니다.
               {connected > 0 && <> 지금 <b className="text-stone-700 dark:text-stone-200">{connected}개</b> 연결됨.</>}
             </p>
           </div>

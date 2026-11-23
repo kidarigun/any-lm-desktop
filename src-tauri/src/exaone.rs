@@ -114,7 +114,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const RESPONSE_HEADER_TIMEOUT: Duration = Duration::from_secs(180);
 /// 스트리밍 도중 아무 데이터도 오지 않을 때 허용하는 최대 시간.
 /// (전체 응답 시간에는 제한을 두지 않는다. 긴 추론도 끊기지 않게 하기 위함.)
-// K-EXAONE은 도구 호출 인자(파일에 쓸 본문 등)를 다 만든 뒤 한꺼번에 보내서, 긴 문서를 쓰는 동안
+// 모델은 도구 호출 인자(파일에 쓸 본문 등)를 다 만든 뒤 한꺼번에 보내서, 긴 문서를 쓰는 동안
 // 몇 분씩 아무것도 오지 않는다 (실측: 본문 2,000자에 42초). 120초로 두면 긴 보고서 저장이 매번 끊긴다.
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(900);
 /// 조용한 동안 화면의 진행 안내를 고치는 간격
@@ -130,7 +130,7 @@ fn quiet_message(quiet: Duration, tool: Option<&str>) -> String {
         Some("write_file") => format!("파일에 쓸 내용을 작성하는 중입니다... ({}째, 다 쓰면 한꺼번에 도착합니다)", elapsed),
         Some("modify_file") => format!("고칠 내용을 작성하는 중입니다... ({}째)", elapsed),
         Some(_) => format!("도구에 넘길 내용을 작성하는 중입니다... ({}째)", elapsed),
-        None => format!("엑사원의 응답을 기다리는 중입니다... ({}째)", elapsed),
+        None => format!("모델의 응답을 기다리는 중입니다... ({}째)", elapsed),
     }
 }
 const CANCEL_POLL: Duration = Duration::from_millis(200);
@@ -1260,7 +1260,7 @@ fn compaction_source_transcript(
                 turn_lines.push(format!("### 턴 {} [사용자]\n{}", idx + 1, shorten_middle(m.content.trim(), 1_400)));
             }
             "assistant" => {
-                let mut block = format!("### 턴 {} [엑사원]\n", idx + 1);
+                let mut block = format!("### 턴 {} [어시스턴트]\n", idx + 1);
                 if !m.tool_records.is_empty() {
                     let tools: Vec<String> = m
                         .tool_records
@@ -3019,7 +3019,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // 모의 EXAONE 서버를 이용한 에이전트 루프 통합 테스트
+    // 모의 서버를 이용한 에이전트 루프 통합 테스트
     // -----------------------------------------------------------------------
 
     use std::sync::Mutex as StdMutex;

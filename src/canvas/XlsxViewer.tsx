@@ -59,7 +59,7 @@ export function XlsxViewer({ bytes, onError }: { bytes: Uint8Array; onError: (ms
                 </th>
                 {Array.from({ length: cols }, (_, c) => {
                   const cell = sheet.rows[r]?.[c];
-                  // 계산 결과가 저장되지 않은 수식(엑사원이 만든 파일 등)은 Excel에서 열 때 계산된다.
+                  // 계산 결과가 저장되지 않은 수식(모델이 만든 파일 등)은 Excel에서 열 때 계산된다.
                   const uncomputed = !!cell?.formula && cell.display === `=${cell.formula}`;
                   return (
                     <td

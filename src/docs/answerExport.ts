@@ -51,7 +51,7 @@ function firstMeaningfulLine(text: string): string {
 
 /**
  * 저장 창에 미리 넣을 파일 이름(확장자 제외).
- * 답변의 첫 제목 → 사용자 질문 첫 줄 → "엑사원 답변 날짜" 순으로 고른다.
+ * 답변의 첫 제목 → 사용자 질문 첫 줄 → "답변 날짜" 순으로 고른다.
  */
 export function suggestAnswerFileName(answer: string, question?: string, now = new Date()): string {
   const heading = answer.match(/^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/m)?.[1];
@@ -60,7 +60,7 @@ export function suggestAnswerFileName(answer: string, question?: string, now = n
     if (name) return name;
   }
   const pad = (n: number) => String(n).padStart(2, "0");
-  return `엑사원 답변 ${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  return `답변 ${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 }
 
 /** 답변 본문을 파일 내용으로 바꾼다. Markdown은 UTF-8 텍스트, Word·한글은 문서 바이트. */
