@@ -2,6 +2,8 @@ import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import {
   clampWorkPanelWidth,
   handleWorkPanelShortcut,
+  isModalOpen,
+  maxWorkPanelWidth,
   loadWorkPanelOpen,
   loadWorkPanelWidth,
   saveWorkPanelOpen,
@@ -18,14 +20,18 @@ export interface WorkPanelOptions {
   /** 문서 캔버스가 열려 있는지 (좁은 창에서 둘 중 나중에 연 것만 보인다) */
   canvasOpen: boolean;
   windowWidth: number;
+  /** 왼쪽 사이드바를 접었는지 (패널·캔버스가 쓸 수 있는 폭이 달라진다) */
+  sidebarCollapsed: boolean;
 }
 
 export interface WorkPanelController {
   open: boolean;
   setOpen: (open: boolean) => void;
   toggle: () => void;
-  /** 화면에 쓰는 폭 (창 크기에 맞춰 줄인 값) */
+  /** 화면에 쓰는 폭 (창 크기·사이드바·캔버스에 맞춰 줄인 값, 저장된 폭은 그대로) */
   width: number;
+  /** 지금 끌어서 넓힐 수 있는 최대 폭 */
+  maxWidth: number;
   changeWidth: (width: number) => void;
   tabs: TabsState;
   newTerminal: () => Promise<void>;
@@ -45,7 +51,7 @@ const DEFAULT_ROWS = 30;
  * 작업 패널 상태: 열림·폭(기억), 터미널 탭, Ctrl+` 단축키, 셸 종료 알림.
  * 탭 상태는 App에 두므로 패널을 닫아도 세션과 탭은 그대로 남는다.
  */
-export function useWorkPanel({ cwd, canvasOpen, windowWidth }: WorkPanelOptions): WorkPanelController {
+export function useWorkPanel({ cwd, canvasOpen, windowWidth, sidebarCollapsed }: WorkPanelOptions): WorkPanelController {
   const [open, setOpenState] = useState<boolean>(() => loadWorkPanelOpen());
   const [width, setWidth] = useState<number>(() => loadWorkPanelWidth());
   const [tabs, dispatch] = useReducer(tabsReducer, EMPTY_TABS);
@@ -144,7 +150,7 @@ export function useWorkPanel({ cwd, canvasOpen, windowWidth }: WorkPanelOptions)
   // Ctrl+` : 채팅 입력란·터미널 안에서도 먼저 받는다(capture).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      handleWorkPanelShortcut(e, () => toggleRef.current());
+      handleWorkPanelShortcut(e, () => toggleRef.current(), () => isModalOpen());
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
@@ -186,18 +192,24 @@ export function useWorkPanel({ cwd, canvasOpen, windowWidth }: WorkPanelOptions)
     }
   }, []);
 
+  const visible = visibleSidePanels({ canvasOpen, panelOpen: open, lastOpened, windowWidth, sidebarCollapsed });
+  // 창 크기·사이드바·캔버스가 바뀔 때마다 다시 맞춘다(저장된 폭은 그대로 두고 화면에 쓰는 폭만).
+  const room = { sidebarCollapsed, canvasShown: visible.canvas };
+  const roomRef = useRef(room);
+  roomRef.current = room;
+
   const changeWidth = useCallback((w: number) => {
-    const c = clampWorkPanelWidth(w, window.innerWidth);
+    const c = clampWorkPanelWidth(w, window.innerWidth, roomRef.current);
     setWidth(c);
     saveWorkPanelWidth(c);
   }, []);
 
-  const visible = visibleSidePanels({ canvasOpen, panelOpen: open, lastOpened, windowWidth });
   return {
     open,
     setOpen,
     toggle,
-    width: clampWorkPanelWidth(width, windowWidth),
+    width: clampWorkPanelWidth(width, windowWidth, room),
+    maxWidth: maxWorkPanelWidth(windowWidth, room),
     changeWidth,
     tabs,
     newTerminal,

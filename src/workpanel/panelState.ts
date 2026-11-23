@@ -1,4 +1,5 @@
 /** 오른쪽 작업 패널: 폭·열림 상태 기억, 캔버스와 함께 보기, 단축키 규칙 (결정 0008) */
+import { CANVAS_MIN_WIDTH, CHAT_MIN_WIDTH, availableWidth } from "../ui/panelWidth";
 
 export const WORK_PANEL_MIN_WIDTH = 320;
 /** 창 너비 대비 최대 폭 */
@@ -20,12 +21,39 @@ function defaultStore(): KeyValueStore | null {
   }
 }
 
-export function maxWorkPanelWidth(windowWidth: number): number {
-  return Math.max(WORK_PANEL_MIN_WIDTH, Math.floor((windowWidth * Math.round(WORK_PANEL_MAX_RATIO * 100)) / 100));
+/** 패널 폭을 정할 때 함께 따지는 화면 상태 */
+export interface PanelRoom {
+  sidebarCollapsed?: boolean;
+  /** 문서 캔버스도 함께 보이는지 (그러면 캔버스 최소 폭도 남긴다) */
+  canvasShown?: boolean;
 }
 
-export function clampWorkPanelWidth(width: number, windowWidth: number): number {
-  return Math.round(Math.min(Math.max(width, WORK_PANEL_MIN_WIDTH), maxWorkPanelWidth(windowWidth)));
+/**
+ * 작업 패널 최대 폭: 창의 70%이면서 채팅창 최소 폭(400px)과, 캔버스가 함께 보이면 캔버스 최소 폭(360px)을 남긴다.
+ * 그래도 320px이 안 되는 아주 좁은 창에서는 320px을 지키고 채팅창이 좁아지는 것을 받아들인다.
+ */
+export function maxWorkPanelWidth(windowWidth: number, room: PanelRoom = {}): number {
+  const ratio = Math.floor((windowWidth * Math.round(WORK_PANEL_MAX_RATIO * 100)) / 100);
+  const left =
+    availableWidth(windowWidth, !!room.sidebarCollapsed) - CHAT_MIN_WIDTH - (room.canvasShown ? CANVAS_MIN_WIDTH : 0);
+  return Math.max(WORK_PANEL_MIN_WIDTH, Math.min(ratio, left));
+}
+
+export function clampWorkPanelWidth(width: number, windowWidth: number, room: PanelRoom = {}): number {
+  return Math.round(Math.min(Math.max(width, WORK_PANEL_MIN_WIDTH), maxWorkPanelWidth(windowWidth, room)));
+}
+
+/** 작업 패널이 보일 때 캔버스와 채팅창이 나눠 쓰는 폭 */
+export function canvasRoom(windowWidth: number, sidebarCollapsed: boolean, panelShownWidth: number): number {
+  return Math.max(0, availableWidth(windowWidth, sidebarCollapsed) - panelShownWidth);
+}
+
+/** 캔버스와 작업 패널을 함께 보여도 되는 창인지: 1100px 이상이고, 채팅창·캔버스·패널 최소 폭이 다 들어갈 때 */
+export function canShowBothPanels(windowWidth: number, sidebarCollapsed = false): boolean {
+  return (
+    windowWidth >= NARROW_WINDOW_WIDTH &&
+    availableWidth(windowWidth, sidebarCollapsed) >= CHAT_MIN_WIDTH + CANVAS_MIN_WIDTH + WORK_PANEL_MIN_WIDTH
+  );
 }
 
 export function loadWorkPanelWidth(store: KeyValueStore | null = defaultStore()): number {
@@ -64,14 +92,15 @@ export function saveWorkPanelOpen(open: boolean, store: KeyValueStore | null = d
 
 export type SidePanel = "canvas" | "workpanel";
 
-/** 문서 캔버스와 작업 패널 가운데 화면에 보일 것. 좁은 창에서는 나중에 연 것만. */
+/** 문서 캔버스와 작업 패널 가운데 화면에 보일 것. 둘 다 들어가지 않는 창에서는 나중에 연 것만. */
 export function visibleSidePanels(p: {
   canvasOpen: boolean;
   panelOpen: boolean;
   lastOpened: SidePanel;
   windowWidth: number;
+  sidebarCollapsed?: boolean;
 }): { canvas: boolean; panel: boolean } {
-  if (p.canvasOpen && p.panelOpen && p.windowWidth < NARROW_WINDOW_WIDTH) {
+  if (p.canvasOpen && p.panelOpen && !canShowBothPanels(p.windowWidth, !!p.sidebarCollapsed)) {
     return { canvas: p.lastOpened === "canvas", panel: p.lastOpened === "workpanel" };
   }
   return { canvas: p.canvasOpen, panel: p.panelOpen };
@@ -90,10 +119,12 @@ export function isWorkPanelShortcut(e: KeyLike): boolean {
  * 처리했으면 true.
  */
 export function handleWorkPanelShortcut(
-  e: KeyLike & Pick<KeyboardEvent, "repeat" | "preventDefault" | "stopPropagation">,
-  toggle: () => void
+  e: KeyLike & Pick<KeyboardEvent, "repeat" | "preventDefault" | "stopPropagation" | "isComposing">,
+  toggle: () => void,
+  modalOpen: () => boolean = () => false
 ): boolean {
-  if (!isWorkPanelShortcut(e)) return false;
+  // 한글 조합 중이거나 대화상자가 떠 있으면 건드리지 않는다.
+  if (e.isComposing || e.key === "Process" || !isWorkPanelShortcut(e) || modalOpen()) return false;
   e.preventDefault();
   e.stopPropagation();
   if (!e.repeat) toggle();
@@ -115,4 +146,17 @@ export function terminalKeyAction(e: KeyLike, hasSelection: boolean): "copy" | "
     if (k === "v") return "paste";
   }
   return "terminal";
+}
+
+/** 대화상자(모달)를 나타내는 요소 */
+export const MODAL_SELECTOR = '[aria-modal="true"], [role="dialog"]';
+
+/** 화면에 대화상자가 떠 있는지 */
+export function isModalOpen(doc: Pick<Document, "querySelector"> = document): boolean {
+  return !!doc.querySelector(MODAL_SELECTOR);
+}
+
+/** 터미널이 포커스를 가져가도 되는지: 지금 포커스가 대화상자 안이면 안 된다. */
+export function canTakeFocus(active: Element | null): boolean {
+  return !active?.closest?.(MODAL_SELECTOR);
 }

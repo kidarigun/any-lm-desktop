@@ -214,20 +214,26 @@ pub type EventSink = Arc<dyn Fn(TerminalEvent) + Send + Sync>;
 pub struct RingBuffer {
     data: VecDeque<u8>,
     cap: usize,
+    /// 오래된 바이트를 버린 적이 있는지 (앞부분이 줄·제어 순서 중간에서 시작할 수 있다)
+    wrapped: bool,
 }
 
 impl RingBuffer {
     pub fn new(cap: usize) -> Self {
-        Self { data: VecDeque::with_capacity(cap.min(64 * 1024)), cap }
+        Self { data: VecDeque::with_capacity(cap.min(64 * 1024)), cap, wrapped: false }
     }
 
     pub fn push(&mut self, bytes: &[u8]) {
         if bytes.len() >= self.cap {
+            self.wrapped = self.wrapped || bytes.len() > self.cap || !self.data.is_empty();
             self.data.clear();
             self.data.extend(&bytes[bytes.len() - self.cap..]);
             return;
         }
         let overflow = (self.data.len() + bytes.len()).saturating_sub(self.cap);
+        if overflow > 0 {
+            self.wrapped = true;
+        }
         self.data.drain(..overflow);
         self.data.extend(bytes);
     }
@@ -240,13 +246,21 @@ impl RingBuffer {
         self.data.is_empty()
     }
 
-    /// 버퍼 내용을 글자로. 앞쪽이 잘려 글자 중간에서 시작하면 그 조각은 버린다.
+    /// 버퍼 내용을 글자로. 앞쪽을 버린 적이 있으면 제어 순서·글자 중간에서 시작하지 않도록
+    /// 첫 줄바꿈 다음부터 쓴다(줄바꿈이 없으면 잘린 글자 조각만 버린다).
     pub fn text(&self) -> String {
         let (a, b) = self.data.as_slices();
         let mut bytes = Vec::with_capacity(self.data.len());
         bytes.extend_from_slice(a);
         bytes.extend_from_slice(b);
-        let start = bytes.iter().take(3).take_while(|b| (**b & 0xC0) == 0x80).count();
+        let start = if self.wrapped {
+            match bytes.iter().position(|b| *b == b'\n') {
+                Some(nl) => nl + 1,
+                None => bytes.iter().take(3).take_while(|b| (**b & 0xC0) == 0x80).count(),
+            }
+        } else {
+            0
+        };
         String::from_utf8_lossy(&bytes[start..]).into_owned()
     }
 }
@@ -406,9 +420,9 @@ pub fn resolve_cwd(cwd: &str, home: Option<&Path>) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// 동시 세션 한도 확인
-pub fn check_capacity(open: usize) -> Result<(), String> {
-    if open >= TERMINAL_MAX_SESSIONS {
+/// 동시 세션 한도 확인. `running`은 아직 돌고 있는 세션 수(끝나서 탭만 남은 세션은 세지 않는다).
+pub fn check_capacity(running: usize) -> Result<(), String> {
+    if running >= TERMINAL_MAX_SESSIONS {
         return Err(format!(
             "터미널은 최대 {}개까지 열 수 있습니다. 쓰지 않는 터미널 탭을 닫은 뒤 다시 시도하세요.",
             TERMINAL_MAX_SESSIONS
@@ -558,7 +572,8 @@ struct OutputLog {
 struct Session {
     order: u64,
     info: Mutex<TerminalInfo>,
-    writer: Mutex<Option<Box<dyn Write + Send>>>,
+    /// 입력은 세션마다 둔 쓰기 스레드로 보낸다(큰 붙여넣기가 막혀도 화면 스레드는 멈추지 않고, 순서는 그대로).
+    input: Mutex<Option<mpsc::Sender<Vec<u8>>>>,
     master: Mutex<Option<Box<dyn portable_pty::MasterPty + Send>>>,
     killer: Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>,
     output: Mutex<OutputLog>,
@@ -567,9 +582,23 @@ struct Session {
 
 impl Session {
     fn write(&self, data: &[u8]) -> Result<(), String> {
-        let mut w = self.writer.lock().map_err(|e| e.to_string())?;
-        let w = w.as_mut().ok_or_else(|| "터미널이 종료되었습니다.".to_string())?;
-        w.write_all(data).and_then(|_| w.flush()).map_err(|e| format!("터미널에 입력을 보낼 수 없습니다: {e}"))
+        let input = self.input.lock().map_err(|e| e.to_string())?;
+        let tx = input.as_ref().ok_or_else(|| "터미널이 종료되었습니다.".to_string())?;
+        tx.send(data.to_vec()).map_err(|_| "터미널이 종료되었습니다.".to_string())
+    }
+
+    fn running(&self) -> bool {
+        self.info.lock().map(|i| i.running).unwrap_or(false)
+    }
+
+    /// 입력 스레드를 끝내고 PTY를 닫는다(남은 출력이 다 나오고 읽기 스레드가 끝난다).
+    fn close_io(&self) {
+        if let Ok(mut i) = self.input.lock() {
+            i.take();
+        }
+        if let Ok(mut m) = self.master.lock() {
+            m.take();
+        }
     }
 
     /// 프로세스 트리 전체를 끝낸다.
@@ -619,7 +648,7 @@ impl TerminalManager {
         path_dirs: &[PathBuf],
         extra_env: &[(String, String)],
     ) -> Result<TerminalInfo, String> {
-        check_capacity(self.sessions.lock().map_err(|e| e.to_string())?.len())?;
+        self.ensure_capacity()?;
         let (cols, rows) = clamp_size(req.cols, req.rows);
         let pty = portable_pty::native_pty_system();
         let pair = pty
@@ -657,8 +686,25 @@ impl TerminalManager {
             }
         }
 
-        let reader = pair.master.try_clone_reader().map_err(|e| format!("터미널 출력을 읽을 수 없습니다: {e}"))?;
-        let writer = pair.master.take_writer().map_err(|e| format!("터미널 입력을 열 수 없습니다: {e}"))?;
+        // 여기서 실패하면 방금 띄운 셸(과 Job)을 끝내고 돌려준다.
+        let mut fail = |msg: String| {
+            if let Some(pid) = child.process_id() {
+                taskkill_tree(pid);
+            }
+            if let Some(j) = &job {
+                j.terminate();
+            }
+            let _ = child.kill();
+            msg
+        };
+        let reader = match pair.master.try_clone_reader() {
+            Ok(r) => r,
+            Err(e) => return Err(fail(format!("터미널 출력을 읽을 수 없습니다: {e}"))),
+        };
+        let writer = match pair.master.take_writer() {
+            Ok(w) => w,
+            Err(e) => return Err(fail(format!("터미널 입력을 열 수 없습니다: {e}"))),
+        };
         let killer = child.clone_killer();
         let id = uuid::Uuid::new_v4().to_string();
         let title = req
@@ -680,20 +726,28 @@ impl TerminalManager {
             running: true,
             exit_code: None,
         };
+        let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>();
         let session = Arc::new(Session {
             order: self.counter.fetch_add(1, Ordering::SeqCst),
             info: Mutex::new(info.clone()),
-            writer: Mutex::new(Some(writer)),
+            input: Mutex::new(Some(input_tx)),
             master: Mutex::new(Some(pair.master)),
             killer: Mutex::new(killer),
             output: Mutex::new(OutputLog { ring: RingBuffer::new(TERMINAL_BUFFER_BYTES), seq: 0 }),
             job,
         });
-        self.sessions.lock().map_err(|e| e.to_string())?.insert(id.clone(), session.clone());
+        // 스레드를 하나라도 못 띄우면 세션을 지도에 넣지 않고 프로세스 트리를 끝낸다.
+        let abort = |e: std::io::Error| {
+            session.kill_tree();
+            session.close_io();
+            format!("터미널을 시작할 수 없습니다: {e}")
+        };
 
+        // 0) 쓰기: 입력을 순서대로 PTY에
+        spawn_writer(writer, input_rx).map_err(abort)?;
         // 1) 읽기: 바이트 → UTF-8 글자
         let (tx, rx) = mpsc::channel::<String>();
-        spawn_reader(reader, tx);
+        spawn_reader(reader, tx).map_err(abort)?;
         // 2) 모아 보내기: 16ms마다 링 버퍼에 넣고 이벤트로
         let batcher = {
             let session = session.clone();
@@ -702,7 +756,7 @@ impl TerminalManager {
             std::thread::Builder::new()
                 .name("terminal-batch".into())
                 .spawn(move || run_batcher(&id, &session, &sink, rx))
-                .map_err(|e| e.to_string())?
+                .map_err(abort)?
         };
         // 3) 종료 기다리기: 셸이 끝나면 PTY를 닫아 남은 출력을 다 보낸 뒤 종료 이벤트
         {
@@ -718,18 +772,30 @@ impl TerminalManager {
                         i.exit_code = code;
                     }
                     // ConPTY는 자식이 끝나도 PTY를 닫기 전까지 출력 파이프가 열려 있다.
-                    if let Ok(mut w) = session.writer.lock() {
-                        w.take();
-                    }
-                    if let Ok(mut m) = session.master.lock() {
-                        m.take();
-                    }
+                    session.close_io();
                     let _ = batcher.join();
                     sink(TerminalEvent::Exit(ExitPayload { id, code }));
                 })
-                .map_err(|e| e.to_string())?;
+                .map_err(abort)?;
         }
+
+        // 다 띄운 뒤에 지도에 넣는다(그 사이 다른 세션이 열려 한도를 넘었으면 이것을 거절).
+        let mut sessions = self.sessions.lock().map_err(|e| e.to_string())?;
+        let running = sessions.values().filter(|s| s.running()).count();
+        if let Err(e) = check_capacity(running) {
+            drop(sessions);
+            session.kill_tree();
+            session.close_io();
+            return Err(e);
+        }
+        sessions.insert(id, session);
         Ok(info)
+    }
+
+    /// 아직 돌고 있는 세션만 한도에 센다.
+    fn ensure_capacity(&self) -> Result<(), String> {
+        let running = self.sessions.lock().map_err(|e| e.to_string())?.values().filter(|s| s.running()).count();
+        check_capacity(running)
     }
 
     pub fn write(&self, id: &str, data: &str) -> Result<(), String> {
@@ -816,8 +882,20 @@ impl TerminalManager {
     }
 }
 
-fn spawn_reader(mut reader: Box<dyn Read + Send>, tx: mpsc::Sender<String>) {
-    let _ = std::thread::Builder::new().name("terminal-read".into()).spawn(move || {
+fn spawn_writer(mut writer: Box<dyn Write + Send>, rx: mpsc::Receiver<Vec<u8>>) -> std::io::Result<()> {
+    std::thread::Builder::new().name("terminal-write".into()).spawn(move || {
+        // 보낸 쪽이 모두 닫히면(세션 종료) 끝나고, 그때 쓰기 핸들도 닫힌다.
+        while let Ok(data) = rx.recv() {
+            if writer.write_all(&data).and_then(|_| writer.flush()).is_err() {
+                break;
+            }
+        }
+    })?;
+    Ok(())
+}
+
+fn spawn_reader(mut reader: Box<dyn Read + Send>, tx: mpsc::Sender<String>) -> std::io::Result<()> {
+    std::thread::Builder::new().name("terminal-read".into()).spawn(move || {
         let mut decoder = Utf8Decoder::default();
         let mut buf = vec![0u8; 16 * 1024];
         loop {
@@ -835,7 +913,8 @@ fn spawn_reader(mut reader: Box<dyn Read + Send>, tx: mpsc::Sender<String>) {
         if !rest.is_empty() {
             let _ = tx.send(rest);
         }
-    });
+    })?;
+    Ok(())
 }
 
 fn run_batcher(id: &str, session: &Session, sink: &EventSink, rx: mpsc::Receiver<String>) {
@@ -914,6 +993,7 @@ pub async fn terminal_open<R: tauri::Runtime>(
     Ok(OpenedTerminal { id: info.id.clone(), info })
 }
 
+/// 동기 명령(화면 스레드)으로 두어 키 입력 순서를 지킨다. 실제 쓰기는 세션의 쓰기 스레드가 하므로 막히지 않는다.
 #[tauri::command]
 pub fn terminal_write(manager: tauri::State<'_, TerminalManager>, id: String, data: String) -> Result<(), String> {
     manager.write(&id, &data)
@@ -935,13 +1015,14 @@ pub fn terminal_list(manager: tauri::State<'_, TerminalManager>) -> Vec<Terminal
     manager.list()
 }
 
+/// 최대 256KB를 글자로 만들어 보내므로 화면 스레드 밖(async)에서
 #[tauri::command]
-pub fn terminal_snapshot(manager: tauri::State<'_, TerminalManager>, id: String) -> Result<TerminalSnapshot, String> {
+pub async fn terminal_snapshot(manager: tauri::State<'_, TerminalManager>, id: String) -> Result<TerminalSnapshot, String> {
     manager.snapshot(&id)
 }
 
 #[tauri::command]
-pub fn terminal_busy(manager: tauri::State<'_, TerminalManager>, id: String) -> Result<bool, String> {
+pub async fn terminal_busy(manager: tauri::State<'_, TerminalManager>, id: String) -> Result<bool, String> {
     manager.busy(&id)
 }
 

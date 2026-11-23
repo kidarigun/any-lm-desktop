@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { PanelRightClose, Plus, RotateCcw, SquareTerminal, X } from "lucide-react";
 import { PanelResizer } from "../ui/PanelResizer";
-import { WORK_PANEL_DEFAULT_WIDTH, WORK_PANEL_MIN_WIDTH, maxWorkPanelWidth } from "./panelState";
+import { WORK_PANEL_DEFAULT_WIDTH, WORK_PANEL_MIN_WIDTH } from "./panelState";
 import { TerminalView } from "./TerminalView";
 import { TerminalAPI, type ShellOption } from "./terminalApi";
 import type { WorkPanelController } from "./useWorkPanel";
@@ -45,7 +45,7 @@ export function WorkPanel({ panel, isDark, windowWidth, shell, onShellChange, on
         target={ref}
         width={panel.width}
         min={WORK_PANEL_MIN_WIDTH}
-        max={maxWorkPanelWidth(windowWidth)}
+        max={panel.maxWidth}
         onChange={panel.changeWidth}
         onReset={() => panel.changeWidth(WORK_PANEL_DEFAULT_WIDTH)}
         label="작업 패널 폭 조절"

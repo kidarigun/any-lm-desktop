@@ -4,7 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { TerminalAPI, type TerminalOutput } from "./terminalApi";
-import { terminalKeyAction } from "./panelState";
+import { canTakeFocus, terminalKeyAction } from "./panelState";
 import { terminalTheme } from "./xtermTheme";
 
 export const TERMINAL_SCROLLBACK = 5000;
@@ -136,7 +136,8 @@ export function TerminalView({ sessionId, active, isDark, onLink }: TerminalView
       }
       queued.length = 0;
       fitNow();
-      if (activeRef.current) term.focus();
+      // 대화상자에서 입력 중이면 포커스를 빼앗지 않는다.
+      if (activeRef.current && canTakeFocus(document.activeElement)) term.focus();
     })();
 
     return () => {
@@ -162,7 +163,7 @@ export function TerminalView({ sessionId, active, isDark, onLink }: TerminalView
     // 숨겨져 있던 탭은 보이고 나서 크기를 맞춘다.
     const id = requestAnimationFrame(() => {
       fitRef.current?.();
-      termRef.current?.focus();
+      if (canTakeFocus(document.activeElement)) termRef.current?.focus();
     });
     return () => cancelAnimationFrame(id);
   }, [active]);

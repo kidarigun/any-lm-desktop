@@ -28,6 +28,27 @@ fn ring_buffer_replay_drops_a_character_cut_by_the_wrap() {
 }
 
 #[test]
+fn ring_buffer_replay_after_wrap_starts_at_the_next_line() {
+    // 잘린 자리가 색상 순서(ESC[38;5;196m) 한가운데: 첫 줄바꿈 다음부터 보여 준다.
+    let mut r = RingBuffer::new(12);
+    r.push(b"\x1b[38;5;196mred\nok\n");
+    assert_eq!(r.text(), "ok\n");
+    // 버린 적이 없으면 처음부터 그대로
+    let mut r = RingBuffer::new(64);
+    r.push(b"\x1b[31mred\x1b[0m\nok\n");
+    assert_eq!(r.text(), "\x1b[31mred\x1b[0m\nok\n");
+    // 나눠 넣다가 넘쳐도 같다.
+    let mut r = RingBuffer::new(8);
+    r.push(b"\x1b[1mab");
+    r.push(b"c\nde");
+    assert_eq!(r.text(), "de");
+    // 정확히 가득 채운 것은 버린 것이 아니다.
+    let mut r = RingBuffer::new(4);
+    r.push(b"a\nbc");
+    assert_eq!(r.text(), "a\nbc");
+}
+
+#[test]
 fn ring_buffer_default_capacity_is_256_kib() {
     assert_eq!(TERMINAL_BUFFER_BYTES, 256 * 1024);
     let mut r = RingBuffer::new(TERMINAL_BUFFER_BYTES);
@@ -343,6 +364,11 @@ fn interactive_shell_takes_input_and_resizes() {
     assert!(m.running(&info.id));
     // 셸만 있으면 바쁘지 않다(닫을 때 묻지 않는다).
     assert!(!m.busy(&info.id).unwrap());
+    // 큰 붙여넣기도 쓰기 스레드로 넘기므로 바로 돌아온다(키 입력 순서는 채널이 지킨다).
+    let started = Instant::now();
+    m.write(&info.id, &"rem ".repeat(64 * 1024)).unwrap();
+    m.write(&info.id, "\r").unwrap();
+    assert!(started.elapsed() < Duration::from_millis(500), "write blocked for {:?}", started.elapsed());
     m.write(&info.id, "exit 5\r").unwrap();
     assert!(wait_until(Duration::from_secs(20), || ev.exit(&info.id).is_some()));
     assert_eq!(ev.exit(&info.id), Some(Some(5)));
@@ -361,6 +387,13 @@ fn ninth_real_session_is_refused_and_closing_frees_a_slot() {
     assert!(err.contains("최대 8개"), "{err}");
     m.close(&ids[0]).unwrap();
     let again = m.open(&req, &dir, Shell::Cmd, &[], &[]).expect("slot freed");
+    // 끝났지만 탭이 남은 세션은 세지 않는다.
+    assert!(m.open(&req, &dir, Shell::Cmd, &[], &[]).is_err());
+    m.write(&ids[1], "exit 0\r").unwrap();
+    assert!(wait_until(Duration::from_secs(20), || !m.running(&ids[1])), "shell did not exit");
+    let after_exit = m.open(&req, &dir, Shell::Cmd, &[], &[]).expect("exited tab does not count");
+    assert_eq!(m.list().len(), TERMINAL_MAX_SESSIONS + 1);
+    assert!(m.snapshot(&after_exit.id).is_ok());
     m.close_all();
     assert!(m.list().is_empty());
     assert!(m.snapshot(&again.id).is_err());

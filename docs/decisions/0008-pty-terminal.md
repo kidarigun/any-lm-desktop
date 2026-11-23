@@ -13,10 +13,10 @@
 - 작업 폴더: 프로젝트·코드 화면은 프로젝트 폴더, 일반 채팅은 사용자 홈(빈 값을 보내면 백엔드가 홈으로). 전체 경로이고 존재하는 폴더여야 연다(`resolve_cwd`).
 - 명령: `terminal_open { request: { cwd, cols, rows, kind: "shell" | "server", command?, title? } } -> { id, info }`, `terminal_write`, `terminal_resize`, `terminal_close`, `terminal_list`, `terminal_snapshot`, 그리고 `terminal_busy`(아래), `terminal_shells`. `command`가 있으면 `powershell -NoLogo -Command <명령>`(cmd는 `/c`)로 그 명령 하나를 실행하고 끝나면 세션도 끝난다 — T2 서버 세션용. 명령은 Rust 쪽에서 앱 명령으로 등록한다(capabilities 파일은 core 이벤트 권한만 두고 앱 명령은 Rust에서 검사하는 기존 방식).
 - 이벤트: `anylm-terminal-output { id, data, seq }`(16ms 모아 보냄, 한 번에 64KB 넘으면 바로), `anylm-terminal-exit { id, code }`. 출력 바이트는 `Utf8Decoder`가 덩어리 경계에서 잘린 글자를 다음 덩어리와 합쳐 글자로 만든다(잘못된 바이트는 U+FFFD).
-- 링 버퍼: 세션마다 `TERMINAL_BUFFER_BYTES = 256 * 1024`(보낸 글자의 UTF-8 바이트, ANSI 포함). 앞이 잘려 글자 중간에서 시작하면 그 조각은 버린다. 도구용 글자는 `plain_text`(ANSI 제거 + 진행 표시처럼 `\r`로 덮어쓴 줄은 마지막 것만)로 만든다 — T3 `server_logs`가 `TerminalManager::text`로 쓴다.
+- 링 버퍼: 세션마다 `TERMINAL_BUFFER_BYTES = 256 * 1024`(보낸 글자의 UTF-8 바이트, ANSI 포함). 앞이 잘린 적이 있으면(넘쳐서 버렸으면) 다시 그릴 때 첫 줄바꿈(`\n`) 다음부터 쓴다 — 잘린 자리가 색 코드 같은 이스케이프 중간일 수 있어서다(수정 1차). 잘린 적이 없으면 처음부터 쓴다. 도구용 글자는 `plain_text`(ANSI 제거 + 진행 표시처럼 `\r`로 덮어쓴 줄은 마지막 것만)로 만든다 — T3 `server_logs`가 `TerminalManager::text`로 쓴다.
 - **스냅샷과 이벤트 번호(브리프와 다른 점)**: 브리프는 `terminal_snapshot { id } -> String`이었으나 `{ data, seq, running, exitCode }`를 돌려준다. 링 버퍼에 넣기와 이벤트 보내기를 한 잠금 안에서 하고 이벤트마다 `seq`를 1씩 올리므로, 화면은 스냅샷을 쓴 뒤 `seq`가 더 큰 이벤트만 이어 쓴다. 이벤트와 명령 응답은 도착 순서가 보장되지 않아 문자열만으로는 겹치거나 빠지는 출력이 생긴다. `running`·`exitCode`는 패널을 닫은 사이 끝난 셸을 다시 열 때 쓴다.
 - 시작 DSR: ConPTY는 시작할 때 커서 위치를 묻고(`ESC[6n`) 답이 올 때까지 최대 3초 화면을 그리지 않는다. 화면(xterm)이 아직 없을 수 있으므로(T3: 패널을 닫은 채 서버 실행) 백엔드가 처음 1KB 안의 첫 질의에 `ESC[1;1R`로 답하고 그 질의는 화면으로 보내지 않는다. 그 뒤 질의는 xterm이 답한다. 스냅샷을 다시 그리는 동안 xterm이 옛 출력 속 질의에 답한 것은 셸로 보내지 않는다.
-- 한도: `TERMINAL_MAX_SESSIONS = 8`(끝났지만 탭이 남은 세션도 센다). 넘으면 "터미널은 최대 8개까지 열 수 있습니다. 쓰지 않는 터미널 탭을 닫은 뒤 다시 시도하세요."
+- 한도: `TERMINAL_MAX_SESSIONS = 8`, **돌고 있는 세션만** 센다(끝났지만 탭이 남은 세션은 세지 않는다, 수정 1차). 맵에 넣기 직전 잠금 안에서 한 번 더 센다. 넘으면 "터미널은 최대 8개까지 열 수 있습니다. 쓰지 않는 터미널 탭을 닫은 뒤 다시 시도하세요."
 
 ## 프로세스 트리 종료
 - **Job Object + taskkill 둘 다**. 셸을 띄운 직후 `KILL_ON_JOB_CLOSE` Job Object에 넣는다(그 뒤 셸이 만드는 자식은 모두 Job에 들어간다). 닫을 때(`terminal_close`, 앱 종료 `RunEvent::Exit`의 `close_all`)는
@@ -29,10 +29,12 @@
 - 테스트(`terminal_tests.rs`, 실제 ConPTY, `cargo test --lib`에서 돈다): 셸에서 `ping -n 60`을 띄워 셸의 자손·Job에 있는지 확인 → 닫기 → `tasklist /FI "PID eq n"`로 ping·셸이 없어졌는지; `cmd /c start /b ping …`(고아)도 같은 방식. 닫기를 막아 보면 두 테스트가 실패하는 것도 확인했다.
 
 ## 화면
-- 상단 바 오른쪽 끝 터미널 아이콘(툴팁 "터미널 (Ctrl+`)")과 `Ctrl+`` (`Backquote` 물리 키, 채팅 입력란·터미널 안에서도 — window capture 단계에서 받음). 열림 상태와 폭은 localStorage(`anylm_workpanel_open`, `anylm_workpanel_width`, try/catch), 폭은 끌어서 320px ~ 창 너비의 70%(기존 `PanelResizer`).
+- 상단 바 오른쪽 끝 터미널 아이콘(툴팁 "터미널 (Ctrl+`)")과 `Ctrl+`` (`Backquote` 물리 키, 채팅 입력란·터미널 안에서도 — window capture 단계에서 받음). 열림 상태와 폭은 localStorage(`anylm_workpanel_open`, `anylm_workpanel_width`, try/catch), 폭은 끌어서 320px ~ `maxWorkPanelWidth`(기존 `PanelResizer`). 최대 폭 = max(320, min(창의 70%, 사이드바를 뺀 폭 − 채팅창 최소 400px − 캔버스가 함께 보이면 캔버스 최소 360px)) — 320px로도 채팅창 400px을 못 남기는 좁은 창에서는 채팅창이 좁아지는 것을 받아들인다. 창 크기·사이드바 접기·캔버스 열기 때마다 화면에 쓰는 폭만 다시 맞춘다(저장된 폭은 그대로). 한글 조합 중(`isComposing`, `Process` 키)이거나 대화상자(`[aria-modal="true"]`, `[role="dialog"]`)가 떠 있으면 Ctrl+`를 받지 않고, 포커스가 대화상자 안이면 터미널이 포커스를 가져가지 않는다(수정 1차).
 - 탭: 세션마다 하나, 같은 이름이면 "PowerShell 2"처럼 번호, [+ 새 터미널], ×(가운데 버튼 클릭도). 패널을 닫아도 세션은 계속 돌고, 다시 열면 링 버퍼로 화면을 복원한다. 탭 상태는 App의 `useWorkPanel`에 있어 패널을 닫아도 남고, 화면을 새로 불러오면 `terminal_list`로 복원한다. 패널을 처음 열 때 탭이 없으면 터미널 하나를 연다.
 - 탭 모델은 T2를 위해 `{ kind: "terminal", sessionId, title, terminalKind: "shell" | "server", … } | { kind: "preview", url, title }`(미리보기는 아직 그리지 않음).
-- 문서 캔버스와 함께: 둘 다 열리면 작업 패널이 캔버스 오른쪽, 캔버스가 쓸 수 있는 폭에서 작업 패널 폭을 뺀다. 창이 1100px보다 좁으면 둘 중 나중에 연 것만 보인다(`visibleSidePanels`).
+- 문서 캔버스와 함께: 둘 다 열리면 작업 패널이 캔버스 오른쪽, 캔버스가 쓸 수 있는 폭에서 작업 패널 폭을 뺀다. 둘 다 보이는 것은 창이 1100px 이상이고 사이드바를 뺀 폭이 채팅창 400 + 캔버스 360 + 작업 패널 320 = 1080px 이상일 때뿐이다(`canShowBothPanels`, 사이드바가 열려 있으면 창 1336px부터). 아니면 둘 중 나중에 연 것만 보인다(`visibleSidePanels`). 둘 다 보이면 캔버스는 사이드바를 뺀 폭에서 작업 패널 폭을 뺀 폭(`canvasRoom`)에 맞춘다(수정 1차).
+- 지연 로딩 실패: xterm 묶음(WorkPanel)이나 문서 캔버스 묶음을 못 받으면 그 자리에 "터미널을 불러오지 못했습니다"/"문서 창을 불러오지 못했습니다"와 [다시 시도](`src/ui/LoadBoundary.tsx`). React.lazy는 실패를 기억하므로 `retryableLazy`의 `reset`으로 새 lazy를 만들어 다시 받는다(수정 1차).
+- 입력: `terminal_write`는 화면 스레드의 동기 명령으로 남겨 키 입력 순서를 지키되, 실제 쓰기는 세션마다 둔 쓰기 스레드가 채널로 받아 한다(큰 붙여넣기에도 명령은 바로 돌아온다). `terminal_snapshot`·`terminal_busy`는 async(작업 스레드). 읽기·쓰기·모아 보내기·대기 스레드 중 하나라도 못 띄우면 프로세스 트리를 끝내고 맵에 넣지 않는다(수정 1차).
 - 복사·붙여넣기: 선택이 있으면 Ctrl+C(Ctrl+Shift+C)는 복사, 없으면 인터럽트(^C). Ctrl+V는 브라우저 붙여넣기 → xterm(괄호 붙여넣기). 오른쪽 클릭 붙여넣기는 넣지 않았다.
 - 링크: 출력 속 http(s) 링크를 누르면 기본 브라우저(`open_external_url`). T2에서 localhost 링크를 미리보기로 돌린다.
 - 테마: 앱의 밝은/어두운 색에 맞춘 팔레트(`xtermTheme.ts`, 밝은 바탕에서 노랑·흰 글자는 어둡게). 스크롤백 5000줄.

@@ -50,16 +50,21 @@ import {
 } from "./canvas/canvasDoc";
 
 // 문서 편집 라이브러리(TipTap, docx, pptxgenjs, pdf.js)는 캔버스를 처음 열 때 불러온다.
-const DocumentCanvas = React.lazy(() => import("./canvas/DocumentCanvas"));
+// 청크를 못 불러오면 LoadBoundary의 [다시 시도]로 다시 불러온다.
+const documentCanvasLazy = retryableLazy(() => import("./canvas/DocumentCanvas"));
+const DocumentCanvas = documentCanvasLazy.Component;
 const DiffViewer = React.lazy(() => import("./diff/DiffViewer"));
 const PythonRunDialog = React.lazy(() => import("./python/PythonRunDialog"));
 // 터미널(xterm)은 작업 패널을 처음 열 때 불러온다.
-const WorkPanel = React.lazy(() => import("./workpanel/WorkPanel"));
+const workPanelLazy = retryableLazy(() => import("./workpanel/WorkPanel"));
+const WorkPanel = workPanelLazy.Component;
 import { startDocBridge } from "./docs/bridge";
 import { DRAG_MIME, FileExplorer, type ExplorerApi } from "./explorer/FileExplorer";
 import { useFileMention } from "./explorer/FileMention";
 import { fileHistory } from "./diff/history";
 import { PanelResizer } from "./ui/PanelResizer";
+import { LoadBoundary } from "./ui/LoadBoundary";
+import { retryableLazy } from "./ui/retryableLazy";
 import { SkillsDialog } from "./skills/SkillsDialog";
 import { skillAutoLoadOn, toolBadgeLabel, withSkillAutoLoad } from "./skills/autoLoad";
 import { McpDialog } from "./mcp/McpDialog";
@@ -80,6 +85,7 @@ import { statsLineText } from "./chat/statsLine";
 import { RuntimePanel } from "./runtime/RuntimePanel";
 import { WorkPanelToggle } from "./workpanel/WorkPanelToggle";
 import { useWorkPanel } from "./workpanel/useWorkPanel";
+import { canvasRoom } from "./workpanel/panelState";
 import {
   CANVAS_DEFAULT_WIDTH,
   CANVAS_MIN_WIDTH,
@@ -517,6 +523,7 @@ export default function App() {
     cwd: currentScopeId !== "general-chat" && activeProject ? activeProject.rootPath : "",
     canvasOpen: !!activeArtifact,
     windowWidth,
+    sidebarCollapsed,
   });
 
   const filteredConversations = useMemo(() => {
@@ -1530,7 +1537,7 @@ export default function App() {
 
   // 창 크기가 바뀌어도 채팅창이 너무 좁아지지 않도록 화면에 쓰는 폭만 줄인다 (저장된 폭은 그대로).
   // 작업 패널이 보이면 그 폭만큼 캔버스·채팅창이 나눠 쓸 폭이 줄어든다.
-  const availWidth = Math.max(0, availableWidth(windowWidth, sidebarCollapsed) - (workPanel.showPanel ? workPanel.width : 0));
+  const availWidth = canvasRoom(windowWidth, sidebarCollapsed, workPanel.showPanel ? workPanel.width : 0);
   const canvasMaxWidth = maxCanvasWidth(availWidth);
   const shownCanvasWidth = canvasExpanded
     ? Math.min(wideCanvasWidth(windowWidth, sidebarCollapsed), canvasMaxWidth)
@@ -3086,6 +3093,7 @@ export default function App() {
             onChange={changeCanvasWidth}
             onReset={() => changeCanvasWidth(CANVAS_DEFAULT_WIDTH)}
           />
+          <LoadBoundary message="문서 창을 불러오지 못했습니다" onRetry={documentCanvasLazy.reset} className="p-6 text-xs">
           <React.Suspense
             fallback={<div className="p-6 text-xs text-stone-500">문서 편집기를 불러오는 중...</div>}
           >
@@ -3125,11 +3133,18 @@ export default function App() {
             }
           />
           </React.Suspense>
+          </LoadBoundary>
         </aside>
       )}
 
       {/* 오른쪽 작업 패널: 터미널 (캔버스가 열려 있으면 그 오른쪽) */}
       {workPanel.showPanel && (
+        <LoadBoundary
+          message="터미널을 불러오지 못했습니다"
+          onRetry={workPanelLazy.reset}
+          style={{ width: workPanel.width }}
+          className="shrink-0 border-l border-[#E2E0D8] dark:border-[#2E2E2A] bg-white dark:bg-[#232321] p-4 text-xs"
+        >
         <React.Suspense
           fallback={
             <aside
@@ -3155,6 +3170,7 @@ export default function App() {
           }}
         />
         </React.Suspense>
+        </LoadBoundary>
       )}
 
       {pythonRun && activeProject && (
