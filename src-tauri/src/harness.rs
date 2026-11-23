@@ -364,6 +364,7 @@ async fn live() {
                     app.handle(),
                     TurnRequest {
                         settings: &settings,
+                        model_key: &settings.model,
                         project: project.as_ref(),
                         conversation_id: &sc.id,
                         history: &history,

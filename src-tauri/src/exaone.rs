@@ -925,6 +925,8 @@ fn base_system_prompt(project: Option<&Project>) -> String {
 
 pub struct TurnRequest<'a> {
     pub settings: &'a AppSettings,
+    /// 이번 요청에 쓸 모델 key(요청 본문 "model"과 새 답변의 model_key). 대화 모델 → 기본 모델 순으로 정한다.
+    pub model_key: &'a str,
     /// `Some`이면 프로젝트 도구가 켜진다. 일반 채팅은 `None`.
     pub project: Option<&'a Project>,
     pub conversation_id: &'a str,
@@ -1724,7 +1726,7 @@ pub async fn run_exaone_turn<R: Runtime>(
     let sys_prompt = build_system_prompt(req.project, req.mode, &available_skills, &mcp_tools);
     let tune = tuning();
     // 다른 OpenAI 호환 서버는 모르는 항목을 거부할 수 있어 K-EXAONE 모델에만 쓴다.
-    let keep_thinking = tune.preserve_thinking && settings.model.to_lowercase().contains("exaone");
+    let keep_thinking = tune.preserve_thinking && req.model_key.to_lowercase().contains("exaone");
     let mut api_messages = build_api_messages_with_compaction(
         &sys_prompt,
         req.history,
@@ -1741,6 +1743,7 @@ pub async fn run_exaone_turn<R: Runtime>(
         reasoning_content: None,
         tool_records: Vec::new(),
         created_at: chrono::Local::now().to_rfc3339(),
+        model_key: Some(req.model_key.to_string()),
         ..Default::default()
     });
     if msg.round_contents.is_empty() && !msg.content.is_empty() {
@@ -1789,7 +1792,7 @@ pub async fn run_exaone_turn<R: Runtime>(
 
         let level = compact_level.max(u8::from(total_chars(&api_messages) > COMPACT_TRIGGER_CHARS));
         let mut body = json!({
-            "model": settings.model,
+            "model": req.model_key,
             "messages": compact_messages(&api_messages, level),
             "stream": true,
             // 스트림 끝에 토큰 사용량을 받는다.
@@ -3182,6 +3185,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
+                model_key: "k-exaone_v2.5",
                 project: None,
                 conversation_id: "conv-busy",
                 history: &history,
@@ -3268,6 +3272,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
+                model_key: "k-exaone_v2.5",
                 project: Some(&project),
                 conversation_id: "conv-1",
                 history: &history,
@@ -3331,6 +3336,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
+                model_key: "k-exaone_v2.5",
                 project: Some(&project),
                 conversation_id: "conv-2",
                 history: &[user.clone()],
@@ -3354,6 +3360,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
+                model_key: "k-exaone_v2.5",
                 project: Some(&project),
                 conversation_id: "conv-2",
                 history: &history,
@@ -3401,6 +3408,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
+                model_key: "k-exaone_v2.5",
                 project: None,
                 conversation_id: "conv-3",
                 history: &[msg("user", "길게 말해줘")],
@@ -3579,7 +3587,7 @@ mod tests {
         let history = vec![msg("user", "a.txt 읽어 줘")];
         let (out, _) = run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, project: Some(&project), conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
+            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", project: Some(&project), conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -3737,6 +3745,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
+                model_key: "k-exaone_v2.5",
                 project: Some(&project),
                 conversation_id: "c",
                 history: &history,
@@ -3778,7 +3787,7 @@ mod tests {
             async move {
                 run_exaone_turn(
                     app.handle(),
-                    TurnRequest { settings, project: Some(&project), conversation_id: "c", history, compaction: None, continue_from: None, mode: "", checkpoint: None },
+                    TurnRequest { settings, model_key: "k-exaone_v2.5", project: Some(&project), conversation_id: "c", history, compaction: None, continue_from: None, mode: "", checkpoint: None },
                     Arc::new(AtomicBool::new(false)),
                 )
                 .await
@@ -3821,7 +3830,7 @@ mod tests {
         let settings = test_settings(url);
         run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, project: None, conversation_id: "conv-r", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
+            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", project: None, conversation_id: "conv-r", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -3957,7 +3966,7 @@ mod tests {
         let history = vec![msg("user", "a.txt 써줘")];
         let (out, _) = run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, project: Some(&project), conversation_id: "c-eof", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
+            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", project: Some(&project), conversation_id: "c-eof", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -3987,7 +3996,7 @@ mod tests {
         let history = vec![msg("user", "긴 문서 써줘")];
         let (out, _) = run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, project: Some(&project), conversation_id: "c-trunc", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
+            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", project: Some(&project), conversation_id: "c-trunc", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await

@@ -12,14 +12,15 @@
 
 - 작업 4(모델 목록·로드·서버 상태): 완료. `lmstudio.rs`에 parse_models·plan_load·wanted_context·list/load/unload·server_running·lms_path·start_server, Tauri 명령 `lm_*` 6개, TS `BackendAPI`(listModels 등)와 타입 추가. 결정 기록 `docs/decisions/0002-lmstudio-load-api.md`. 실측 후 LM Studio는 qwen3.5-9b(32768)만 로드된 상태로 복구함.
 - 작업 5(LM Studio 연결 창): 완료. `src/lmstudio/`(modelText, ConnectionDialog)를 추가하고 설정 창을 교체. 사이드바 버튼은 [LM Studio 연결] + 연결 점(열 때·15초마다·저장 후 `serverRunning()` 확인). 창에서 서버 시작, 모델 로드/다시 로드(언로드 후 로드)/언로드, 기본 모델 선택, 모델별 컨텍스트(modelPrefs), 자동 요약 압축을 다룬다. 원본에 문체 선택 UI가 없어 추가하지 않았다.
+- 작업 6(대화별 모델 선택): 완료. 대화마다 `modelKey`를 저장하고(비면 기본 모델) 요청 본문 `"model"`과 답변의 `modelKey`에 쓴다. 입력창 아래 ModelPicker(로드된 모델이 위, `loadedLabel` 표시), 보내기 전 `planLoad`→`nextSendStep` 흐름(바로 보내기 / 로드 중 표시 후 로드 / LoadChoiceDialog / 컨텍스트 작게 로드됨 안내와 [다시 로드] / 모델 없음 / 로드 실패 시 [내리고 로드]). 프로젝트·코드 화면에서 도구 미지원 모델이면 경고만 한다. 답변 아래 통계 줄 앞에 모델 이름. 하니스(harness.rs)는 settings.model만 넘긴다(작업 11에서 정리).
 
 ## 마지막 확인
-2026-11-23, 작업 5 완료 시점:
-- `npm test` → 통과 (17 파일, 106 통과, 1 건너뜀)
+2026-11-23, 작업 6 완료 시점:
+- `npm test` → 통과 (18 파일, 109 통과, 1 건너뜀)
 - `npx tsc --noEmit` → 통과 (오류 없음)
-- `cd src-tauri && cargo test --lib` → 통과 (138 통과, 0 실패, 8 무시)
+- `cd src-tauri && cargo test --lib` → 통과 (139 통과, 0 실패, 8 무시)
 - `npm run build` → 성공 (GUI 확인은 못 함)
-1. 계획의 작업 6부터 이어서 진행한다(`docs/superpowers/plans/2026-11-23-any-lm-desktop.md`의 작업 6 첫 단계부터).
+1. 계획의 작업 7부터 이어서 진행한다(`docs/superpowers/plans/2026-11-23-any-lm-desktop.md`의 작업 7 첫 단계부터).
 2. 작업 1의 단계 6은 사용자가 승인하면 한다: "`kidarigun/any-lm-desktop` 비공개 저장소를 만들고 main을 올릴까요?" → 승인 시 `gh repo create kidarigun/any-lm-desktop --private --source . --remote origin --push`.
 
 ## 결정 필요
@@ -38,6 +39,7 @@
 - 앱 개발자 도구에서 lm_list_models 결과 확인: `await window.__TAURI__.core.invoke("lm_list_models")` → 모델 2개(작업 4는 GUI를 못 봐서 `#[ignore]` 실서버 테스트로 대신 확인)
 - LM Studio 화면에서 모델별 GPU 설정(전문가 가중치 CPU로)을 저장해 둔 뒤 앱으로 로드해도 그 값이 유지되는지 (작업 4: 저장값이 없는 상태에서만 확인, 결정 기록 0002)
 - LM Studio 연결 창에서 두 모델이 보이고 9B 행이 '로드됨 · 32K'인지 확인 (작업 5: GUI를 못 봐서 단위 테스트와 빌드로만 확인)
+- 한 대화에서 9B로 한 번 묻고 모델 선택을 35B로 바꿔 한 번 더 묻기 → [내리고 로드] 후 35B가 답하고 두 답변 아래 모델 이름이 다른지, 입력창 아래 모델 선택 모양·로드 중 표시·'다시 로드' 안내 (작업 6: GUI를 못 봐서 단위 테스트·빌드·curl 요청 본문 확인만 했다. 8GB VRAM이라 35B는 로드하지 않았다)
 
 ## 마지막 작업자
 - 도구: claude-code

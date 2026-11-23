@@ -55,6 +55,9 @@ import { PanelResizer } from "./ui/PanelResizer";
 import { SkillsDialog } from "./skills/SkillsDialog";
 import { McpDialog } from "./mcp/McpDialog";
 import { ConnectionDialog } from "./lmstudio/ConnectionDialog";
+import { LoadChoiceDialog, type LoadChoice } from "./lmstudio/LoadChoiceDialog";
+import { ModelPicker } from "./lmstudio/ModelPicker";
+import { MODEL_MISSING_TEXT, nextSendStep, wantedContext } from "./lmstudio/sendFlow";
 import { RuntimePanel } from "./runtime/RuntimePanel";
 import {
   CANVAS_DEFAULT_WIDTH,
@@ -72,6 +75,7 @@ import {
   ChatMessage,
   Conversation,
   FileSnapshot,
+  LmModel,
   Project,
   RateInfo,
   ToolExecutionRecord,
@@ -259,9 +263,9 @@ function formatDuration(ms: number): string {
 }
 
 /** 답변 아래에 작게 보여 주는 호출·토큰·시간 */
-function TurnStatsLine({ stats }: { stats?: TurnStats | null }) {
+function TurnStatsLine({ stats, modelName }: { stats?: TurnStats | null; modelName?: string }) {
   if (!stats || !stats.apiCalls) return null;
-  const parts = [`호출 ${stats.apiCalls}회`];
+  const parts = modelName ? [modelName, `호출 ${stats.apiCalls}회`] : [`호출 ${stats.apiCalls}회`];
   if (stats.completionTokens) parts.push(`출력 ${stats.completionTokens.toLocaleString()}토큰`);
   if (stats.elapsedMs) parts.push(formatDuration(stats.elapsedMs));
   return (
@@ -547,6 +551,145 @@ export default function App() {
   );
   const activeRun = shownConvId ? runs[shownConvId] : undefined;
   const isStreaming = !!activeRun;
+
+  // --- 대화별 모델 선택 ---
+  const [models, setModels] = useState<LmModel[]>([]);
+  /** 대화가 아직 없을 때 고른 모델 (첫 메시지를 보낼 때 대화에 저장한다) */
+  const [pendingModelKey, setPendingModelKey] = useState("");
+  const [modelNotice, setModelNotice] = useState<string | null>(null);
+  const [reloadHint, setReloadHint] = useState<{ key: string; instanceId: string; loaded: number; wanted: number } | null>(null);
+  const [loadChoice, setLoadChoice] = useState<{
+    loadedNames: string[];
+    wantedName: string;
+    resolve: (c: LoadChoice) => void;
+  } | null>(null);
+  /** 로드에 실패한 모델 (오류 옆에 [내리고 로드]를 보여 준다) */
+  const [loadFailure, setLoadFailure] = useState<{ key: string } | null>(null);
+  const preparingModel = useRef(false);
+  const refreshModels = React.useCallback(async () => {
+    try {
+      setModels(await BackendAPI.listModels());
+    } catch {
+      // 서버가 꺼져 있으면 목록을 비우지 않고 그대로 둔다.
+    }
+  }, []);
+  useEffect(() => {
+    if (serverUp) void refreshModels();
+  }, [serverUp, showSettingsModal, refreshModels]);
+  const effectiveModelKey = activeConversation
+    ? activeConversation.modelKey || settings.model
+    : pendingModelKey || settings.model;
+  const modelName = (key: string) => models.find((m) => m.key === key)?.displayName ?? key;
+  const kLabel = (n: number) => `${Math.round(n / 1024)}K`;
+
+  async function changeConversationModel(key: string) {
+    setReloadHint(null);
+    setLoadFailure(null);
+    if (!activeConversation) {
+      setPendingModelKey(key);
+      return;
+    }
+    try {
+      const updated = await BackendAPI.setConversationModel(activeConversation.id, key);
+      setConversations((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
+    } catch (err: any) {
+      setErrorBanner(String(err));
+    }
+  }
+
+  /** 모델을 로드한다. unloadOthers면 다른 모델의 로드된 인스턴스를 먼저 내린다. 실패하면 던진다. */
+  async function loadModelForSend(key: string, unloadOthers: boolean) {
+    try {
+      const fresh = await BackendAPI.listModels();
+      const model = fresh.find((m) => m.key === key);
+      if (!model) throw new Error(MODEL_MISSING_TEXT);
+      setModelNotice(`${model.displayName} 로드 중…`);
+      if (unloadOthers) {
+        for (const m of fresh) {
+          if (m.key === key) continue;
+          for (const inst of m.loaded) await BackendAPI.unloadModel(inst.id);
+        }
+      }
+      await BackendAPI.loadModel(key, wantedContext(settings, model));
+      setLoadFailure(null);
+    } catch (err) {
+      setLoadFailure({ key });
+      throw err;
+    } finally {
+      setModelNotice(null);
+      void refreshModels();
+    }
+  }
+
+  /** 보내기 전에 모델이 쓸 수 있는 상태인지 확인하고 필요하면 로드한다. false면 사용자가 취소한 것. */
+  async function prepareModel(key: string): Promise<boolean> {
+    if (!key) return true; // 모델이 없다는 안내는 백엔드가 한다.
+    setLoadFailure(null);
+    const plan = await BackendAPI.planLoad(key);
+    switch (nextSendStep(plan)) {
+      case "send":
+        setReloadHint(null);
+        return true;
+      case "send-with-reload-hint":
+        if (plan.kind === "smallerLoaded") {
+          setReloadHint({ key, instanceId: plan.instanceId, loaded: plan.loaded, wanted: plan.wanted });
+        }
+        return true;
+      case "missing":
+        throw new Error(MODEL_MISSING_TEXT);
+      case "load":
+        setReloadHint(null);
+        await loadModelForSend(key, false);
+        return true;
+      case "askUnload": {
+        const others = plan.kind === "notLoaded" ? plan.others : [];
+        const choice = await new Promise<LoadChoice>((resolve) =>
+          setLoadChoice({ loadedNames: others.map(modelName), wantedName: modelName(key), resolve })
+        );
+        setLoadChoice(null);
+        if (choice === "cancel") return false;
+        setReloadHint(null);
+        await loadModelForSend(key, choice === "unload");
+        return true;
+      }
+    }
+  }
+
+  /** [N K로 다시 로드]: 그 인스턴스를 내리고 원하는 컨텍스트로 다시 로드한다. */
+  async function reloadForHint() {
+    if (!reloadHint || isStreaming || preparingModel.current) return;
+    const hint = reloadHint;
+    preparingModel.current = true;
+    try {
+      const model = models.find((m) => m.key === hint.key);
+      setModelNotice(`${model?.displayName ?? hint.key} 로드 중…`);
+      await BackendAPI.unloadModel(hint.instanceId);
+      await BackendAPI.loadModel(hint.key, hint.wanted);
+      setReloadHint(null);
+    } catch (err: any) {
+      setErrorBanner(String(err));
+      setLoadFailure({ key: hint.key });
+    } finally {
+      setModelNotice(null);
+      preparingModel.current = false;
+      void refreshModels();
+    }
+  }
+
+  async function retryLoadUnloadingOthers() {
+    if (!loadFailure || preparingModel.current) return;
+    const key = loadFailure.key;
+    preparingModel.current = true;
+    setErrorBanner(null);
+    try {
+      await loadModelForSend(key, true);
+      setReloadHint(null);
+    } catch (err: any) {
+      setErrorBanner(String(err));
+    } finally {
+      preparingModel.current = false;
+    }
+  }
   const streamingReasoning = activeRun?.reasoning ?? "";
   const streamingContent = activeRun?.content ?? "";
   const streamingTools = activeRun?.tools ?? [];
@@ -1005,17 +1148,29 @@ export default function App() {
       return;
     }
 
+    if (preparingModel.current) return;
     let convId: string | null = null;
     let failure: { error: string; text?: string } | undefined;
     try {
       setShowProjectOverview(false);
       setErrorBanner(null);
+      // 모델 준비는 입력을 비우기 전에 한다 (취소하거나 실패하면 입력이 그대로 남는다).
+      preparingModel.current = true;
+      try {
+        if (!(await prepareModel(effectiveModelKey))) return;
+      } finally {
+        preparingModel.current = false;
+      }
       let targetConv = activeConversation;
       if (!targetConv) {
         targetConv = await BackendAPI.createConversation(
           currentScopeId,
           text.slice(0, 28)
         );
+        if (pendingModelKey) {
+          targetConv = await BackendAPI.setConversationModel(targetConv.id, pendingModelKey);
+          setPendingModelKey("");
+        }
         setConversations((prev) => [targetConv!, ...prev]);
         setActiveConvId(targetConv.id);
       }
@@ -1099,9 +1254,20 @@ export default function App() {
       )
     );
 
+    if (preparingModel.current) return;
+    setErrorBanner(null);
+    preparingModel.current = true;
+    try {
+      if (!(await prepareModel(effectiveModelKey))) return;
+    } catch (err: any) {
+      setErrorBanner(String(err));
+      return;
+    } finally {
+      preparingModel.current = false;
+    }
+
     setEditingMessageId(null);
     setEditingMessageText("");
-    setErrorBanner(null);
     setRuns((prev) => startRun(prev, convId, modeOfConversation(activeConversation)));
 
     let failure: { error: string } | undefined;
@@ -1903,9 +2069,24 @@ export default function App() {
         {errorBanner && (
           <div className="bg-red-50 dark:bg-red-950/60 border-b border-red-200 dark:border-red-900 px-6 py-2 text-xs text-red-700 dark:text-red-300 flex items-center justify-between">
             <span>{errorBanner}</span>
-            <button onClick={() => setErrorBanner(null)}>
-              <X className="w-3.5 h-3.5" />
-            </button>
+            <span className="flex items-center gap-3 shrink-0">
+              {loadFailure && (
+                <button
+                  onClick={() => void retryLoadUnloadingOthers()}
+                  className="px-2 py-1 rounded-md border border-red-300 dark:border-red-800 font-semibold cursor-pointer"
+                >
+                  내리고 로드
+                </button>
+              )}
+              <button
+                onClick={() => {
+                  setErrorBanner(null);
+                  setLoadFailure(null);
+                }}
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </span>
           </div>
         )}
 
@@ -2291,7 +2472,7 @@ export default function App() {
 
                           {/* Main Markdown Response */}
                           {msg.content && <MarkdownBody text={msg.content} onClick={handleMarkdownLinkClick} />}
-                          <TurnStatsLine stats={msg.stats} />
+                          <TurnStatsLine stats={msg.stats} modelName={msg.modelKey ? modelName(msg.modelKey) : undefined} />
 
                           {/* Claude-Style Artifact Card */}
                           {msgArtifact && (
@@ -2668,6 +2849,24 @@ export default function App() {
                   className="w-full text-sm text-stone-800 dark:text-stone-100 bg-transparent placeholder:text-stone-400 dark:placeholder:text-stone-500 resize-none focus:outline-none leading-relaxed"
                 />
 
+                {modelNotice && (
+                  <div className="text-xs text-stone-600 dark:text-stone-300" role="status">
+                    {modelNotice}
+                  </div>
+                )}
+                {reloadHint && reloadHint.key === effectiveModelKey && !modelNotice && (
+                  <div className="text-xs text-amber-700 dark:text-amber-300 flex items-center gap-2 flex-wrap">
+                    <span>이 모델은 {kLabel(reloadHint.loaded)} 컨텍스트로 로드돼 있습니다 ·</span>
+                    <button
+                      type="button"
+                      disabled={isStreaming}
+                      onClick={() => void reloadForHint()}
+                      className="font-semibold underline cursor-pointer disabled:opacity-40"
+                    >
+                      {kLabel(reloadHint.wanted)}로 다시 로드
+                    </button>
+                  </div>
+                )}
                 <LowBudgetNotice info={rateInfo} />
                 <div className="flex justify-between items-center pt-1">
                   <div className="flex items-center gap-1.5">
@@ -2679,6 +2878,14 @@ export default function App() {
                       <Paperclip className="w-3.5 h-3.5" />
                       <span>파일 첨부</span>
                     </button>
+                    <ModelPicker
+                      models={models}
+                      value={effectiveModelKey}
+                      onChange={(k) => void changeConversationModel(k)}
+                      onOpen={() => void refreshModels()}
+                      disabled={isStreaming}
+                      needsTools={activeMode !== "chat"}
+                    />
                     {activeConversation && activeConversation.messages.length > 0 && (
                       <button
                         type="button"
@@ -2844,6 +3051,14 @@ export default function App() {
       )}
 
       {showMcp && <McpDialog onClose={() => setShowMcp(false)} />}
+
+      {loadChoice && (
+        <LoadChoiceDialog
+          loadedNames={loadChoice.loadedNames}
+          wantedName={loadChoice.wantedName}
+          onChoose={loadChoice.resolve}
+        />
+      )}
 
       {/* Modal 1: LM Studio 연결 */}
       {showSettingsModal && (

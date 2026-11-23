@@ -317,7 +317,7 @@ it("lists capability badges", () => {
   - 명령 `set_conversation_model { conversationId, modelKey } -> Conversation`
   - TS `nextSendStep(plan: LoadPlan): "send" | "load" | "askUnload" | "send-with-reload-hint" | "missing"`
 
-- [ ] **Step 1: 실패하는 테스트**
+- [x] **Step 1: 실패하는 테스트**
 
 ```rust
 #[test]
@@ -342,13 +342,13 @@ it("maps load plans to the next step", () => {
 });
 ```
 
-- [ ] **Step 2: 실패 확인** — `cargo test --lib conversation_model` · `npx vitest run src/lmstudio/sendFlow` → FAIL
+- [x] **Step 2: 실패 확인** — `cargo test --lib conversation_model` · `npx vitest run src/lmstudio/sendFlow` → FAIL
 
-- [ ] **Step 3: 구현.** 원본의 추론 강도 선택기 자리(App.tsx `REASONING_EFFORTS` 렌더링 부분)에 `ModelPicker`(로드된 모델이 위, 이름 옆에 `loadedLabel`)를 둔다. 보내기 전 흐름(App.tsx의 `sendChatMessage` 호출 직전): `planLoad` → `nextSendStep`에 따라 바로 보내기 / "{모델} 로드 중…" 표시 후 `loadModel` / `LoadChoiceDialog`("지금 로드된 {X}를 내리고 {Y}를 로드할까요?" [내리고 로드] [그대로 로드 시도] [취소]) / 대화 위 안내 "이 모델은 {8K} 컨텍스트로 로드돼 있습니다 · [{32K}로 다시 로드]" 후 보내기([다시 로드] = 그 인스턴스 `unloadModel` → `loadModel`. 같은 모델의 두 번째 인스턴스는 만들지 않는다) / "모델을 찾을 수 없습니다. 다른 모델을 고르세요." 로드 실패 오류 옆에도 [내리고 로드]. 프로젝트·코드 화면에서 `toolUse == false` 모델을 고르면 "이 모델은 도구 사용 학습이 안 돼 있어 파일 작업이 불안정할 수 있습니다" 경고(막지 않음). 답변 아래 통계 줄에 모델 표시 이름.
+- [x] **Step 3: 구현.** 원본의 추론 강도 선택기 자리(App.tsx `REASONING_EFFORTS` 렌더링 부분)에 `ModelPicker`(로드된 모델이 위, 이름 옆에 `loadedLabel`)를 둔다. 보내기 전 흐름(App.tsx의 `sendChatMessage` 호출 직전): `planLoad` → `nextSendStep`에 따라 바로 보내기 / "{모델} 로드 중…" 표시 후 `loadModel` / `LoadChoiceDialog`("지금 로드된 {X}를 내리고 {Y}를 로드할까요?" [내리고 로드] [그대로 로드 시도] [취소]) / 대화 위 안내 "이 모델은 {8K} 컨텍스트로 로드돼 있습니다 · [{32K}로 다시 로드]" 후 보내기([다시 로드] = 그 인스턴스 `unloadModel` → `loadModel`. 같은 모델의 두 번째 인스턴스는 만들지 않는다) / "모델을 찾을 수 없습니다. 다른 모델을 고르세요." 로드 실패 오류 옆에도 [내리고 로드]. 프로젝트·코드 화면에서 `toolUse == false` 모델을 고르면 "이 모델은 도구 사용 학습이 안 돼 있어 파일 작업이 불안정할 수 있습니다" 경고(막지 않음). 답변 아래 통계 줄에 모델 표시 이름.
 
-- [ ] **Step 4: 통과 확인** — 세 검증 명령 PASS. 실측: 한 대화에서 9B로 한 번, 35B로 바꿔 한 번 질문 → [내리고 로드] 후 35B가 답하고 두 답변 아래 모델 이름이 다르다.
+- [x] **Step 4: 통과 확인** — 세 검증 명령 PASS. 실측: 한 대화에서 9B로 한 번, 35B로 바꿔 한 번 질문 → [내리고 로드] 후 35B가 답하고 두 답변 아래 모델 이름이 다르다.
 
-- [ ] **Step 5: 커밋** — `feat: choose LM Studio model per conversation`
+- [x] **Step 5: 커밋** — `feat: choose LM Studio model per conversation`
 
 ---
 

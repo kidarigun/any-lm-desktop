@@ -8,4 +8,5 @@
 - 2026-11-23 | claude-code | 모델 목록·로드 계획·로드/언로드·서버 상태/시작 구현(작업 4), 실측 결정 기록 0002, lm_* 명령과 TS 바인딩 | 95e9899
 - 2026-11-23 | claude-code | 작업 4 보완: 이미 로드된 모델의 두 번째 인스턴스 로드를 거부(ensure_not_loaded), 컨텍스트를 못 읽은 인스턴스도 로드된 것으로 유지 | 09f89de
 - 2026-11-23 | claude-code | LM Studio 연결 창(ConnectionDialog, modelText)과 사이드바 연결 점 추가(작업 5) | ae417bd
-- 2026-11-23 | claude-code | 작업 5 보완: 컨텍스트 입력 검증(빈 값·숫자 아님·1024 미만은 미설정, 최대 초과는 최대로)과 wanted_context의 1024 미만 무시 | (이 커밋)
+- 2026-11-23 | claude-code | 작업 5 보완: 컨텍스트 입력 검증(빈 값·숫자 아님·1024 미만은 미설정, 최대 초과는 최대로)과 wanted_context의 1024 미만 무시 | 62d5427
+- 2026-11-23 | claude-code | 대화별 모델 선택(작업 6): Conversation/ChatMessage.model_key, conversation_model, set_conversation_model, TurnRequest.model_key, ModelPicker·LoadChoiceDialog·sendFlow(보내기 전 planLoad 흐름) | (이 커밋)

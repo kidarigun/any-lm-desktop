@@ -70,6 +70,22 @@ fn expire_pending_approvals(conv: &mut Conversation) {
     }
 }
 
+/// 이 대화가 쓸 모델 key: 대화에 고른 모델 → 설정의 기본 모델 순.
+fn conversation_model(settings: &AppSettings, conv: &Conversation) -> Result<String, String> {
+    let pick = |s: &str| {
+        let t = s.trim();
+        (!t.is_empty()).then(|| t.to_string())
+    };
+    conv.model_key
+        .as_deref()
+        .and_then(pick)
+        .or_else(|| pick(&settings.model))
+        .ok_or_else(|| {
+            "사용할 모델을 고르세요. [LM Studio 연결]에서 기본 모델을 정하거나 대화 위의 모델 선택에서 고를 수 있습니다."
+                .to_string()
+        })
+}
+
 fn find_conv_mut<'a>(db: &'a mut AppDatabase, conversation_id: &str) -> Result<&'a mut Conversation, String> {
     db.conversations
         .iter_mut()
@@ -653,10 +669,27 @@ fn create_conversation(
         updated_at: chrono::Local::now().to_rfc3339(),
         mode: None,
         compaction: None,
+        model_key: None,
     };
     db.conversations.insert(0, conv.clone());
     state.store.save(&db)?;
     Ok(conv)
+}
+
+/// 대화에서 쓸 모델을 정한다. 빈 문자열이면 지워서 기본 모델을 따르게 한다.
+#[tauri::command]
+fn set_conversation_model(
+    state: State<'_, AppState>,
+    conversation_id: String,
+    model_key: String,
+) -> Result<Conversation, String> {
+    let mut db = state.db.lock().map_err(|e| e.to_string())?;
+    let conv = find_conv_mut(&mut db, &conversation_id)?;
+    let key = model_key.trim();
+    conv.model_key = (!key.is_empty()).then(|| key.to_string());
+    let snapshot = conv.clone();
+    state.store.save(&db)?;
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -695,7 +728,7 @@ async fn send_chat_message(
     };
     let attachments_block = read_attachments(&app, attach_project.as_ref(), &attached_files).await;
 
-    let (settings, project, history_for_api, turn_mode, compaction) = {
+    let (settings, project, history_for_api, turn_mode, compaction, model_key) = {
         let mut db = state.db.lock().map_err(|e| e.to_string())?;
         let settings = db.settings.clone();
         let conv_idx = db
@@ -735,8 +768,9 @@ async fn send_chat_message(
         let turn_mode = conv.mode.clone().unwrap_or_default();
         let history = conv.messages.clone();
         let compaction = conv.compaction.clone();
+        let model_key = conversation_model(&settings, conv)?;
         state.store.save(&db)?;
-        (settings, project, history, turn_mode, compaction)
+        (settings, project, history, turn_mode, compaction, model_key)
     };
     let checkpoint = |m: &ChatMessage| save_checkpoint(&state, &conversation_id, m);
 
@@ -744,6 +778,7 @@ async fn send_chat_message(
         &app,
         TurnRequest {
             settings: &settings,
+            model_key: &model_key,
             project: project.as_ref(),
             conversation_id: &conversation_id,
             history: &history_for_api,
@@ -794,7 +829,7 @@ async fn edit_and_resend_message(
     let run = state.runs.begin(&conversation_id)?;
     let cancel_flag = run.cancel_flag();
 
-    let (settings, project, history_for_api, backup_messages, backup_compaction, turn_mode, compaction) = {
+    let (settings, project, history_for_api, backup_messages, backup_compaction, turn_mode, compaction, model_key) = {
         let mut db = state.db.lock().map_err(|e| e.to_string())?;
         let settings = db.settings.clone();
         let conv_idx = db
@@ -844,8 +879,9 @@ async fn edit_and_resend_message(
         let turn_mode = conv.mode.clone().unwrap_or_default();
         let history = conv.messages.clone();
         let compaction = conv.compaction.clone();
+        let model_key = conversation_model(&settings, conv)?;
         state.store.save(&db)?;
-        (settings, project, history, backup, backup_compaction, turn_mode, compaction)
+        (settings, project, history, backup, backup_compaction, turn_mode, compaction, model_key)
     };
     let checkpoint = |m: &ChatMessage| save_checkpoint(&state, &conversation_id, m);
 
@@ -853,6 +889,7 @@ async fn edit_and_resend_message(
         &app,
         TurnRequest {
             settings: &settings,
+            model_key: &model_key,
             project: project.as_ref(),
             conversation_id: &conversation_id,
             history: &history_for_api,
@@ -1050,7 +1087,7 @@ async fn resolve_tool_approval(
 ) -> Result<Conversation, String> {
     let run = state.runs.begin(&conversation_id)?;
     // 1) 대상 기록 확인 (잠금은 짧게만 잡는다)
-    let (project, tool_name, args) = {
+    let (project, tool_name, args, model_key) = {
         let mut db = state.db.lock().map_err(|e| e.to_string())?;
         let conv = db
             .conversations
@@ -1058,6 +1095,8 @@ async fn resolve_tool_approval(
             .find(|c| c.id == conversation_id)
             .ok_or_else(|| "대화를 찾을 수 없습니다.".to_string())?;
         let project = conversation_project(&db, conv)?;
+        // 이어서 답변할 모델이 없으면 도구를 실행하기 전에 알린다.
+        let model_key = conversation_model(&db.settings, conv)?;
         let conv = find_conv_mut(&mut db, &conversation_id)?;
         let rec = conv
             .messages
@@ -1077,7 +1116,7 @@ async fn resolve_tool_approval(
         // 실행 중 중복 클릭을 막기 위해 바로 상태를 바꿔 둔다.
         rec.status = "running".to_string();
         let args: Value = serde_json::from_str(&rec.arguments_json).unwrap_or_default();
-        (project, rec.tool_name.clone(), args)
+        (project, rec.tool_name.clone(), args, model_key)
     };
 
     // "항상 허용": 이 프로젝트에서는 이 도구를 앞으로 묻지 않고 실행한다 (MCP 도구는 서버 설정에 따로 적는다).
@@ -1138,6 +1177,7 @@ async fn resolve_tool_approval(
         let is_last = msg_idx + 1 == conv.messages.len();
         let continuation = if all_resolved && is_last {
             Some((
+                model_key,
                 settings,
                 conv.messages.clone(),
                 msg.clone(),
@@ -1156,12 +1196,13 @@ async fn resolve_tool_approval(
     };
 
     // 4) 도구 결과를 모델에 전달해 같은 메시지에 이어서 답변을 받는다.
-    let (settings, history, assistant_msg, turn_mode, compaction) = continuation;
+    let (model_key, settings, history, assistant_msg, turn_mode, compaction) = continuation;
     let checkpoint = |m: &ChatMessage| save_checkpoint(&state, &conversation_id, m);
     let (updated_msg, new_snapshots) = exaone::run_exaone_turn(
         &app,
         TurnRequest {
             settings: &settings,
+            model_key: &model_key,
             project: project.as_ref(),
             conversation_id: &conversation_id,
             history: &history,
@@ -1243,7 +1284,10 @@ async fn compact_conversation(
         };
 
         let source_chars = exaone::conversation_source_chars(prev_ctx.as_ref(), &slice);
-        (db.settings.clone(), covered, prev_ctx, slice, source_chars)
+        // 요약도 이 대화의 모델로 요청한다(대화 모델이 없으면 기본 모델).
+        let mut settings = db.settings.clone();
+        settings.model = conversation_model(&settings, conv).unwrap_or_default();
+        (settings, covered, prev_ctx, slice, source_chars)
     };
 
     let summary = if use_ai {
@@ -2098,6 +2142,7 @@ pub fn run() {
             lm_plan_load,
             lm_load_model,
             lm_unload,
+            set_conversation_model,
             lm_server_running,
             lm_start_server,
             open_external_url,
@@ -2191,6 +2236,21 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conversation_model_prefers_conversation_then_default() {
+        let mut s = AppSettings::default();
+        s.model = "qwen3.5-9b".into();
+        let mut c = Conversation::default();
+        assert_eq!(conversation_model(&s, &c).unwrap(), "qwen3.5-9b");
+        c.model_key = Some("qwen3.6-35b-a3b".into());
+        assert_eq!(conversation_model(&s, &c).unwrap(), "qwen3.6-35b-a3b");
+        s.model.clear();
+        c.model_key = None;
+        assert!(conversation_model(&s, &c).unwrap_err().contains("사용할 모델을 고르세요"));
+        c.model_key = Some("  ".into());
+        assert!(conversation_model(&s, &c).is_err());
+    }
 
     #[test]
     fn identity_is_any_lm_desktop() {

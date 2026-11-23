@@ -661,6 +661,19 @@ export const BackendAPI = {
     return conv;
   },
 
+  /** 대화에서 쓸 모델을 정한다. 빈 문자열이면 지워서 기본 모델을 따른다. */
+  async setConversationModel(conversationId: string, modelKey: string): Promise<Conversation> {
+    if (isTauri()) {
+      return await invoke<Conversation>("set_conversation_model", { conversationId, modelKey });
+    }
+    const db = loadFallbackDb();
+    const conv = db.conversations.find((c) => c.id === conversationId);
+    if (!conv) throw new Error("대화 세션을 찾을 수 없습니다.");
+    conv.modelKey = modelKey.trim() || null;
+    localStorage.setItem(FALLBACK_STORAGE_KEY, JSON.stringify(db));
+    return conv;
+  },
+
   async deleteConversation(conversationId: string): Promise<void> {
     if (isTauri()) {
       await invoke("delete_conversation", { conversationId });

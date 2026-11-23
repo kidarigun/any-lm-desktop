@@ -175,6 +175,8 @@ export interface ChatMessage {
   roundContents?: string[];
   /** 이 답변을 만드는 데 든 호출·토큰·시간 */
   stats?: TurnStats | null;
+  /** 이 답변을 만든 모델 key */
+  modelKey?: string | null;
 }
 
 export interface TurnStats {
@@ -204,6 +206,8 @@ export interface Conversation {
   mode?: "chat" | "project" | "code" | null;
   /** 적용된 컨텍스트 압축 요약 */
   compaction?: ContextCompaction | null;
+  /** 이 대화에서 쓸 모델 key. 없으면 기본 모델 */
+  modelKey?: string | null;
 }
 
 export interface FileSnapshot {

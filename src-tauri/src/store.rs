@@ -114,6 +114,9 @@ pub struct ChatMessage {
     pub incomplete: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<TurnStats>,
+    /// 이 답변을 만든 모델 key (없으면 생략)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_key: Option<String>,
 }
 
 impl ChatMessage {
@@ -198,6 +201,9 @@ pub struct Conversation {
     /// 이전 대화 컨텍스트 압축 상태 (없으면 전체 대화 전송)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction: Option<ContextCompaction>,
+    /// 이 대화에서 쓸 모델 key. 없으면 설정의 기본 모델을 쓴다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
