@@ -1647,16 +1647,30 @@ fn offset_arg(args: &Value) -> usize {
     args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize
 }
 
+tokio::task_local! {
+    /// 이번 턴의 도구 결과 글자 수 상한. 도구 실행 동안만 설정된다.
+    static TOOL_CAP: usize;
+}
+
+/// 한 쪽의 글자 수: 상한(`READ_PAGE_CHARS`)과 이번 턴의 도구 상한에서 안내문 몫(400자)을 뺀 값 중 작은 쪽(최소 1,000자).
+/// 안내문(범위·이어 읽을 offset)이 도구 상한에 잘리지 않게 한다.
+fn page_chars() -> usize {
+    TOOL_CAP
+        .try_with(|cap| cap.saturating_sub(400).clamp(1_000, READ_PAGE_CHARS))
+        .unwrap_or(READ_PAGE_CHARS)
+}
+
 /// 긴 글을 `offset`부터 한 쪽 분량만 잘라 주고, 이어 읽는 방법을 안내한다.
 fn page_text(text: &str, offset: usize) -> String {
+    let page_chars = page_chars();
     let total = text.chars().count();
-    if offset == 0 && total <= READ_PAGE_CHARS {
+    if offset == 0 && total <= page_chars {
         return text.to_string();
     }
     if offset >= total {
         return format!("[파일은 {}자까지입니다. offset {}에는 더 읽을 내용이 없습니다.]", total, offset);
     }
-    let page: String = text.chars().skip(offset).take(READ_PAGE_CHARS).collect();
+    let page: String = text.chars().skip(offset).take(page_chars).collect();
     let end = offset + page.chars().count();
     if end < total {
         format!(
@@ -1994,6 +2008,15 @@ pub async fn run_exaone_turn<R: Runtime>(
         }
 
         if let Some(err) = stream_err {
+            if compact_level < 3 && looks_like_context_overflow(&err) {
+                // 스트림 안의 컨텍스트 초과 오류(LM Studio는 HTTP 200 + event: error로 보낸다): 비스트리밍과 같이 단계적으로 줄여 다시 보낸다.
+                compact_level = if compact_level < 2 { 2 } else { 3 };
+                sink.notice(format!(
+                    "대화가 컨텍스트 한도를 넘어 이전 내용을 {}단계로 압축해 다시 보내는 중입니다...",
+                    compact_level
+                ));
+                continue;
+            }
             if let Some(&wait) = recovery_delays().get(recoveries_used) {
                 first_failure.get_or_insert_with(|| err.clone());
                 let no_tool_started = acc.tools.iter().all(|t| t.name.is_empty());
@@ -2143,7 +2166,7 @@ pub async fn run_exaone_turn<R: Runtime>(
                         }
                         (None, Some(project)) => {
                             let root = Path::new(&project.root_path);
-                            execute_or_queue_tool(app, root, &project.id, &call_id, &call.name, &args).await
+                            TOOL_CAP.scope(tool_cap, execute_or_queue_tool(app, root, &project.id, &call_id, &call.name, &args)).await
                         }
                         (None, None) => (
                             tool_record(
@@ -3854,6 +3877,17 @@ mod tests {
     }
 
     #[test]
+    fn read_file_page_fits_small_tool_cap_with_hint() {
+        let cap = crate::context_budget::tool_output_cap(8192);
+        let text = "가".repeat(30_000);
+        let out = TOOL_CAP.sync_scope(cap, || page_text(&text, 0));
+        let r = rec("c1", "read_file", "completed", &out, 0);
+        let sent = tool_result_for_model(&r, cap);
+        assert!(sent.chars().count() <= cap, "{}", sent.chars().count());
+        assert!(sent.contains("전체 30000자 중 0~") && sent.contains("으로 read_file을 다시 호출하세요"), "{}", &sent[sent.len() - 150..]);
+    }
+
+    #[test]
     fn detects_lm_studio_overflow() {
         // 실측(작업 8): 컨텍스트 4096으로 로드한 qwen3.5-9b에 약 13,600토큰을 보냈을 때 비스트리밍은 HTTP 400,
         // 스트리밍은 HTTP 200 안의 `event: error`로 온다. 본문 문구는 같다.
@@ -3883,6 +3917,28 @@ mod tests {
         )
         .await
         .map(|(m, _)| m)
+    }
+
+    #[tokio::test]
+    async fn stream_overflow_error_escalates_compaction_instead_of_plain_retry() {
+        let overflow = sse(json!({"error":{"message":"Engine protocol predict request returned 400: request (13610 tokens) exceeds the available context size (4096 tokens), try increasing it"}}));
+        let ok = vec![
+            sse(json!({"choices":[{"delta":{"content":"답"},"finish_reason":"stop"}]})),
+            b"data: [DONE]
+
+".to_vec(),
+        ];
+        let (url, bodies) = mock_server(vec![vec![overflow], ok], 0).await;
+        let mut history: Vec<ChatMessage> = (0..14)
+            .map(|i| msg(if i % 2 == 0 { "user" } else { "assistant" }, &"앞".repeat(5_000)))
+            .collect();
+        history.push(msg("user", "다음 질문"));
+        let out = turn(url, history).await.unwrap();
+        assert!(out.content.contains('답'), "{}", out.content);
+        let b = bodies.lock().unwrap();
+        assert_eq!(b.len(), 2);
+        let chars = |v: &Value| total_chars(v["messages"].as_array().unwrap());
+        assert!(chars(&b[1]) < chars(&b[0]), "{} !< {}", chars(&b[1]), chars(&b[0]));
     }
 
     #[tokio::test]
