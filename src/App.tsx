@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { AppLogo } from "./ui/AppLogo";
 import { isExternalLink, renderMarkdownSafe } from "./security/sanitize";
 import {
   Check,
@@ -1665,9 +1666,7 @@ export default function App() {
           <div className="space-y-3">
             <div className="flex items-center justify-between px-1">
               <div className="flex items-center gap-2">
-                <span className="w-6 h-6 rounded-lg bg-stone-800 dark:bg-stone-200 text-white dark:text-stone-900 font-bold text-xs flex items-center justify-center">
-                  LM
-                </span>
+                <AppLogo size={24} className="shrink-0" />
                 <span className="font-bold text-sm text-stone-900 dark:text-stone-100">
                   Any LM Desktop
                 </span>
