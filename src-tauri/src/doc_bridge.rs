@@ -98,10 +98,23 @@ fn b64() -> base64::engine::GeneralPurpose {
     base64::engine::general_purpose::STANDARD
 }
 
+const ERR_UNAVAILABLE: &str = "문서 변환기를 사용할 수 없습니다 (앱 창이 준비되지 않았습니다).";
+const ERR_SEND_PREFIX: &str = "문서 변환 요청을 보내지 못했습니다";
+const ERR_CLOSED: &str = "문서 변환기가 응답 없이 종료되었습니다.";
+const ERR_TIMEOUT_PREFIX: &str = "문서 변환이 ";
+const ERR_TIMEOUT_SUFFIX: &str = "초 안에 끝나지 않았습니다.";
+
+/// 다리 자체의 일시적 오류(변환기 없음·보내기 실패·응답 없이 종료·시간 초과)인지.
+/// 이런 오류는 파일 탓이 아니므로 다음에 다시 시도할 수 있다. 변환기가 돌려준 변환 실패는 아니다.
+pub fn is_transient_error(err: &str) -> bool {
+    err == ERR_UNAVAILABLE
+        || err == ERR_CLOSED
+        || err.starts_with(ERR_SEND_PREFIX)
+        || (err.starts_with(ERR_TIMEOUT_PREFIX) && err.ends_with(ERR_TIMEOUT_SUFFIX))
+}
+
 async fn request<R: Runtime>(app: &AppHandle<R>, mut req: BridgeRequest) -> Result<BridgeReply, String> {
-    let bridge = app
-        .try_state::<DocBridge>()
-        .ok_or_else(|| "문서 변환기를 사용할 수 없습니다 (앱 창이 준비되지 않았습니다).".to_string())?;
+    let bridge = app.try_state::<DocBridge>().ok_or_else(|| ERR_UNAVAILABLE.to_string())?;
     let id = Uuid::new_v4().to_string();
     req.request_id = id.clone();
     let (tx, rx) = oneshot::channel();
@@ -113,20 +126,15 @@ async fn request<R: Runtime>(app: &AppHandle<R>, mut req: BridgeRequest) -> Resu
 
     if let Err(e) = app.emit(REQUEST_EVENT, req) {
         bridge.pending.lock().map_err(|e| e.to_string())?.remove(&id);
-        return Err(format!("문서 변환 요청을 보내지 못했습니다: {}", e));
+        return Err(format!("{}: {}", ERR_SEND_PREFIX, e));
     }
 
     let result = tokio::time::timeout(BRIDGE_TIMEOUT, rx).await;
     bridge.pending.lock().map_err(|e| e.to_string())?.remove(&id);
     let reply = match result {
         Ok(Ok(reply)) => reply,
-        Ok(Err(_)) => return Err("문서 변환기가 응답 없이 종료되었습니다.".to_string()),
-        Err(_) => {
-            return Err(format!(
-                "문서 변환이 {}초 안에 끝나지 않았습니다.",
-                BRIDGE_TIMEOUT.as_secs()
-            ))
-        }
+        Ok(Err(_)) => return Err(ERR_CLOSED.to_string()),
+        Err(_) => return Err(format!("{}{}{}", ERR_TIMEOUT_PREFIX, BRIDGE_TIMEOUT.as_secs(), ERR_TIMEOUT_SUFFIX)),
     };
     if reply.ok {
         Ok(reply)
@@ -271,5 +279,19 @@ mod tests {
         let app = tauri::test::mock_app();
         let err = extract_text(app.handle(), DocKind::Docx, b"x").await.unwrap_err();
         assert!(err.contains("문서 변환기"));
+    }
+
+    #[tokio::test]
+    async fn bridge_errors_are_classified_as_transient() {
+        let app = tauri::test::mock_app();
+        // 다리가 없으면 일시적 오류
+        let err = extract_text(app.handle(), DocKind::Pdf, b"x").await.unwrap_err();
+        assert!(is_transient_error(&err), "{err}");
+        assert!(is_transient_error(&format!("문서 변환이 {}초 안에 끝나지 않았습니다.", BRIDGE_TIMEOUT.as_secs())));
+        assert!(is_transient_error("문서 변환기가 응답 없이 종료되었습니다."));
+        assert!(is_transient_error("문서 변환 요청을 보내지 못했습니다: closed"));
+        // 변환기가 돌려준 실패(파일 탓)는 아니다
+        assert!(!is_transient_error("문서 변환에 실패했습니다."));
+        assert!(!is_transient_error("PDF를 읽을 수 없습니다: Invalid PDF structure"));
     }
 }

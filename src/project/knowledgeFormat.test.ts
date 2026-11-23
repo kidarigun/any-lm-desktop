@@ -14,6 +14,7 @@ const status = (over: Partial<KnowledgeStatus> = {}): KnowledgeStatus => ({
   lastIndexed: null,
   folders: [],
   error: null,
+  overLimit: false,
   ...over,
 });
 
@@ -27,6 +28,9 @@ describe("knowledgeFormat", () => {
     expect(knowledgeStatusLine(s)).toBe(`파일 12개 · 조각 40개 · 건너뜀 2개 · 마지막 색인 ${formatIndexedAt("2026-11-23T09:05:00+09:00")}`);
     expect(knowledgeStatusLine(status())).toBe("아직 색인하지 않았습니다.");
     expect(knowledgeStatusLine(status({ files: 1, chunks: 1, lastIndexed: "x", deferred: 4 }))).toContain("다음 질문 때 이어서 색인 4개");
+    expect(knowledgeStatusLine(status({ files: 3000, chunks: 9000, lastIndexed: "x", overLimit: true }))).toContain(
+      "파일 수 한도(3,000개)에 닿아 나머지는 색인하지 않음"
+    );
   });
   it("formats the time as YYYY-MM-DD HH:MM in local time", () => {
     const d = new Date(2026, 10, 3, 7, 4);

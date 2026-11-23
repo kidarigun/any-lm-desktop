@@ -374,6 +374,11 @@ async fn live() {
             knowledge_folders: kb_folders.clone(),
         });
         let root = project.as_ref().map(|p| PathBuf::from(&p.root_path)).unwrap_or_else(|| work.clone());
+        // 앱에서는 폴더를 더할 때 바로 색인이 돈다. 같게 맞추려고 시나리오 시작 전에 끝까지 색인해 둔다
+        // (턴 시작은 최대 1.5초만 기다리므로, 첫 턴이 색인을 놓치지 않게).
+        if let Some(p) = project.as_ref().filter(|p| !p.knowledge_folders.is_empty()) {
+            knowledge::refresh_project(app.handle(), &p.id, p.knowledge_folders.clone(), knowledge::RefreshMode::Full).await;
+        }
 
         let settings = base_settings.clone();
         exaone::set_tuning(sc.tuning.clone());

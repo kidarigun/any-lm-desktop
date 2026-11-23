@@ -96,6 +96,14 @@ fn find_conv_mut<'a>(db: &'a mut AppDatabase, conversation_id: &str) -> Result<&
         .ok_or_else(|| "대화 세션을 찾을 수 없습니다.".to_string())
 }
 
+/// 첨부 파일 내용 블록의 머리(메시지 본문 뒤에 붙는다)
+const ATTACHMENTS_HEADER: &str = "\n\n---\n[첨부 파일 내용]\n";
+
+/// 저장된 사용자 메시지에서 첨부 파일 내용 블록을 뺀 본문(지식 폴더 검색어로 쓴다).
+fn without_attachments(content: &str) -> &str {
+    content.find(ATTACHMENTS_HEADER).map_or(content, |i| &content[..i])
+}
+
 /// 첨부 파일들을 읽어 메시지 끝에 붙일 블록을 만든다. 읽지 못한 파일은 이유를 남긴다.
 async fn read_attachments<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -105,7 +113,7 @@ async fn read_attachments<R: tauri::Runtime>(
     if files.is_empty() {
         return String::new();
     }
-    let mut block = String::from("\n\n---\n[첨부 파일 내용]\n");
+    let mut block = String::from(ATTACHMENTS_HEADER);
     for fpath in files {
         let display_name = Path::new(fpath)
             .file_name()
@@ -871,7 +879,7 @@ fn should_auto_compact(
     should_auto_compact_with(settings, conv, new_user_chars, 0, context_length)
 }
 
-/// `should_auto_compact`에 이번 턴 시스템 내용에 더해지는 글자(지식 폴더 `[참고 자료]` 절)를 함께 본다.
+/// `should_auto_compact`에 이번 턴에만 더해 보내는 글자(지식 폴더 `[참고 자료]` 메시지)를 함께 본다.
 /// 마지막 답변의 `prompt_tokens`를 쓸 때는 그 요청에도 같은 예산의 참고 자료가 이미 들어 있었으므로 더하지 않고,
 /// 글자로 어림할 때만 더한다(어림은 시스템 프롬프트를 세지 않으므로).
 fn should_auto_compact_with(
@@ -1531,8 +1539,13 @@ async fn resolve_tool_approval(
     let checkpoint = |m: &ChatMessage| save_checkpoint(&state, &conversation_id, m);
     let model_info = lmstudio::turn_model_info(&settings, &model_key).await;
     let context_length = context_budget::resolve_context(model_info.loaded_context);
-    // 승인 뒤 이어가기도 같은 질문(마지막 사용자 메시지)으로 참고 자료를 다시 넣는다.
-    let last_user = history.iter().rev().find(|m| m.role == "user").map(|m| m.content.clone()).unwrap_or_default();
+    // 승인 뒤 이어가기도 같은 질문(마지막 사용자 메시지, 첨부 내용 제외)으로 참고 자료를 다시 만들어 같은 자리에 넣는다.
+    let last_user = history
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .map(|m| without_attachments(&m.content).to_string())
+        .unwrap_or_default();
     let knowledge = knowledge::context_for_turn(&app, project.as_ref(), &last_user, context_length).await;
     let (updated_msg, new_snapshots) = exaone::run_exaone_turn(
         &app,
@@ -2572,6 +2585,13 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn knowledge_query_drops_the_attachments_block() {
+        let stored = format!("ZK-7741 출시일은?{}### a.txt\n첨부 본문", super::ATTACHMENTS_HEADER);
+        assert_eq!(super::without_attachments(&stored), "ZK-7741 출시일은?");
+        assert_eq!(super::without_attachments("첨부 없음"), "첨부 없음");
+    }
+
     use super::*;
 
     #[test]
