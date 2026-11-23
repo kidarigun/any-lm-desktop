@@ -442,7 +442,7 @@ fn reasoning_fields_follow_model_and_pref() {
   - 이벤트 `"anylm-auto-compaction"` 페이로드 `{ conversationId, phase: "started" | "done" | "fallback" }`
   - TS `BackendAPI.onAutoCompaction(cb)`
 
-- [ ] **Step 1: 실패하는 테스트**
+- [x] **Step 1: 실패하는 테스트**
 
 ```rust
 #[test]
@@ -461,11 +461,11 @@ fn compaction_cut_matches_original_boundary_rule() { /* user,assistant,user,assi
 
 (`conv_with(n, tokens)`: user/assistant가 번갈아 나오는 메시지 n개, 마지막 어시스턴트에 `stats.prompt_tokens = tokens`인 테스트용 함수.)
 
-- [ ] **Step 2: 실패 확인 → 구현.** `send_chat_message`에서 사용자 메시지를 기록에 넣기 **전에** `should_auto_compact(..., user_content 글자 수, context_length)`를 보고, 참이면 이벤트 `started` → 원본과 같은 방식으로 AI 요약(`keep_recent` 2, focus 없음) → 실패하면 `build_local_compaction_summary`로 대신하고 `fallback`, 성공하면 `done` → 저장된 `conv.compaction`으로 턴을 진행한다. 다시 보내기·승인 후 이어가기(한 턴 안)에서는 호출하지 않는다. 화면: `started`이면 대화 맨 아래 "컨텍스트가 70% 찼습니다. 이전 대화를 요약하는 중…", 끝나면 원본 압축 카드가 보인다.
+- [x] **Step 2: 실패 확인 → 구현.** `send_chat_message`에서 사용자 메시지를 기록에 넣기 **전에** `should_auto_compact(..., user_content 글자 수, context_length)`를 보고, 참이면 이벤트 `started` → 원본과 같은 방식으로 AI 요약(`keep_recent` 2, focus 없음) → 실패하면 `build_local_compaction_summary`로 대신하고 `fallback`, 성공하면 `done` → 저장된 `conv.compaction`으로 턴을 진행한다. 다시 보내기·승인 후 이어가기(한 턴 안)에서는 호출하지 않는다. 화면: `started`이면 대화 맨 아래 "컨텍스트가 70% 찼습니다. 이전 대화를 요약하는 중…", 끝나면 원본 압축 카드가 보인다.
 
-- [ ] **Step 3: 통과 확인.** 세 검증 명령 PASS. 실측: 9B를 8192로 로드하고 긴 답변이 나오는 질문을 몇 번 → 압축 카드가 생기고 대화가 이어진다. 실측 뒤 32768로 되돌린다.
+- [x] **Step 3: 통과 확인.** 세 검증 명령 PASS. 실측: 9B를 8192로 로드하고 긴 답변이 나오는 질문을 몇 번 → 압축 카드가 생기고 대화가 이어진다. 실측 뒤 32768로 되돌린다.
 
-- [ ] **Step 4: 커밋** — `feat: auto summary compaction at 70% of loaded context`
+- [x] **Step 4: 커밋** — `feat: auto summary compaction at 70% of loaded context`
 
 ---
 

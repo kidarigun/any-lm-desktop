@@ -1442,6 +1442,7 @@ pub async fn summarize_for_compaction(
     prev: Option<&ContextCompaction>,
     messages: &[ChatMessage],
     focus: Option<&str>,
+    reasoning_options: &[String],
     cancel_flag: &AtomicBool,
 ) -> Result<String, String> {
     let chat_url = lmstudio::server_urls(&settings.server_url)?.chat;
@@ -1463,7 +1464,7 @@ pub async fn summarize_for_compaction(
         focus_line
     );
 
-    let body = json!({
+    let mut body = json!({
         "model": settings.model,
         "messages": [
             { "role": "system", "content": sys },
@@ -1471,6 +1472,11 @@ pub async fn summarize_for_compaction(
         ],
         "stream": false
     });
+    // 생각하기를 꺼 둔 모델은 요약도 생각 없이 빠르게 받는다.
+    let pref = settings.model_prefs.get(&settings.model).and_then(|p| p.reasoning.as_deref());
+    if let Some(obj) = body.as_object_mut() {
+        obj.extend(lmstudio::reasoning_fields(reasoning_options, pref));
+    }
 
     let client = reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
@@ -3655,6 +3661,31 @@ mod tests {
         assert!(b[1].get("reasoning_effort").is_none());
     }
 
+    #[tokio::test]
+    async fn summary_request_uses_conversation_model_and_reasoning_off() {
+        let payload = r#"{"choices":[{"message":{"role":"assistant","content":"요약됨"}}]}"#;
+        let ok = format!("HTTP/1.1 200 OK
+content-type: application/json
+connection: close
+content-length: {}
+
+{}", payload.len(), payload).into_bytes();
+        let (url, bodies) = mock_server(vec![vec![ok.clone()], vec![ok]], 0).await;
+        let mut settings = test_settings(url);
+        settings.model = "qwen3.5-9b".into();
+        settings.model_prefs.insert("qwen3.5-9b".into(), crate::store::ModelPref { context_length: None, reasoning: Some("off".into()) });
+        let history = vec![msg("user", "안녕"), msg("assistant", "네")];
+        let opts = vec!["off".to_string(), "on".to_string()];
+        let cancel = AtomicBool::new(false);
+        let s = summarize_for_compaction(&settings, None, &history, None, &opts, &cancel).await.unwrap();
+        assert_eq!(s, "요약됨");
+        summarize_for_compaction(&settings, None, &history, None, &[], &cancel).await.unwrap();
+        let b = bodies.lock().unwrap();
+        assert_eq!(b[0]["model"], "qwen3.5-9b");
+        assert_eq!(b[0]["reasoning_effort"], "none");
+        assert!(b[1].get("reasoning_effort").is_none());
+    }
+
     #[test]
     fn written_note_counts_characters_per_heading() {
         let md = "# 안내서\n머리말\n\n## 1. 배경\n가나다라마\n\n```\n# 코드 안의 주석은 제목이 아니다\n```\n## 2. 결론\n끝\n";
@@ -4194,6 +4225,7 @@ mod tests {
             None,
             &[msg("user", "화면 개선해 줘"), msg("assistant", "src/App.tsx 수정 완료")],
             Some("UI 변경점"),
+            &[],
             &AtomicBool::new(false),
         )
         .await

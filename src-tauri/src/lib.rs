@@ -30,7 +30,7 @@ use std::time::Duration;
 use store::{
     AppDatabase, AppSettings, ChatMessage, Conversation, FileSnapshot, Project, StoreManager,
 };
-use tauri::{AppHandle, Manager, Runtime, State};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use uuid::Uuid;
 
 /// 일반 채팅(프로젝트 폴더와 연결되지 않은 대화)의 project_id.
@@ -705,6 +705,117 @@ fn delete_conversation(
     Ok(())
 }
 
+/// 압축으로 덮을 앞쪽 메시지 수. 남는 최근 구간이 assistant로 시작하지 않게 직전 user 경계에 맞추고,
+/// 덮을 게 없으면 `None`.
+fn compaction_cut(conv: &Conversation, keep_recent: usize) -> Option<usize> {
+    let total = conv.messages.len();
+    let mut covered = total.saturating_sub(keep_recent);
+    while covered > 0
+        && covered < total
+        && conv.messages.get(covered).map(|m| m.role.as_str()) != Some("user")
+    {
+        covered -= 1;
+    }
+    (covered > 0).then_some(covered)
+}
+
+/// 보내기 직전에 자동 요약 압축을 해야 하는지: 설정 켜짐 && 마지막 답변의 입력 토큰 수와
+/// 새 글자 추정이 로드된 컨텍스트의 70% 이상 && 덮을 이전 대화가 있음.
+fn should_auto_compact(
+    settings: &AppSettings,
+    conv: &Conversation,
+    new_user_chars: usize,
+    context_length: u32,
+) -> bool {
+    if !settings.auto_compact {
+        return false;
+    }
+    let last_prompt = conv
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "assistant")
+        .and_then(|m| m.stats.as_ref())
+        .map(|s| s.prompt_tokens);
+    context_budget::usage_ratio(last_prompt, new_user_chars, context_length)
+        >= context_budget::AUTO_COMPACT_RATIO
+        && compaction_cut(conv, 2).is_some()
+}
+
+const AUTO_COMPACTION_EVENT: &str = "anylm-auto-compaction";
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AutoCompactionPayload<'a> {
+    conversation_id: &'a str,
+    /// "started" | "done" | "fallback"
+    phase: &'a str,
+}
+
+fn emit_auto_compaction(app: &AppHandle, conversation_id: &str, phase: &str) {
+    let _ = app.emit(AUTO_COMPACTION_EVENT, AutoCompactionPayload { conversation_id, phase });
+}
+
+/// 자동 압축에 쓸 입력(보내기 전 대화 기준).
+struct CompactionJob {
+    covered: usize,
+    prev: Option<store::ContextCompaction>,
+    slice: Vec<ChatMessage>,
+}
+
+fn compaction_job(conv: &Conversation, keep_recent: usize) -> Option<CompactionJob> {
+    let covered = compaction_cut(conv, keep_recent)?;
+    let (prev, slice) = match conv.compaction.as_ref() {
+        Some(p) if p.covered_messages > 0 && p.covered_messages < covered => {
+            (Some(p.clone()), conv.messages[p.covered_messages..covered].to_vec())
+        }
+        _ => (None, conv.messages[..covered].to_vec()),
+    };
+    Some(CompactionJob { covered, prev, slice })
+}
+
+/// 자동 요약: AI 요약, 실패하면 로컬 요약. 결과를 대화에 저장하고 돌려준다.
+/// 요약을 만들 수 없으면 `None`(보내기는 그대로 진행한다).
+async fn run_auto_compaction(
+    app: &AppHandle,
+    state: &AppState,
+    conversation_id: &str,
+    settings: &AppSettings,
+    reasoning_options: &[String],
+    job: CompactionJob,
+    cancel_flag: &std::sync::atomic::AtomicBool,
+) -> Option<store::ContextCompaction> {
+    emit_auto_compaction(app, conversation_id, "started");
+    let source_chars = exaone::conversation_source_chars(job.prev.as_ref(), &job.slice);
+    let (summary, phase) = match exaone::summarize_for_compaction(
+        settings, job.prev.as_ref(), &job.slice, None, reasoning_options, cancel_flag,
+    )
+    .await
+    {
+        Ok(s) => (s, "done"),
+        Err(_) => (
+            exaone::build_local_compaction_summary(job.prev.as_ref(), &job.slice, None),
+            "fallback",
+        ),
+    };
+    let compaction = store::ContextCompaction {
+        covered_messages: job.covered,
+        created_at: chrono::Local::now().to_rfc3339(),
+        summary,
+        focus: None,
+        source_chars: Some(source_chars),
+    };
+    let saved = (|| {
+        let mut db = state.db.lock().ok()?;
+        let conv = db.conversations.iter_mut().find(|c| c.id == conversation_id)?;
+        conv.compaction = Some(compaction.clone());
+        let _ = state.store.save(&db);
+        Some(())
+    })();
+    emit_auto_compaction(app, conversation_id, if saved.is_some() { phase } else { "fallback" });
+    saved.map(|_| compaction)
+}
+
 #[tauri::command]
 async fn send_chat_message(
     app: AppHandle,
@@ -729,7 +840,20 @@ async fn send_chat_message(
     };
     let attachments_block = read_attachments(&app, attach_project.as_ref(), &attached_files).await;
 
-    let (settings, project, history_for_api, turn_mode, compaction, model_key) = {
+    // 모델 목록은 턴마다 한 번만 읽는다(추론 선택지·로드된 컨텍스트: 자동 압축 판단과 턴이 함께 쓴다).
+    let (pre_settings, pre_model_key) = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        let conv = db
+            .conversations
+            .iter()
+            .find(|c| c.id == conversation_id)
+            .ok_or_else(|| "대화 세션을 찾을 수 없습니다.".to_string())?;
+        (db.settings.clone(), conversation_model(&db.settings, conv)?)
+    };
+    let model_info = lmstudio::turn_model_info(&pre_settings, &pre_model_key).await;
+    let context_length = context_budget::resolve_context(model_info.loaded_context);
+
+    let (settings, project, history_for_api, turn_mode, mut compaction, model_key, auto_job) = {
         let mut db = state.db.lock().map_err(|e| e.to_string())?;
         let settings = db.settings.clone();
         let conv_idx = db
@@ -740,6 +864,12 @@ async fn send_chat_message(
 
         let project = conversation_project(&db, &db.conversations[conv_idx])?;
         let full_content = format!("{}{}", user_content, attachments_block);
+        // 사용자 메시지를 넣기 전 대화로 자동 압축 여부를 정한다.
+        let auto_job = if should_auto_compact(&settings, &db.conversations[conv_idx], full_content.chars().count(), context_length) {
+            compaction_job(&db.conversations[conv_idx], 2)
+        } else {
+            None
+        };
 
         let user_msg = ChatMessage {
             id: Uuid::new_v4().to_string(),
@@ -771,12 +901,24 @@ async fn send_chat_message(
         let compaction = conv.compaction.clone();
         let model_key = conversation_model(&settings, conv)?;
         state.store.save(&db)?;
-        (settings, project, history, turn_mode, compaction, model_key)
+        (settings, project, history, turn_mode, compaction, model_key, auto_job)
     };
     let checkpoint = |m: &ChatMessage| save_checkpoint(&state, &conversation_id, m);
 
-    let model_info = lmstudio::turn_model_info(&settings, &model_key).await;
-    let context_length = context_budget::resolve_context(model_info.loaded_context);
+    if let Some(job) = auto_job {
+        // 요약도 이 대화의 모델로 요청한다.
+        let mut summary_settings = settings.clone();
+        summary_settings.model = model_key.clone();
+        if let Some(c) = run_auto_compaction(
+            &app, &state, &conversation_id, &summary_settings,
+            &model_info.reasoning_options, job, &cancel_flag,
+        )
+        .await
+        {
+            compaction = Some(c);
+        }
+    }
+
     let turn_res = exaone::run_exaone_turn(
         &app,
         TurnRequest {
@@ -1273,21 +1415,10 @@ async fn compact_conversation(
             .find(|c| c.id == conversation_id)
             .ok_or_else(|| "대화 세션을 찾을 수 없습니다.".to_string())?;
 
-        let total = conv.messages.len();
-        let mut covered = total.saturating_sub(keep_recent);
-        // 남은 최근 구간이 assistant 메시지로 시작하지 않도록 직전 user 경계에 맞춘다.
-        while covered > 0
-            && covered < total
-            && conv.messages.get(covered).map(|m| m.role.as_str()) != Some("user")
-        {
-            covered -= 1;
-        }
-        if covered == 0 {
-            return Err(
-                "압축할 이전 대화가 부족합니다. 최근 유지 메시지 수를 줄이거나 대화를 더 진행한 후 압축하세요."
-                    .to_string(),
-            );
-        }
+        let covered = compaction_cut(conv, keep_recent).ok_or_else(|| {
+            "압축할 이전 대화가 부족합니다. 최근 유지 메시지 수를 줄이거나 대화를 더 진행한 후 압축하세요."
+                .to_string()
+        })?;
 
         let (prev_ctx, slice) = match conv.compaction.as_ref() {
             Some(prev) if prev.covered_messages > 0 && prev.covered_messages < covered => {
@@ -1304,11 +1435,13 @@ async fn compact_conversation(
     };
 
     let summary = if use_ai {
+        let reasoning_options = lmstudio::turn_model_info(&settings, &settings.model).await.reasoning_options;
         exaone::summarize_for_compaction(
             &settings,
             prev_ctx.as_ref(),
             &slice_to_summarize,
             focus_clean.as_deref(),
+            &reasoning_options,
             &cancel_flag,
         )
         .await?
@@ -2249,6 +2382,56 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn conv_with(n: usize, last_prompt_tokens: u64) -> Conversation {
+        let mut c = Conversation::default();
+        for i in 0..n {
+            let role = if i % 2 == 0 { "user" } else { "assistant" };
+            let mut m = ChatMessage { role: role.into(), content: format!("m{}", i), ..Default::default() };
+            if i + 1 == n && role == "assistant" {
+                m.stats = Some(store::TurnStats { prompt_tokens: last_prompt_tokens, ..Default::default() });
+            }
+            c.messages.push(m);
+        }
+        // 마지막이 user로 끝나면 직전 어시스턴트에 토큰 수를 단다.
+        if n >= 2 && n % 2 == 1 {
+            c.messages[n - 2].stats = Some(store::TurnStats { prompt_tokens: last_prompt_tokens, ..Default::default() });
+        }
+        c
+    }
+
+    #[test]
+    fn auto_compact_triggers_at_70_percent() {
+        let conv = conv_with(10, 23_000);
+        assert!(should_auto_compact(&AppSettings::default(), &conv, 0, 32768));
+        assert!(!should_auto_compact(&AppSettings::default(), &conv_with(10, 20_000), 0, 32768));
+        // 새로 보낼 글자도 센다: 20000 + 4000자/1.5 = 약 22667 토큰 -> 아직, 6000자면 24000 -> 넘음
+        assert!(!should_auto_compact(&AppSettings::default(), &conv_with(10, 20_000), 3_000, 32768));
+        assert!(should_auto_compact(&AppSettings::default(), &conv_with(10, 20_000), 6_000, 32768));
+        // 토큰 기록이 없으면 새 글자만으로 계산한다.
+        assert!(!should_auto_compact(&AppSettings::default(), &conv_with(10, 0), 100, 32768));
+    }
+
+    #[test]
+    fn auto_compact_respects_setting() {
+        let mut s = AppSettings::default();
+        s.auto_compact = false;
+        assert!(!should_auto_compact(&s, &conv_with(10, 30_000), 0, 32768));
+    }
+
+    #[test]
+    fn auto_compact_skips_when_nothing_to_cover() {
+        assert!(!should_auto_compact(&AppSettings::default(), &conv_with(1, 30_000), 0, 32768));
+        assert!(!should_auto_compact(&AppSettings::default(), &conv_with(2, 30_000), 0, 32768));
+    }
+
+    #[test]
+    fn compaction_cut_matches_original_boundary_rule() {
+        assert_eq!(compaction_cut(&conv_with(6, 0), 2), Some(4));
+        assert_eq!(compaction_cut(&conv_with(2, 0), 2), None);
+        // user,assistant,user,assistant,user + keep 2 -> 남는 구간이 assistant로 시작하면 user 경계(2)로 당긴다
+        assert_eq!(compaction_cut(&conv_with(5, 0), 2), Some(2));
+    }
 
     #[test]
     fn conversation_model_prefers_conversation_then_default() {

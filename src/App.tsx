@@ -897,6 +897,29 @@ export default function App() {
     };
   }, []);
 
+  // 자동 요약 압축 진행 표시 (대화별)
+  const [autoCompacting, setAutoCompacting] = useState<Record<string, boolean>>({});
+  useEffect(() => {
+    let cancelled = false;
+    let unlistenFn: (() => void) | null = null;
+    BackendAPI.onAutoCompaction((payload) => {
+      if (cancelled) return;
+      setAutoCompacting((prev) => {
+        const next = { ...prev };
+        if (payload.phase === "started") next[payload.conversationId] = true;
+        else delete next[payload.conversationId];
+        return next;
+      });
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlistenFn = fn;
+    });
+    return () => {
+      cancelled = true;
+      if (unlistenFn) unlistenFn();
+    };
+  }, []);
+
   // 새로 고침 뒤 되살린 실행은 응답을 직접 받지 못하므로, 끝났는지 확인해 저장된 결과를 읽는다.
   const runsRef = useRef(runs);
   runsRef.current = runs;
@@ -2739,6 +2762,13 @@ export default function App() {
                     <div className="max-w-2xl bg-[#EFECE6] dark:bg-[#2D2D2A] text-stone-900 dark:text-stone-100 rounded-2xl px-4 py-3 text-sm whitespace-pre-wrap leading-relaxed">
                       {activeRun.question}
                     </div>
+                  </div>
+                )}
+
+                {shownConvId && autoCompacting[shownConvId] && (
+                  <div className="flex items-center gap-2 text-xs text-stone-500 dark:text-stone-400">
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>컨텍스트가 70% 찼습니다. 이전 대화를 요약하는 중…</span>
                   </div>
                 )}
 

@@ -64,6 +64,11 @@ function loadFallbackDb(): AppDatabase {
   return initial;
 }
 
+export interface AutoCompactionPayload {
+  conversationId: string;
+  phase: "started" | "done" | "fallback";
+}
+
 export const BackendAPI = {
   async getInitialState(): Promise<AppDatabase> {
     if (isTauri()) {
@@ -814,6 +819,18 @@ export const BackendAPI = {
   ): Promise<UnlistenFn> {
     if (isTauri()) {
       return await listen<StreamChunkPayload>("exaone-stream", (event) => {
+        handler(event.payload);
+      });
+    }
+    return () => {};
+  },
+
+  /** 자동 요약 압축 진행 알림: started → done | fallback. */
+  async onAutoCompaction(
+    handler: (payload: AutoCompactionPayload) => void
+  ): Promise<UnlistenFn> {
+    if (isTauri()) {
+      return await listen<AutoCompactionPayload>("anylm-auto-compaction", (event) => {
         handler(event.payload);
       });
     }

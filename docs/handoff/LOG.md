@@ -13,4 +13,5 @@
 - 2026-11-23 | claude-code | 작업 6 보완: 수정 후 다시 보내기에서 모델 준비를 화면 잘라내기 전에 하도록 순서 변경, 모델 준비 중 모델 선택 비활성화 | 984cd50
 - 2026-11-23 | claude-code | 추론 켜기/끄기(작업 7): 실측으로 reasoning_effort:"none"만 reasoning_tokens 0 확인(결정 0003), lmstudio::reasoning_fields·REASONING_OFF_FIELDS, 요청 본문 반영, preserve_thinking/keep_thinking 제거, 입력창 아래 "생각하기" 토글 | 0c03213
 - 2026-11-23 | claude-code | 컨텍스트 예산(작업 8): context_budget.rs, 턴 시작 때 모델 목록 한 번으로 추론 선택지+로드된 컨텍스트(turn_model_info), 줄이기 기준·도구 출력 상한을 컨텍스트에 비례, LM Studio 초과 오류 인식(결정 0004) | 1fa48fa
-- 2026-11-23 | claude-code | 작업 8 보완: 스트림 안 컨텍스트 초과 오류(HTTP 200 + event: error)도 단계 압축으로 다시 보내기, read_file 한 쪽 크기를 도구 출력 상한에 맞춰 안내문(offset)이 잘리지 않게 함 | (이 커밋)
+- 2026-11-23 | claude-code | 작업 8 보완: 스트림 안 컨텍스트 초과 오류(HTTP 200 + event: error)도 단계 압축으로 다시 보내기, read_file 한 쪽 크기를 도구 출력 상한에 맞춰 안내문(offset)이 잘리지 않게 함 | 9d7e634
+- 2026-11-23 | claude-code | 자동 요약 압축(작업 9): compaction_cut·should_auto_compact(마지막 답변 prompt_tokens 기준 70%), send_chat_message가 사용자 메시지를 넣기 전 AI 요약(실패 시 로컬 요약)·저장 후 턴 진행, 이벤트 anylm-auto-compaction, 요약 요청에 대화 모델·생각 끄기 반영, onAutoCompaction과 진행 표시 | (이 커밋)
