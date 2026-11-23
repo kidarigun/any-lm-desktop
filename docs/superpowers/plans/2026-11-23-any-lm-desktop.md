@@ -479,7 +479,7 @@ fn compaction_cut_matches_original_boundary_rule() { /* user,assistant,user,assi
 - Consumes: 작업 6 `TurnRequest.model_key`, 모델 표시 이름(턴 시작 시 `list_models`에서).
 - Produces: `base_system_prompt(project: Option<&Project>, model_display_name: &str) -> String`; 통계 줄 "입력 n · 출력 n · 추론 n토큰 · 초당 n.n토큰 · {모델}".
 
-- [ ] **Step 1: 실패하는 테스트**
+- [x] **Step 1: 실패하는 테스트**
 
 ```rust
 #[test]
@@ -502,11 +502,11 @@ it("has no K-EXAONE branding in UI sources", () => {
 });
 ```
 
-- [ ] **Step 2: 실패 확인 → 구현.** 시스템 프롬프트 첫 문장: `"당신은 Any LM Desktop의 어시스턴트입니다. 지금 답하는 모델은 {model}입니다."` — 그 뒤 작업 지침은 원본 그대로. 오류 접두어 "EXAONE API 응답 오류" → "LM Studio 응답 오류". 401/403 → "LM Studio가 인증을 요구합니다. [LM Studio 연결]에서 API 토큰을 입력해 주세요.". 초당 토큰 = `completionTokens / (elapsedMs / 1000)`.
+- [x] **Step 2: 실패 확인 → 구현.** 시스템 프롬프트 첫 문장: `"당신은 Any LM Desktop의 어시스턴트입니다. 지금 답하는 모델은 {model}입니다."` — 그 뒤 작업 지침은 원본 그대로. 오류 접두어 "EXAONE API 응답 오류" → "LM Studio 응답 오류". 401/403 → "LM Studio가 인증을 요구합니다. [LM Studio 연결]에서 API 토큰을 입력해 주세요.". 초당 토큰 = `completionTokens / (elapsedMs / 1000)`.
 
-- [ ] **Step 3: 통과 확인** — 세 검증 명령 PASS, `git grep -n -i "exaone" -- src ':!*.test.ts'` 결과가 `onExaoneStream`/`exaone-stream`/import 경로뿐.
+- [x] **Step 3: 통과 확인** — 세 검증 명령 PASS, `git grep -n -i "exaone" -- src ':!*.test.ts'` 결과가 `onExaoneStream`/`exaone-stream`/import 경로뿐.
 
-- [ ] **Step 4: 커밋** — `refactor: remove K-EXAONE-only UI, rate limits and branding`
+- [x] **Step 4: 커밋** — `refactor: remove K-EXAONE-only UI, rate limits and branding`
 
 ---
 

@@ -166,7 +166,7 @@ pub async fn discover(server_url: &str, s: &OAuthSettings) -> Result<Endpoints, 
         .post(server_url)
         .header("Accept", "application/json, text/event-stream")
         .json(&serde_json::json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
-            "protocolVersion": crate::mcp::PROTOCOL_VERSION, "capabilities": {}, "clientInfo": { "name": "Desktop App for LG K-EXAONE", "version": env!("CARGO_PKG_VERSION") } } }))
+            "protocolVersion": crate::mcp::PROTOCOL_VERSION, "capabilities": {}, "clientInfo": { "name": "Any LM Desktop", "version": env!("CARGO_PKG_VERSION") } } }))
         .send()
         .await
         .ok();
@@ -231,7 +231,7 @@ pub async fn register_client(registration: &str) -> Result<(String, Option<Strin
     let r = http()?
         .post(registration)
         .json(&serde_json::json!({
-            "client_name": "Desktop App for LG K-EXAONE",
+            "client_name": "Any LM Desktop",
             "redirect_uris": [redirect_uri()],
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],

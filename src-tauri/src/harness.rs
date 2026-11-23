@@ -1,4 +1,4 @@
-//! 실제 K-EXAONE API로 앱의 에이전트 루프를 그대로 돌려 보는 테스트 하니스.
+//! 실제 LM Studio 서버로 앱의 에이전트 루프를 그대로 돌려 보는 테스트 하니스.
 //!
 //! 앱과 같은 코드(`run_exaone_turn`, 도구 실행, 승인 처리)를 쓰고, 화면 대신 시나리오 파일이 사용자를 맡는다.
 //! API 키는 앱처럼 Windows 자격 증명 관리자에서 읽으며 어디에도 출력하지 않는다.
@@ -233,22 +233,17 @@ fn usage_num(t: &RoundTrace, key: &str) -> u64 {
     t.usage.as_ref().and_then(|u| u.get(key)).and_then(Value::as_u64).unwrap_or(0)
 }
 
-fn rate_value(t: &RoundTrace, key: &str) -> Option<i64> {
-    t.rate_limits.iter().find(|(k, _)| k == key).and_then(|(_, v)| v.trim().parse().ok())
-}
-
 /// 실행을 통째로 멈춰야 하는 오류인지 (키 문제, 한도 초과)
 fn is_fatal(err: &str) -> bool {
-    err.contains("API 키가") || err.contains("계속 혼잡") || err.contains("(401") || err.contains("(403")
+    err.contains("인증을 요구") || err.contains("계속 바쁩") || err.contains("(401") || err.contains("(403")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "실제 K-EXAONE API를 호출한다 (사용 한도를 쓴다)"]
+#[ignore = "실제 LM Studio 서버를 호출한다"]
 async fn live() {
     let scenarios_path = PathBuf::from(env_or("EXA_SCENARIOS", "../harness/scenarios.json"));
     let out_dir = PathBuf::from(env_or("EXA_OUT", "../harness/runs/default"));
     let max_calls = env_num("EXA_MAX_CALLS", 20) as usize;
-    let day_reserve = env_num("EXA_DAY_RESERVE", 100) as i64;
     let pause = Duration::from_secs(env_num("EXA_PAUSE_SEC", 5));
     let rerun = env_or("EXA_RERUN", "0") == "1";
     let only: Vec<String> =
@@ -333,7 +328,7 @@ async fn live() {
         let mut turns: Vec<TurnLog> = Vec::new();
         let mut fatal = false;
 
-        'turns: for prompt in &sc.turns {
+        for prompt in &sc.turns {
             if calls_used >= max_calls {
                 stop_reason = Some(format!("호출 상한 {}회에 도달", max_calls));
                 break;
@@ -365,6 +360,7 @@ async fn live() {
                     TurnRequest {
                         settings: &settings,
                         model_key: &settings.model,
+                        model_display_name: "",
                         reasoning_options: &[],
                         context_length: crate::context_budget::FALLBACK_CONTEXT,
                         project: project.as_ref(),
@@ -457,15 +453,8 @@ async fn live() {
                     t.error.as_deref().map(|e| format!("오류: {}", e.chars().take(120).collect::<String>())).unwrap_or_default(),
                 );
             }
-            let day_left = log.traces.iter().rev().find_map(|t| rate_value(t, "x-day-rate-limit-remaining"));
             let stop_turns = log.error.is_some();
             turns.push(log);
-            if let Some(left) = day_left {
-                if left < day_reserve {
-                    stop_reason = Some(format!("하루 남은 호출 수 {}회 (예비 {}회 아래)", left, day_reserve));
-                    break 'turns;
-                }
-            }
             if stop_turns || stop_reason.is_some() {
                 break;
             }
@@ -481,7 +470,6 @@ async fn live() {
             })
             .collect();
         let all_traces: Vec<&RoundTrace> = turns.iter().flat_map(|t| t.traces.iter()).collect();
-        let last_rate: Vec<(String, String)> = all_traces.last().map(|t| t.rate_limits.clone()).unwrap_or_default();
         let incomplete = turns.len() < sc.turns.len();
         let summary = json!({
             "id": sc.id,
@@ -508,7 +496,6 @@ async fn live() {
             "checksPassed": checks.iter().filter(|c| c["ok"] == true).count(),
             "checksTotal": checks.len(),
             "checks": checks,
-            "rateLimits": last_rate,
         });
 
         let transcript = json!({
@@ -528,12 +515,11 @@ async fn live() {
             writeln!(f, "{}", summary).unwrap();
         }
         println!(
-            "  → 호출 {}회, {}초, 검사 {}/{} | 한도 {:?}",
+            "  → 호출 {}회, {}초, 검사 {}/{}",
             summary["apiCalls"],
             sc_start.elapsed().as_secs(),
             summary["checksPassed"],
-            summary["checksTotal"],
-            summary["rateLimits"]
+            summary["checksTotal"]
         );
 
         if fatal {

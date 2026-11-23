@@ -294,19 +294,9 @@ export interface AppDatabase {
   snapshots: FileSnapshot[];
 }
 
-/** 서버가 응답 헤더로 알려 주는 호출 한도 */
-export interface RateInfo {
-  dayLimit?: number | null;
-  dayRemaining?: number | null;
-  minuteLimit?: number | null;
-  minuteRemaining?: number | null;
-  updatedAt: string;
-}
-
 export interface StreamChunkPayload {
   conversationId: string;
   messageId: string;
-  rateInfo?: RateInfo | null;
   deltaReasoning?: string | null;
   deltaContent?: string | null;
   toolRecord?: ToolExecutionRecord | null;

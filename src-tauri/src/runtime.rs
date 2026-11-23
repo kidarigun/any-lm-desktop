@@ -231,7 +231,7 @@ async fn download(kind: &str, label: &str, url: &str, sha256: &str) -> Result<Ve
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(20))
         .timeout(DOWNLOAD_TIMEOUT)
-        .user_agent(concat!("Desktop-App-for-LG-K-EXAONE/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("Any-LM-Desktop/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| e.to_string())?;
     let mut resp = client

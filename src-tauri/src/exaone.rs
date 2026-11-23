@@ -58,8 +58,6 @@ pub struct RoundTrace {
     pub content_chars: usize,
     pub finish_reason: Option<String>,
     pub usage: Option<Value>,
-    /// 응답 헤더의 호출 한도 정보 (x-day-rate-limit-remaining 등)
-    pub rate_limits: Vec<(String, String)>,
     pub tool_calls: Vec<TraceToolCall>,
     pub error: Option<String>,
 }
@@ -85,17 +83,6 @@ fn trace_push(t: RoundTrace) {
     if let Some(v) = TRACE.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
         v.push(t);
     }
-}
-
-fn rate_limit_headers(headers: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
-    headers
-        .iter()
-        .filter(|(k, _)| {
-            let k = k.as_str();
-            k.contains("rate-limit") || k.starts_with("retry-after") || k == "x-request-id"
-        })
-        .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
-        .collect()
 }
 
 /// 요청 방식을 바꿔 보는 실험용 설정. 기본값은 앱의 평소 동작이다.
@@ -162,65 +149,16 @@ fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     Some(secs.clamp(1, MAX_RETRY_AFTER_SEC))
 }
 
-/// 서버가 응답 헤더로 알려 주는 호출 한도 (K-EXAONE API: x-day-rate-limit, x-minute-rate-limit 등)
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RateInfo {
-    pub day_limit: Option<i64>,
-    pub day_remaining: Option<i64>,
-    pub minute_limit: Option<i64>,
-    pub minute_remaining: Option<i64>,
-    /// 이 값을 받은 시각
-    pub updated_at: String,
-}
-
-static LAST_RATE: std::sync::Mutex<Option<RateInfo>> = std::sync::Mutex::new(None);
-static RATE_FILE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-
-/// 호출 한도를 적어 둘 파일을 정하고, 전에 적어 둔 값을 읽어 온다 (앱을 다시 켜도 남은 호출 수가 보이게).
-pub fn set_rate_file(path: std::path::PathBuf) {
-    if let Some(info) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<RateInfo>(&b).ok()) {
-        *LAST_RATE.lock().unwrap_or_else(|e| e.into_inner()) = Some(info);
-    }
-    let _ = RATE_FILE.set(path);
-}
-
-fn remember_rate(info: &RateInfo) {
-    *LAST_RATE.lock().unwrap_or_else(|e| e.into_inner()) = Some(info.clone());
-    if let Some(path) = RATE_FILE.get() {
-        if let Ok(json) = serde_json::to_vec(info) {
-            let _ = std::fs::write(path, json);
-        }
-    }
-}
-
-/// 가장 최근 응답에서 받은 호출 한도. 이번 실행에서 아직 호출한 적이 없으면 `None`.
-pub fn last_rate_info() -> Option<RateInfo> {
-    LAST_RATE.lock().unwrap_or_else(|e| e.into_inner()).clone()
-}
-
-fn parse_rate_info(headers: &reqwest::header::HeaderMap) -> Option<RateInfo> {
-    let num = |name: &str| -> Option<i64> { headers.get(name)?.to_str().ok()?.trim().parse().ok() };
-    let info = RateInfo {
-        day_limit: num("x-day-rate-limit"),
-        day_remaining: num("x-day-rate-limit-remaining"),
-        minute_limit: num("x-minute-rate-limit"),
-        minute_remaining: num("x-minute-rate-limit-remaining"),
-        updated_at: chrono::Local::now().to_rfc3339(),
-    };
-    (info.day_limit.is_some() || info.day_remaining.is_some() || info.minute_limit.is_some()).then_some(info)
-}
-
 /// 오류 응답 본문에서 사람이 읽을 설명을 꺼낸다.
-/// K-EXAONE은 `{"result_code": 500, "description": "..."}`, OpenAI 호환 서버는 `{"error": {"message": "..."}}` 형식이다.
+/// OpenAI 호환 서버(LM Studio)는 `{"error": {"message": "..."}}` 형식이다.
 fn api_error_text(body: &str) -> String {
     let parsed = serde_json::from_str::<Value>(body).ok();
     let text = parsed
         .as_ref()
         .and_then(|v| {
-            v.get("description")
+            v.get("error")
+                .and_then(|e| e.get("message"))
                 .and_then(Value::as_str)
-                .or_else(|| v.get("error").and_then(|e| e.get("message")).and_then(Value::as_str))
                 .or_else(|| v.get("error").and_then(Value::as_str))
                 .or_else(|| v.get("message").and_then(Value::as_str))
         })
@@ -239,9 +177,6 @@ pub struct StreamChunkPayload {
     pub tool_record: Option<ToolExecutionRecord>,
     pub snapshot: Option<FileSnapshot>,
     pub status_notice: Option<String>,
-    /// 방금 응답에서 받은 호출 한도 (화면의 '오늘 남은 호출' 표시용)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rate_info: Option<RateInfo>,
     pub done: bool,
     pub error: Option<String>,
 }
@@ -514,7 +449,7 @@ impl RoundAccumulator {
                 .and_then(|m| m.as_str())
                 .map(str::to_string)
                 .unwrap_or_else(|| err.to_string());
-            return Err(format!("EXAONE API 스트림 오류: {}", msg));
+            return Err(format!("LM Studio 스트림 오류: {}", msg));
         }
 
         let mut out = DeltaOut::default();
@@ -842,8 +777,9 @@ fn build_system_prompt(
     mode: &str,
     skills: &[skills::SkillInfo],
     mcp_tools: &[mcp::ToolSpec],
+    model_display_name: &str,
 ) -> String {
-    let mut prompt = base_system_prompt(project);
+    let mut prompt = base_system_prompt(project, model_display_name);
     if let Some(p) = project {
         prompt.push_str(mode_section(mode));
         prompt.push_str(&project_files_section(Path::new(&p.root_path)));
@@ -882,17 +818,22 @@ fn current_time_line(now: chrono::DateTime<chrono::Local>) -> String {
     )
 }
 
-fn base_system_prompt(project: Option<&Project>) -> String {
+/// 시스템 프롬프트에 적을 모델 이름. 표시 이름을 모르면 모델 key를 쓴다.
+fn model_name_for_prompt<'a>(display_name: &'a str, key: &'a str) -> &'a str {
+    if display_name.trim().is_empty() { key } else { display_name }
+}
+
+fn base_system_prompt(project: Option<&Project>, model_display_name: &str) -> String {
     let now = current_time_line(chrono::Local::now());
     match project {
         Some(p) => format!(
-            "당신은 LG AI연구원의 K-EXAONE 2.5 기반 데스크톱 어시스턴트입니다.\n\
+            "당신은 Any LM Desktop의 어시스턴트입니다. 지금 답하는 모델은 {}입니다.\n\
 {}\n\
 현재 프로젝트: {} (로컬 경로: {})\n\
 프로젝트 지침: {}\n\n\
 다음 도구로 프로젝트 폴더를 직접 다룰 수 있습니다: 읽기(read_file, list_directory, search_files), 쓰기(write_file), 수정(modify_file), 삭제(delete_path), 명령어 실행(run_command), Python 스크립트 실행(run_python).\n\
 - 모든 경로는 프로젝트 루트 기준 상대 경로로 지정하세요.\n\
-- 도구를 쓰는 응답 한 번마다 API 호출이 한 번 들고, 하루 호출 수에는 한도가 있습니다. 그래서 호출을 아껴야 합니다. 서로 기다릴 필요가 없는 도구 호출(여러 파일 읽기, 한 파일의 여러 곳 수정)은 반드시 한 응답에 함께 넣으세요.\n\
+- 도구를 쓰는 응답 한 번마다 모델 호출이 한 번 듭니다. 서로 기다릴 필요가 없는 도구 호출(여러 파일 읽기, 한 파일의 여러 곳 수정)은 반드시 한 응답에 함께 넣으세요.\n\
 - 파일 목록은 맨 아래 [프로젝트 파일 목록]에 있습니다. 목록을 보려고 list_directory를 부르지 말고, 필요한 파일을 바로 read_file로 읽으세요.\n\
 - write_file, modify_file, run_python이 성공하면 결과에 저장된 내용, 제목별 글자 수, 만들어진 파일이 나옵니다. 확인하려고 다시 read_file이나 list_directory를 부르거나 검사용 스크립트를 만들지 마세요.\n\
 - 작업이 끝나면 한 일을 짧게 요약해 답하세요. 파일에 쓴 내용을 답변에 다시 길게 옮기지 마세요.\n\
@@ -909,11 +850,11 @@ fn base_system_prompt(project: Option<&Project>) -> String {
 - run_python 결과에 필요한 패키지가 없다고 나오면 패키지 이름을 알려 주고, 도구 카드의 [실행] 창에서 설치 후 다시 실행할 수 있다고 안내하세요.\n\
 - 요청받은 작업은 중간에 멈추어 사용자에게 \"계속할까요?\"라고 되묻거나 계획만 적고 끝내지 말고, 승인 없이 실행 가능한 도구를 이어서 호출해 마지막 결과물까지 끝까지 완수하세요.\n\
 - 도구 호출에서 오류가 나면 오류 메시지를 보고 원인(경로, 인자, 문법, 너무 긴 JSON 분할 등)을 스스로 고쳐 재시도하세요.",
-            now, p.name, p.root_path, p.instructions
+            model_display_name, now, p.name, p.root_path, p.instructions
         ),
         None => format!(
-            "당신은 LG AI연구원의 K-EXAONE 2.5 기반 데스크톱 어시스턴트입니다. 한국어로 명확하고 도움이 되는 답변을 작성하세요.\n{}",
-            now
+            "당신은 Any LM Desktop의 어시스턴트입니다. 지금 답하는 모델은 {}입니다. 한국어로 명확하고 도움이 되는 답변을 작성하세요.\n{}",
+            model_display_name, now
         ),
     }
 }
@@ -926,6 +867,8 @@ pub struct TurnRequest<'a> {
     pub settings: &'a AppSettings,
     /// 이번 요청에 쓸 모델 key(요청 본문 "model"과 새 답변의 model_key). 대화 모델 → 기본 모델 순으로 정한다.
     pub model_key: &'a str,
+    /// 모델 표시 이름(시스템 프롬프트에 쓴다). 모르면 빈 문자열이고 model_key를 대신 쓴다.
+    pub model_display_name: &'a str,
     /// 그 모델이 지원하는 추론 선택지(LM Studio 모델 목록의 reasoning allowed_options). 모르면 빈 목록.
     pub reasoning_options: &'a [String],
     /// 로드된 모델의 컨텍스트 길이(토큰). 줄이기 기준과 도구 출력 상한을 정한다. 모르면 `context_budget::FALLBACK_CONTEXT`.
@@ -1095,7 +1038,7 @@ async fn send_with_retry<R: Runtime>(
             Raced::TimedOut => {
                 return Err(SendError {
                     message: format!(
-                        "EXAONE API 서버가 {}초 동안 응답하지 않습니다. 잠시 후 다시 시도해 주세요.",
+                        "LM Studio가 {}초 동안 응답하지 않습니다. 잠시 후 다시 시도해 주세요.",
                         RESPONSE_HEADER_TIMEOUT.as_secs()
                     ),
                     recoverable: true,
@@ -1112,12 +1055,6 @@ async fn send_with_retry<R: Runtime>(
 
         let status = resp.status();
         trace.status = status.as_u16();
-        trace.rate_limits = rate_limit_headers(resp.headers());
-        let rate = parse_rate_info(resp.headers());
-        if let Some(info) = &rate {
-            remember_rate(info);
-            sink.emit(|p| p.rate_info = Some(info.clone()));
-        }
         if status.is_success() {
             trace.headers_ms = Some(started.elapsed().as_millis() as u64);
             sink.notice(String::new());
@@ -1128,26 +1065,10 @@ async fn send_with_retry<R: Runtime>(
         let server_wait = retry_after_secs(resp.headers());
         let err_text = api_error_text(&resp.text().await.unwrap_or_default());
 
-        // 하루 한도를 다 썼으면 기다려도 풀리지 않는다: 다시 시도하지 않고 바로 알린다.
-        if code == 429 && rate.as_ref().and_then(|r| r.day_remaining) == Some(0) {
-            let limit = rate
-                .as_ref()
-                .and_then(|r| r.day_limit)
-                .map(|n| format!("하루 {}회", n))
-                .unwrap_or_else(|| "하루 한도".to_string());
-            return Err(SendError {
-                message: format!(
-                    "오늘 쓸 수 있는 K-EXAONE API 호출 한도({})를 모두 썼습니다. 한도가 다시 채워진 뒤(보통 다음 날) 이어서 진행해 주세요. 지금까지 한 작업은 저장되어 있습니다.",
-                    limit
-                ),
-                recoverable: false,
-            });
-        }
-
         if is_retryable_status(code) && attempt < RETRY_DELAYS_SEC.len() {
             let wait = server_wait.unwrap_or(RETRY_DELAYS_SEC[attempt]);
             let notice = format!(
-                "EXAONE API 서버가 혼잡하거나 일시 오류가 발생해 자동으로 다시 시도하는 중입니다... ({}/{}회, {}초 대기)",
+                "LM Studio가 바쁘거나 일시 오류가 발생해 자동으로 다시 시도하는 중입니다... ({}/{}회, {}초 대기)",
                 attempt + 1,
                 RETRY_DELAYS_SEC.len(),
                 wait
@@ -1161,7 +1082,7 @@ async fn send_with_retry<R: Runtime>(
         if code == 401 || code == 403 {
             return Err(SendError {
                 message: format!(
-                    "EXAONE API 키가 올바르지 않거나 권한이 없습니다 ({}). K-EXAONE API 키는 발급한 지 30일이 지나면 만료됩니다. 만료됐다면 새 키를 발급받아 [API 설정]에 입력해 주세요. {}",
+                    "LM Studio가 인증을 요구합니다. [LM Studio 연결]에서 API 토큰을 입력해 주세요. ({}) {}",
                     status, err_text
                 ),
                 recoverable: false,
@@ -1170,19 +1091,19 @@ async fn send_with_retry<R: Runtime>(
         if is_retryable_status(code) {
             return Err(SendError {
                 message: format!(
-                    "EXAONE API 서버가 약 3분 이상 계속 혼잡해 중단했습니다 ({}). 지금까지 한 작업은 저장되어 있으니, 잠시 후 '계속'이라고 보내면 이어서 진행합니다.",
+                    "LM Studio가 약 3분 이상 계속 바빠 중단했습니다 ({}). 지금까지 한 작업은 저장되어 있으니, 잠시 후 '계속'이라고 보내면 이어서 진행합니다.",
                     status
                 ),
                 recoverable: false,
             });
         }
         return Err(SendError {
-            message: format!("EXAONE API 응답 오류 ({}): {}", status, err_text),
+            message: format!("LM Studio 응답 오류 ({}): {}", status, err_text),
             recoverable: !(400..500).contains(&code),
         });
     }
     Err(SendError {
-        message: "EXAONE API 서버가 계속 혼잡합니다. 잠시 후 다시 시도해 주세요.".to_string(),
+        message: "LM Studio가 계속 바쁩니다. 잠시 후 다시 시도해 주세요.".to_string(),
         recoverable: false,
     })
 }
@@ -1436,7 +1357,7 @@ pub fn build_local_compaction_summary(
     }
 }
 
-/// K-EXAONE API를 호출해 이전 대화를 다음 작업에 바로 이어 쓸 수 있는 구조화 요약으로 압축한다.
+/// LM Studio 모델을 호출해 이전 대화를 다음 작업에 바로 이어 쓸 수 있는 구조화 요약으로 압축한다.
 pub async fn summarize_for_compaction(
     settings: &AppSettings,
     prev: Option<&ContextCompaction>,
@@ -1489,24 +1410,17 @@ pub async fn summarize_for_compaction(
 
     let resp = match race_cancel(req, cancel_flag, RESPONSE_HEADER_TIMEOUT).await {
         Raced::Cancelled => return Err("컨텍스트 압축이 취소되었습니다.".to_string()),
-        Raced::TimedOut => return Err("EXAONE API 서버 응답 시간이 초과되었습니다. '빠른 로컬 압축'으로 진행할 수 있습니다.".to_string()),
+        Raced::TimedOut => return Err("LM Studio 응답 시간이 초과되었습니다. '빠른 로컬 압축'으로 진행할 수 있습니다.".to_string()),
         Raced::Done(Err(e)) => return Err(format!("{} '빠른 로컬 압축'을 선택해 보세요.", lmstudio::friendly_error(&e))),
         Raced::Done(Ok(r)) => r,
     };
 
     let status = resp.status();
-    let rate = parse_rate_info(resp.headers());
-    if let Some(info) = &rate {
-        remember_rate(info);
-    }
     let text_body = resp.text().await.unwrap_or_default();
     if !status.is_success() {
         let code = status.as_u16();
         if code == 401 || code == 403 {
-            return Err("API 키가 올바르지 않거나 만료되었습니다. 설정에서 확인하거나 '빠른 로컬 압축'을 이용하세요.".to_string());
-        }
-        if code == 429 && rate.as_ref().and_then(|r| r.day_remaining) == Some(0) {
-            return Err("오늘의 K-EXAONE API 호출 한도를 모두 사용했습니다. '빠른 로컬 압축'은 한도를 쓰지 않습니다.".to_string());
+            return Err("LM Studio가 인증을 요구합니다. [LM Studio 연결]에서 API 토큰을 입력하거나 '빠른 로컬 압축'을 이용하세요.".to_string());
         }
         return Err(format!("요약 생성 실패 ({}): {}", status, api_error_text(&text_body)));
     }
@@ -1747,7 +1661,7 @@ pub async fn run_exaone_turn<R: Runtime>(
     };
     let tools = tools_for(req.project.is_some(), !available_skills.is_empty(), &mcp_tools);
     let tools_enabled = tools.is_some();
-    let sys_prompt = build_system_prompt(req.project, req.mode, &available_skills, &mcp_tools);
+    let sys_prompt = build_system_prompt(req.project, req.mode, &available_skills, &mcp_tools, model_name_for_prompt(req.model_display_name, req.model_key));
     let tune = tuning();
     let tool_cap = crate::context_budget::tool_output_cap(req.context_length);
     // 이전 답변의 추론은 다음 요청에 다시 보내지 않는다(LM Studio는 추론을 이어받지 않는다).
@@ -1922,7 +1836,7 @@ pub async fn run_exaone_turn<R: Runtime>(
                     let quiet = last_chunk.elapsed();
                     if quiet >= STREAM_IDLE_TIMEOUT {
                         stream_err = Some(format!(
-                            "EXAONE API 응답이 {}분 동안 멈춰 있어 중단했습니다.",
+                            "LM Studio 응답이 {}분 동안 멈춰 있어 중단했습니다.",
                             STREAM_IDLE_TIMEOUT.as_secs() / 60
                         ));
                         break;
@@ -3222,7 +3136,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
-                model_key: "k-exaone_v2.5", reasoning_options: &[], context_length: 32768,
+                model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768,
                 project: None,
                 conversation_id: "conv-busy",
                 history: &history,
@@ -3309,7 +3223,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
-                model_key: "k-exaone_v2.5", reasoning_options: &[], context_length: 32768,
+                model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768,
                 project: Some(&project),
                 conversation_id: "conv-1",
                 history: &history,
@@ -3373,7 +3287,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
-                model_key: "k-exaone_v2.5", reasoning_options: &[], context_length: 32768,
+                model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768,
                 project: Some(&project),
                 conversation_id: "conv-2",
                 history: &[user.clone()],
@@ -3397,7 +3311,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
-                model_key: "k-exaone_v2.5", reasoning_options: &[], context_length: 32768,
+                model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768,
                 project: Some(&project),
                 conversation_id: "conv-2",
                 history: &history,
@@ -3445,7 +3359,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
-                model_key: "k-exaone_v2.5", reasoning_options: &[], context_length: 32768,
+                model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768,
                 project: None,
                 conversation_id: "conv-3",
                 history: &[msg("user", "길게 말해줘")],
@@ -3495,35 +3409,34 @@ mod tests {
         let t = chrono::Local.with_ymd_and_hms(2026, 11, 15, 9, 5, 0).unwrap();
         let line = current_time_line(t);
         assert!(line.starts_with("현재 시각: 2026년 11월 15일 일요일 09:05 (UTC"), "{}", line);
-        assert!(base_system_prompt(None).contains("현재 시각: "));
+        assert!(base_system_prompt(None, "테스트 모델").contains("현재 시각: "));
         let dir = tempfile::tempdir().unwrap();
-        assert!(base_system_prompt(Some(&test_project(dir.path()))).contains("현재 시각: "));
+        assert!(base_system_prompt(Some(&test_project(dir.path())), "테스트 모델").contains("현재 시각: "));
     }
 
     #[test]
-    fn reads_rate_limits_and_error_descriptions() {
-        let mut h = reqwest::header::HeaderMap::new();
-        assert_eq!(parse_rate_info(&h), None);
-        h.insert("x-day-rate-limit", "100".parse().unwrap());
-        h.insert("x-day-rate-limit-remaining", "96".parse().unwrap());
-        h.insert("x-minute-rate-limit", "60".parse().unwrap());
-        let info = parse_rate_info(&h).unwrap();
-        assert_eq!((info.day_limit, info.day_remaining, info.minute_limit, info.minute_remaining), (Some(100), Some(96), Some(60), None));
-
-        assert_eq!(api_error_text(r#"{"result_code":500,"description":"잠시 후 다시"}"#), "잠시 후 다시");
+    fn reads_error_messages() {
         assert_eq!(api_error_text(r#"{"error":{"message":"too long"}}"#), "too long");
+        assert_eq!(api_error_text(r#"{"error":"bad"}"#), "bad");
         assert_eq!(api_error_text("plain text"), "plain text");
     }
 
-    #[tokio::test]
-    async fn used_up_daily_limit_is_reported_without_retrying() {
-        let resp = b"HTTP/1.1 429 Too Many Requests\r\nx-day-rate-limit: 100\r\nx-day-rate-limit-remaining: 0\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}".to_vec();
-        let (url, bodies) = mock_server(vec![vec![resp]], 0).await;
-        let started = Instant::now();
-        let err = turn(url, vec![msg("user", "안녕")]).await.unwrap_err();
-        assert!(err.contains("하루 100회") && err.contains("모두 썼습니다"), "{}", err);
-        assert!(started.elapsed() < Duration::from_secs(2), "기다리지 않고 바로 알린다");
-        assert_eq!(bodies.lock().unwrap().len(), 1);
+    #[test]
+    fn system_prompt_names_app_and_model() {
+        let p = base_system_prompt(None, "Qwen3.5 9B");
+        assert!(p.contains("Any LM Desktop") && p.contains("Qwen3.5 9B"));
+        assert!(!p.contains("EXAONE") && !p.contains("LG"));
+        let dir = tempfile::tempdir().unwrap();
+        let p = base_system_prompt(Some(&test_project(dir.path())), "Qwen3.5 9B");
+        assert!(p.starts_with("당신은 Any LM Desktop의 어시스턴트입니다. 지금 답하는 모델은 Qwen3.5 9B입니다."), "{}", p);
+        assert!(!p.contains("EXAONE") && !p.contains("LG") && !p.contains("하루 호출"));
+    }
+
+    #[test]
+    fn model_name_falls_back_to_the_key() {
+        assert_eq!(model_name_for_prompt("", "qwen3.5-9b"), "qwen3.5-9b");
+        assert_eq!(model_name_for_prompt("  ", "qwen3.5-9b"), "qwen3.5-9b");
+        assert_eq!(model_name_for_prompt("Qwen3.5 9B", "qwen3.5-9b"), "Qwen3.5 9B");
     }
 
     #[test]
@@ -3563,13 +3476,13 @@ mod tests {
         std::fs::write(dir.path().join("data/2025/sales.csv"), "a,b\n1,2\n").unwrap();
         std::fs::write(dir.path().join("README.md"), "x".repeat(2048)).unwrap();
         std::fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
-        let prompt = build_system_prompt(Some(&test_project(dir.path())), "project", &[], &[]);
+        let prompt = build_system_prompt(Some(&test_project(dir.path())), "project", &[], &[], "테스트 모델");
         assert!(prompt.contains("[프로젝트 파일 목록]"));
         assert!(prompt.contains("data/2025/sales.csv (8B)"), "{}", prompt);
         assert!(prompt.contains("README.md (2KB)"));
         assert!(!prompt.contains("node_modules"));
         // 일반 채팅에는 넣지 않는다.
-        assert!(!build_system_prompt(None, "chat", &[], &[]).contains("프로젝트 파일 목록"));
+        assert!(!build_system_prompt(None, "chat", &[], &[], "테스트 모델").contains("프로젝트 파일 목록"));
 
         let big = tempfile::tempdir().unwrap();
         for i in 0..200 {
@@ -3624,7 +3537,7 @@ mod tests {
         let history = vec![msg("user", "a.txt 읽어 줘")];
         let (out, _) = run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
+            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -3653,7 +3566,7 @@ mod tests {
         let opts = vec!["off".to_string(), "on".to_string()];
         settings.model_prefs.insert("qwen3.5-9b".into(), crate::store::ModelPref { context_length: None, reasoning: Some("off".into()) });
         for o in [&opts[..], &[][..]] {
-            let req = TurnRequest { settings: &settings, model_key: "qwen3.5-9b", reasoning_options: o, context_length: 32768, project: None, conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None };
+            let req = TurnRequest { settings: &settings, model_key: "qwen3.5-9b", model_display_name: "", reasoning_options: o, context_length: 32768, project: None, conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None };
             run_exaone_turn(app.handle(), req, Arc::new(AtomicBool::new(false))).await.unwrap();
         }
         let b = bodies.lock().unwrap();
@@ -3793,11 +3706,11 @@ content-length: {}
     fn each_screen_gets_its_own_guidance() {
         let dir = tempfile::tempdir().unwrap();
         let project = test_project(dir.path());
-        let code = build_system_prompt(Some(&project), "code", &[], &[]);
-        let doc = build_system_prompt(Some(&project), "project", &[], &[]);
+        let code = build_system_prompt(Some(&project), "code", &[], &[], "테스트 모델");
+        let doc = build_system_prompt(Some(&project), "project", &[], &[], "테스트 모델");
         assert!(code.contains("[코딩 화면]") && !code.contains("[프로젝트 화면]"));
         assert!(doc.contains("[프로젝트 화면]") && !doc.contains("[코딩 화면]"));
-        assert!(!build_system_prompt(Some(&project), "", &[], &[]).contains("화면]"));
+        assert!(!build_system_prompt(Some(&project), "", &[], &[], "테스트 모델").contains("화면]"));
     }
 
     #[tokio::test]
@@ -3826,7 +3739,7 @@ content-length: {}
             app.handle(),
             TurnRequest {
                 settings: &settings,
-                model_key: "k-exaone_v2.5", reasoning_options: &[], context_length: 32768,
+                model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768,
                 project: Some(&project),
                 conversation_id: "c",
                 history: &history,
@@ -3868,7 +3781,7 @@ content-length: {}
             async move {
                 run_exaone_turn(
                     app.handle(),
-                    TurnRequest { settings, model_key: "k-exaone_v2.5", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history, compaction: None, continue_from: None, mode: "", checkpoint: None },
+                    TurnRequest { settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history, compaction: None, continue_from: None, mode: "", checkpoint: None },
                     Arc::new(AtomicBool::new(false)),
                 )
                 .await
@@ -3892,10 +3805,10 @@ content-length: {}
 
     #[test]
     fn detects_context_overflow_errors() {
-        assert!(looks_like_context_overflow("EXAONE API 응답 오류 (400 Bad Request): This model's maximum context length is 131072 tokens"));
-        assert!(looks_like_context_overflow("EXAONE API 응답 오류 (413 Payload Too Large): request too long"));
-        assert!(!looks_like_context_overflow("EXAONE API 응답 오류 (400 Bad Request): invalid model"));
-        assert!(!looks_like_context_overflow("EXAONE API 키가 올바르지 않거나 권한이 없습니다 (401 Unauthorized)"));
+        assert!(looks_like_context_overflow("LM Studio 응답 오류 (400 Bad Request): This model's maximum context length is 131072 tokens"));
+        assert!(looks_like_context_overflow("LM Studio 응답 오류 (413 Payload Too Large): request too long"));
+        assert!(!looks_like_context_overflow("LM Studio 응답 오류 (400 Bad Request): invalid model"));
+        assert!(!looks_like_context_overflow("LM Studio가 인증을 요구합니다. (401 Unauthorized)"));
     }
 
     #[test]
@@ -3923,8 +3836,8 @@ content-length: {}
         // 실측(작업 8): 컨텍스트 4096으로 로드한 qwen3.5-9b에 약 13,600토큰을 보냈을 때 비스트리밍은 HTTP 400,
         // 스트리밍은 HTTP 200 안의 `event: error`로 온다. 본문 문구는 같다.
         let inner = "Engine protocol predict request returned 400: {\"error\":{\"code\":400,\"message\":\"request (13610 tokens) exceeds the available context size (4096 tokens), try increasing it\",\"type\":\"exceed_context_size_error\",\"n_prompt_tokens\":13610,\"n_ctx\":4096}}";
-        assert!(looks_like_context_overflow(&format!("EXAONE API 응답 오류 (400 Bad Request): {inner}")));
-        assert!(looks_like_context_overflow(&format!("EXAONE API 스트림 오류: {inner}")));
+        assert!(looks_like_context_overflow(&format!("LM Studio 응답 오류 (400 Bad Request): {inner}")));
+        assert!(looks_like_context_overflow(&format!("LM Studio 스트림 오류: {inner}")));
         // 상태 코드가 문구에서 빠져도 LM Studio의 고유 문구로 알아본다.
         assert!(looks_like_context_overflow("request (13610 tokens) exceeds the available context size (4096 tokens), try increasing it"));
         assert!(looks_like_context_overflow("{\"type\":\"exceed_context_size_error\"}"));
@@ -3943,7 +3856,7 @@ content-length: {}
         let settings = test_settings(url);
         run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", reasoning_options: &[], context_length: 32768, project: None, conversation_id: "conv-r", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
+            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: None, conversation_id: "conv-r", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -4101,7 +4014,7 @@ content-length: {}
         let history = vec![msg("user", "a.txt 써줘")];
         let (out, _) = run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c-eof", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
+            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c-eof", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -4131,7 +4044,7 @@ content-length: {}
         let history = vec![msg("user", "긴 문서 써줘")];
         let (out, _) = run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c-trunc", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
+            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c-trunc", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await

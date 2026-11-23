@@ -924,6 +924,7 @@ async fn send_chat_message(
         TurnRequest {
             settings: &settings,
             model_key: &model_key,
+            model_display_name: model_info.display_name.as_deref().unwrap_or(""),
             reasoning_options: &model_info.reasoning_options,
             context_length,
             project: project.as_ref(),
@@ -1039,6 +1040,7 @@ async fn edit_and_resend_message(
         TurnRequest {
             settings: &settings,
             model_key: &model_key,
+            model_display_name: model_info.display_name.as_deref().unwrap_or(""),
             reasoning_options: &model_info.reasoning_options,
             context_length,
             project: project.as_ref(),
@@ -1220,12 +1222,6 @@ fn set_project_auto_approve(
     Ok(updated)
 }
 
-/// 가장 최근 API 응답에서 받은 호출 한도 (아직 호출 전이면 null)
-#[tauri::command]
-fn rate_info() -> Option<exaone::RateInfo> {
-    exaone::last_rate_info()
-}
-
 #[tauri::command]
 async fn resolve_tool_approval(
     app: AppHandle,
@@ -1356,6 +1352,7 @@ async fn resolve_tool_approval(
         TurnRequest {
             settings: &settings,
             model_key: &model_key,
+            model_display_name: model_info.display_name.as_deref().unwrap_or(""),
             reasoning_options: &model_info.reasoning_options,
             context_length,
             project: project.as_ref(),
@@ -2268,7 +2265,6 @@ pub fn run() {
             for blob in initial_db.prune_snapshots() {
                 fs_ops::delete_blob(&blob);
             }
-            exaone::set_rate_file(app_data_dir.join("rate_info.json"));
             load_api_key_into(&store, &mut initial_db);
             app.manage(AppState {
                 store,
@@ -2317,7 +2313,6 @@ pub fn run() {
             create_skill,
             skill_text,
             open_skill_location,
-            rate_info,
             set_project_auto_approve,
             app_version,
             runtime_status,

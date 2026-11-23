@@ -59,6 +59,7 @@ import { LoadChoiceDialog, type LoadChoice } from "./lmstudio/LoadChoiceDialog";
 import { ModelPicker, ReasoningToggle } from "./lmstudio/ModelPicker";
 import { reasoningEnabled, withReasoning } from "./lmstudio/modelText";
 import { MODEL_MISSING_TEXT, nextSendStep, wantedContext } from "./lmstudio/sendFlow";
+import { statsLineText } from "./chat/statsLine";
 import { RuntimePanel } from "./runtime/RuntimePanel";
 import {
   CANVAS_DEFAULT_WIDTH,
@@ -78,7 +79,6 @@ import {
   FileSnapshot,
   LmModel,
   Project,
-  RateInfo,
   ToolExecutionRecord,
   TurnStats,
 } from "./types";
@@ -258,23 +258,15 @@ function StreamingMarkdown(props: { text: string; onClick: (e: React.MouseEvent<
   return <MarkdownBody text={text} onClick={props.onClick} />;
 }
 
-function formatDuration(ms: number): string {
-  const sec = Math.round(ms / 1000);
-  return sec >= 60 ? `${Math.floor(sec / 60)}분 ${sec % 60}초` : `${sec}초`;
-}
-
-/** 답변 아래에 작게 보여 주는 호출·토큰·시간 */
+/** 답변 아래에 작게 보여 주는 토큰·속도·모델 */
 function TurnStatsLine({ stats, modelName }: { stats?: TurnStats | null; modelName?: string }) {
   if (!stats || !stats.apiCalls) return null;
-  const parts = modelName ? [modelName, `호출 ${stats.apiCalls}회`] : [`호출 ${stats.apiCalls}회`];
-  if (stats.completionTokens) parts.push(`출력 ${stats.completionTokens.toLocaleString()}토큰`);
-  if (stats.elapsedMs) parts.push(formatDuration(stats.elapsedMs));
   return (
     <div
       className="text-[11px] text-stone-400 dark:text-stone-500 tabular-nums select-none"
-      title={`이 답변에 쓴 API 호출 ${stats.apiCalls}회 (하루 한도에서 빠집니다) · 입력 ${stats.promptTokens.toLocaleString()}토큰 · 출력 ${stats.completionTokens.toLocaleString()}토큰 (그중 추론 ${stats.reasoningTokens.toLocaleString()}토큰)`}
+      title={`모델 호출 ${stats.apiCalls}회 · 걸린 시간 ${Math.round(stats.elapsedMs / 1000)}초`}
     >
-      {parts.join(" · ")}
+      {statsLineText(stats, modelName)}
     </div>
   );
 }
@@ -290,42 +282,6 @@ function conversationToMarkdown(conv: Conversation): string {
     if (files.length) lines.push(`> 이 답변에서 다룬 파일: ${Array.from(new Set(files)).join(", ")}`, "");
   }
   return lines.join("\n");
-}
-
-/** 오늘 남은 API 호출 수. 도구를 한 번 쓸 때마다 호출이 한 번씩 들기 때문에 입력란 옆에 늘 보여 준다. */
-function RateBadge({ info }: { info: RateInfo | null }) {
-  // 받은 지 하루가 넘은 값은 이미 바뀌었을 테니 보이지 않는다.
-  if (!info || info.dayRemaining == null) return null;
-  if (Date.now() - new Date(info.updatedAt).getTime() > 24 * 60 * 60 * 1000) return null;
-  const left = info.dayRemaining;
-  const tone =
-    left <= 5
-      ? "text-red-600 dark:text-red-400"
-      : left <= 20
-        ? "text-amber-600 dark:text-amber-400"
-        : "text-stone-400 dark:text-stone-500";
-  return (
-    <span
-      className={`text-[11px] tabular-nums select-none ${tone}`}
-      title="K-EXAONE API가 알려 준 오늘 남은 호출 수입니다. 질문 한 번에 한 번, 파일 읽기·쓰기 같은 도구를 쓸 때마다 한 번씩 더 듭니다."
-    >
-      오늘 남은 호출 {left}
-      {info.dayLimit != null ? `/${info.dayLimit}` : ""}
-    </span>
-  );
-}
-
-/** 오늘 남은 호출이 거의 없으면 보내기 전에 알려 준다. */
-function LowBudgetNotice({ info }: { info: RateInfo | null }) {
-  if (!info || info.dayRemaining == null || info.dayRemaining > 5) return null;
-  if (Date.now() - new Date(info.updatedAt).getTime() > 24 * 60 * 60 * 1000) return null;
-  return (
-    <div className="text-[11px] text-red-600 dark:text-red-400 pb-0.5">
-      {info.dayRemaining <= 0
-        ? "오늘 쓸 수 있는 API 호출을 모두 썼습니다. 한도가 다시 채워진 뒤 보내 주세요."
-        : `오늘 남은 API 호출이 ${info.dayRemaining}회입니다. 파일을 여러 번 다루는 작업은 중간에 멈출 수 있습니다.`}
-    </div>
-  );
 }
 
 /** 프로젝트에서 "항상 허용"할 수 있는 도구 */
@@ -857,14 +813,6 @@ export default function App() {
     })();
   }, []);
 
-  // 서버가 알려 준 호출 한도 (오늘 남은 호출 수 표시용)
-  const [rateInfo, setRateInfo] = useState<RateInfo | null>(null);
-  useEffect(() => {
-    BackendAPI.getRateInfo()
-      .then((info) => info && setRateInfo(info))
-      .catch(() => {});
-  }, []);
-
   // Safe single event listener registration
   useEffect(() => {
     let cancelled = false;
@@ -872,7 +820,6 @@ export default function App() {
 
     BackendAPI.onExaoneStream((payload) => {
       if (cancelled) return;
-      if (payload.rateInfo) setRateInfo(payload.rateInfo);
       setRuns((prev) => applyChunk(prev, payload));
       if (payload.toolRecord) {
         const r = payload.toolRecord;
@@ -1256,7 +1203,7 @@ export default function App() {
         if (!overrideText) setInputPrompt(text);
         setErrorBanner(msg);
       }
-      if (msg.includes("API 키")) {
+      if (msg.includes("API 토큰")) {
         setShowSettingsModal(true);
       }
     } finally {
@@ -1647,17 +1594,11 @@ export default function App() {
           <div className="space-y-3">
             <div className="flex items-center justify-between px-1">
               <div className="flex items-center gap-2">
-                <span className="w-6 h-6 rounded-lg bg-[#A50034] text-white font-bold text-xs flex items-center justify-center">
-                  EX
+                <span className="w-6 h-6 rounded-lg bg-stone-800 dark:bg-stone-200 text-white dark:text-stone-900 font-bold text-xs flex items-center justify-center">
+                  LM
                 </span>
                 <span className="font-bold text-sm text-stone-900 dark:text-stone-100">
-                  K-EXAONE
-                </span>
-                <span
-                  title="Desktop App for LG K-EXAONE은 LG AI연구원이 만들거나 보증하지 않은 비공식 오픈소스 앱입니다."
-                  className="text-[10px] px-1.5 py-0.5 rounded-full bg-stone-200/90 dark:bg-[#2A2A27] text-stone-600 dark:text-stone-300 font-medium cursor-help"
-                >
-                  비공식
+                  Any LM Desktop
                 </span>
               </div>
 
@@ -2913,7 +2854,6 @@ export default function App() {
                     </button>
                   </div>
                 )}
-                <LowBudgetNotice info={rateInfo} />
                 <div className="flex justify-between items-center pt-1">
                   <div className="flex items-center gap-1.5">
                     <button
@@ -2964,7 +2904,6 @@ export default function App() {
                   </div>
 
                   <div className="flex items-center gap-2.5">
-                    <RateBadge info={rateInfo} />
                   {isStreaming ? (
                     <button
                       onClick={handleStopGeneration}
@@ -3201,7 +3140,7 @@ export default function App() {
                       instructions: e.target.value,
                     })
                   }
-                  placeholder="이 프로젝트에서 EXAONE이 참고할 지침이나 역할을 입력하세요."
+                  placeholder="이 프로젝트에서 모델이 참고할 지침이나 역할을 입력하세요."
                   className="w-full bg-white dark:bg-[#1E1E1C] border border-stone-300 dark:border-[#3A3A36] rounded-xl p-3 text-stone-900 dark:text-stone-100 focus:outline-none focus:border-[#A50034]"
                 />
               </div>
@@ -3305,7 +3244,7 @@ export default function App() {
                   >
                     <div className="font-semibold">AI 요약 압축 (권장)</div>
                     <div className="text-[11px] opacity-80 mt-0.5">
-                      EXAONE이 결정사항·파일·작업 맥락을 정밀 요약 (1회 호출)
+                      모델이 결정사항·파일·작업 맥락을 정밀 요약 (1회 호출)
                     </div>
                   </button>
                   <button

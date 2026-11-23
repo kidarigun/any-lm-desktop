@@ -1451,7 +1451,7 @@ export async function htmlToHwpx(html: string, title = "문서", opts: HwpxWrite
   const contentHpf =
     `${XML_HEAD}<opf:package ${NS_DECL} version="" unique-identifier="" id="">` +
     `<opf:metadata><opf:title>${esc(title)}</opf:title><opf:language>ko</opf:language>` +
-    `<opf:meta name="creator" content="text">Desktop App for LG K-EXAONE</opf:meta>` +
+    `<opf:meta name="creator" content="text">Any LM Desktop</opf:meta>` +
     `<opf:meta name="CreatedDate" content="text">${now}</opf:meta><opf:meta name="ModifiedDate" content="text">${now}</opf:meta></opf:metadata>` +
     `<opf:manifest><opf:item id="header" href="Contents/header.xml" media-type="application/xml"/>` +
     `<opf:item id="section0" href="Contents/section0.xml" media-type="application/xml"/>` +
@@ -1473,7 +1473,7 @@ export async function htmlToHwpx(html: string, title = "문서", opts: HwpxWrite
     part("Contents/section0.xml", "SectionFile") +
     `<rdf:Description rdf:about=""><rdf:type rdf:resource="http://www.hancom.co.kr/hwpml/2016/meta/pkg#Document"/></rdf:Description></rdf:RDF>`;
   const version =
-    `${XML_HEAD}<hv:HCFVersion xmlns:hv="http://www.hancom.co.kr/hwpml/2011/version" tagetApplication="WORDPROCESSOR" major="5" minor="1" micro="0" buildNumber="1" os="1" xmlVersion="1.4" application="Desktop App for LG K-EXAONE" appVersion="1"/>`;
+    `${XML_HEAD}<hv:HCFVersion xmlns:hv="http://www.hancom.co.kr/hwpml/2011/version" tagetApplication="WORDPROCESSOR" major="5" minor="1" micro="0" buildNumber="1" os="1" xmlVersion="1.4" application="Any LM Desktop" appVersion="1"/>`;
   const settings =
     `${XML_HEAD}<ha:HWPApplicationSetting xmlns:ha="http://www.hancom.co.kr/hwpml/2011/app" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0">` +
     `<ha:CaretPosition listIDRef="0" paraIDRef="0" pos="0"/></ha:HWPApplicationSetting>`;

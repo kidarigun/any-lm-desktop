@@ -371,9 +371,9 @@ impl StoreManager {
 
         let default_project = Project {
             id: "proj-default".to_string(),
-            name: "EXAONE 기본 워크스페이스".to_string(),
+            name: "기본 워크스페이스".to_string(),
             root_path: default_root,
-            instructions: "당신은 LG AI연구원의 K-EXAONE 2.5 모델을 기반으로 동작하는 최고 수준의 한국어 글쓰기·보고서·문서 작성 및 로컬 코딩 에이전트입니다. 사용자의 프로젝트 폴더 내 파일들을 직접 읽고, 작성하고, 수정하여 완성도 높은 결과물을 만드세요.".to_string(),
+            instructions: "당신은 최고 수준의 한국어 글쓰기·보고서·문서 작성 및 로컬 코딩 에이전트입니다. 사용자의 프로젝트 폴더 내 파일들을 직접 읽고, 작성하고, 수정하여 완성도 높은 결과물을 만드세요.".to_string(),
             created_at: chrono::Local::now().to_rfc3339(),
             auto_approve: Vec::new(),
         };

@@ -173,6 +173,8 @@ pub struct TurnModelInfo {
     pub reasoning_options: Vec<String>,
     /// 로드된 인스턴스 중 가장 큰 컨텍스트 길이. 로드 안 됨·보고 안 됨(0)·목록 실패면 None.
     pub loaded_context: Option<u32>,
+    /// 모델 표시 이름(시스템 프롬프트와 통계 줄에 쓴다). 모르면 None.
+    pub display_name: Option<String>,
 }
 
 /// 목록에서 한 모델의 턴 정보를 뽑는다.
@@ -181,6 +183,7 @@ pub fn turn_info_from(models: &[LmModel], key: &str) -> TurnModelInfo {
     TurnModelInfo {
         reasoning_options: m.reasoning_options.clone(),
         loaded_context: m.loaded.iter().map(|i| i.context_length).max().filter(|&c| c > 0),
+        display_name: Some(m.display_name.clone()).filter(|n| !n.trim().is_empty()),
     }
 }
 
@@ -403,6 +406,7 @@ mod tests {
         m[0].loaded.clear();
         assert_eq!(turn_info_from(&m, &key).loaded_context, None);
         assert_eq!(turn_info_from(&m, "없는 모델"), TurnModelInfo::default());
+        assert_eq!(turn_info_from(&m, &key).display_name.as_deref(), Some(m[0].display_name.as_str()));
     }
 
     #[test]

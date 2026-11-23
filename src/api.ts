@@ -20,7 +20,6 @@ import {
   RuntimeKind,
   SkillInfo,
   StreamChunkPayload,
-  RateInfo,
 } from "./types";
 
 export const isTauri = () =>
@@ -50,10 +49,10 @@ function loadFallbackDb(): AppDatabase {
     projects: [
       {
         id: "proj-default",
-        name: "EXAONE 기본 워크스페이스",
-        rootPath: "c:\\DOCS\\EXAONE",
+        name: "기본 워크스페이스",
+        rootPath: "c:\\DOCS\\AnyLM",
         instructions:
-          "당신은 LG AI연구원의 K-EXAONE 2.5 모델을 기반으로 동작하는 한국어 글쓰기·보고서·문서 작성 및 로컬 코딩 에이전트입니다.",
+          "당신은 한국어 글쓰기·보고서·문서 작성 및 로컬 코딩 에이전트입니다.",
         createdAt: new Date().toISOString(),
       },
     ],
@@ -804,14 +803,6 @@ export const BackendAPI = {
     if (enabled) proj.autoApprove.push(tool);
     localStorage.setItem(FALLBACK_STORAGE_KEY, JSON.stringify(db));
     return proj;
-  },
-
-  /** 가장 최근 응답에서 받은 호출 한도 (이번 실행에서 아직 호출 전이면 null) */
-  async getRateInfo(): Promise<RateInfo | null> {
-    if (isTauri()) {
-      return await invoke<RateInfo | null>("rate_info");
-    }
-    return null;
   },
 
   async onExaoneStream(
