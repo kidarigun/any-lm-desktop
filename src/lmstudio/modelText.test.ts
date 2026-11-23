@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { LmModel } from "../types";
-import { capabilityBadges, describeModel, loadedLabel } from "./modelText";
+import { capabilityBadges, describeModel, loadedLabel, normalizeContext } from "./modelText";
 
 // src-tauri/src/testdata/lmstudio_models.json 과 같은 값
 const qwen9b: LmModel = {
@@ -43,5 +43,13 @@ describe("modelText", () => {
   it("lists capability badges", () => {
     expect(capabilityBadges(qwen9b)).toEqual(["vision", "tools", "reasoning"]);
     expect(capabilityBadges({ ...qwen9b, vision: false, toolUse: false, reasoningOptions: [] })).toEqual([]);
+  });
+  it("normalizes context input", () => {
+    expect(normalizeContext("", 262144)).toBeNull();
+    expect(normalizeContext("abc", 262144)).toBeNull();
+    expect(normalizeContext("0", 262144)).toBeNull();
+    expect(normalizeContext("512", 262144)).toBeNull();
+    expect(normalizeContext("4096", 262144)).toBe(4096);
+    expect(normalizeContext("999999", 262144)).toBe(262144);
   });
 });

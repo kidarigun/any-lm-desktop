@@ -3,7 +3,7 @@ import { X } from "lucide-react";
 import { BackendAPI } from "../api";
 import { RuntimePanel } from "../runtime/RuntimePanel";
 import type { AppSettings, LmModel } from "../types";
-import { capabilityBadges, describeModel, loadedLabel } from "./modelText";
+import { capabilityBadges, describeModel, loadedLabel, normalizeContext } from "./modelText";
 
 const DEFAULT_CONTEXT = 32768;
 const BADGE_TEXT = { vision: "비전", tools: "도구", reasoning: "추론" } as const;
@@ -51,18 +51,32 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged 
     void refresh();
   }, [refresh]);
 
-  const contextOf = (m: LmModel) =>
-    draft.modelPrefs?.[m.key]?.contextLength ?? DEFAULT_CONTEXT;
+  /** 입력 중인 글자(모델 key별). 없으면 저장된 값을 보여 준다. */
+  const [ctxText, setCtxText] = useState<Record<string, string>>({});
 
-  function setContext(m: LmModel, raw: string) {
-    const n = Math.max(0, Math.floor(Number(raw) || 0));
-    setDraft({
-      ...draft,
-      modelPrefs: {
-        ...draft.modelPrefs,
-        [m.key]: { ...draft.modelPrefs?.[m.key], contextLength: Math.min(n, m.maxContextLength) },
-      },
-    });
+  const contextOf = (m: LmModel) => {
+    const saved = draft.modelPrefs?.[m.key]?.contextLength;
+    const v = saved !== undefined ? normalizeContext(String(saved), m.maxContextLength) : null;
+    return v ?? Math.min(DEFAULT_CONTEXT, m.maxContextLength || DEFAULT_CONTEXT);
+  };
+
+  /** 입력을 확정한다: 올바른 값이면 저장, 아니면 설정을 지워 기본값으로 돌린다. */
+  function commitContext(d: AppSettings, m: LmModel, raw: string): AppSettings {
+    const v = normalizeContext(raw, m.maxContextLength);
+    const prefs = { ...d.modelPrefs };
+    const cur = { ...prefs[m.key] };
+    if (v === null) delete cur.contextLength;
+    else cur.contextLength = v;
+    if (Object.keys(cur).length === 0) delete prefs[m.key];
+    else prefs[m.key] = cur;
+    return { ...d, modelPrefs: prefs };
+  }
+
+  function blurContext(m: LmModel) {
+    const raw = ctxText[m.key];
+    if (raw === undefined) return;
+    setDraft((d) => commitContext(d, m, raw));
+    setCtxText(({ [m.key]: _drop, ...rest }) => rest);
   }
 
   async function startServer() {
@@ -79,7 +93,8 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged 
   }
 
   async function load(m: LmModel, reload: boolean) {
-    const ctx = Math.min(Math.max(contextOf(m), 1), m.maxContextLength);
+    const raw = ctxText[m.key];
+    const ctx = raw !== undefined ? (normalizeContext(raw, m.maxContextLength) ?? contextOf(m)) : contextOf(m);
     setBusyKey(m.key);
     setError(null);
     try {
@@ -109,8 +124,13 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged 
   }
 
   async function save() {
+    let next = draft;
+    for (const m of models) {
+      const raw = ctxText[m.key];
+      if (raw !== undefined) next = commitContext(next, m, raw);
+    }
     try {
-      await onSave(draft);
+      await onSave(next);
     } catch (err) {
       setError(String(err));
     }
@@ -194,7 +214,7 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged 
                     if (!window.confirm("저장된 토큰을 삭제할까요?")) return;
                     try {
                       const saved = await BackendAPI.clearApiKey();
-                      setDraft({ ...draft, apiKey: "", apiKeySet: saved.apiKeySet });
+                      setDraft((d) => ({ ...d, apiKey: "", apiKeySet: saved.apiKeySet }));
                       onSettingsChanged?.({ ...saved, apiKey: "" });
                       setError(null);
                     } catch (err) {
@@ -271,11 +291,12 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged 
                       <label className="text-stone-600 dark:text-stone-300">컨텍스트</label>
                       <input
                         type="number"
-                        min={1}
+                        min={1024}
                         max={m.maxContextLength}
                         step={1024}
-                        value={contextOf(m)}
-                        onChange={(e) => setContext(m, e.target.value)}
+                        value={ctxText[m.key] ?? String(contextOf(m))}
+                        onChange={(e) => setCtxText({ ...ctxText, [m.key]: e.target.value })}
+                        onBlur={() => blurContext(m)}
                         className="w-28 bg-white dark:bg-[#1E1E1C] border border-stone-300 dark:border-[#3A3A36] rounded-lg px-2 py-1 font-mono text-stone-900 dark:text-stone-100 focus:outline-none focus:border-[#A50034]"
                       />
                       <span className="text-[11px] text-stone-500 dark:text-stone-400">

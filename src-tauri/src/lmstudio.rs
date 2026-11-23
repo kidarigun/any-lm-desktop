@@ -171,12 +171,16 @@ pub fn plan_load(models: &[LmModel], key: &str, wanted: u32) -> LoadPlan {
     LoadPlan::NotLoaded { others }
 }
 
-/// 모델별 설정이 있으면 그 값, 없으면 32768. 모델 최대 컨텍스트를 넘지 않는다.
+/// 저장된 컨텍스트가 이 값보다 작으면 없는 것으로 본다.
+pub const MIN_CONTEXT: u32 = 1024;
+
+/// 모델별 설정이 있으면 그 값(1024 미만은 무시), 없으면 32768. 모델 최대 컨텍스트를 넘지 않는다.
 pub fn wanted_context(settings: &AppSettings, model: &LmModel) -> u32 {
     let want = settings
         .model_prefs
         .get(&model.key)
         .and_then(|p| p.context_length)
+        .filter(|&c| c >= MIN_CONTEXT)
         .unwrap_or(DEFAULT_CONTEXT);
     if model.max_context_length > 0 { want.min(model.max_context_length) } else { want }
 }
@@ -392,6 +396,10 @@ mod tests {
         assert_eq!(wanted_context(&s, q), 8192);
         s.model_prefs.insert("qwen3.5-9b".into(), crate::store::ModelPref { context_length: Some(999_999), reasoning: None });
         assert_eq!(wanted_context(&s, q), 262144);
+        for bad in [0u32, 1, 1023] {
+            s.model_prefs.insert("qwen3.5-9b".into(), crate::store::ModelPref { context_length: Some(bad), reasoning: None });
+            assert_eq!(wanted_context(&s, q), 32768, "saved {bad} must fall back to the default");
+        }
     }
 
     #[test]

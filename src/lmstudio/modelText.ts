@@ -24,3 +24,12 @@ export function capabilityBadges(m: LmModel): ("vision" | "tools" | "reasoning")
   if (m.reasoningOptions.length > 0) out.push("reasoning");
   return out;
 }
+
+export const MIN_CONTEXT = 1024;
+
+/** 입력한 컨텍스트 글자를 숫자로. 비었거나 숫자가 아니거나 1024 미만이면 null(미설정), 최대를 넘으면 최대로. */
+export function normalizeContext(raw: string, max: number): number | null {
+  const n = Math.floor(Number(raw.trim()));
+  if (raw.trim() === "" || !Number.isFinite(n) || n < MIN_CONTEXT) return null;
+  return max > 0 ? Math.min(n, max) : n;
+}
