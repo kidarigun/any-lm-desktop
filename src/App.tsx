@@ -1235,6 +1235,18 @@ export default function App() {
     const msgIdx = previousMessages.findIndex((m) => m.id === messageId);
     if (msgIdx < 0) return;
 
+    if (preparingModel.current) return;
+    setErrorBanner(null);
+    preparingModel.current = true;
+    try {
+      if (!(await prepareModel(effectiveModelKey))) return;
+    } catch (err: any) {
+      setErrorBanner(String(err));
+      return;
+    } finally {
+      preparingModel.current = false;
+    }
+
     const nextCompaction =
       previousCompaction && previousCompaction.coveredMessages > msgIdx
         ? null
@@ -1253,18 +1265,6 @@ export default function App() {
         c.id === convId ? { ...c, messages: truncated, compaction: nextCompaction } : c
       )
     );
-
-    if (preparingModel.current) return;
-    setErrorBanner(null);
-    preparingModel.current = true;
-    try {
-      if (!(await prepareModel(effectiveModelKey))) return;
-    } catch (err: any) {
-      setErrorBanner(String(err));
-      return;
-    } finally {
-      preparingModel.current = false;
-    }
 
     setEditingMessageId(null);
     setEditingMessageText("");
@@ -2883,7 +2883,7 @@ export default function App() {
                       value={effectiveModelKey}
                       onChange={(k) => void changeConversationModel(k)}
                       onOpen={() => void refreshModels()}
-                      disabled={isStreaming}
+                      disabled={isStreaming || !!modelNotice || !!loadChoice}
                       needsTools={activeMode !== "chat"}
                     />
                     {activeConversation && activeConversation.messages.length > 0 && (
