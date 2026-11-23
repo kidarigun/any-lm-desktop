@@ -1,0 +1,32 @@
+[
+  {
+    "id": "knowledge-fact",
+    "note": "지식 폴더(프로젝트 폴더 밖)에만 있는 사실을 묻고 답에 그 사실과 출처 경로가 나오는지 본다",
+    "mode": "project",
+    "knowledgeFiles": {
+      "제품/출시계획.md": "# 2027년 상반기 출시 계획\n\n## 하늘별 정수기\n- 제품 코드: QX-4417\n- 출시일: 2027년 2월 9일 (화)\n- 담당: 생활가전 2팀 윤서하 책임\n\n## 달무리 공기청정기\n- 제품 코드: QX-5120\n- 출시일: 2027년 4월 22일\n",
+      "회의록-11월.txt": "11월 정기 회의록\n- 안건 1: 연말 재고 정리 일정 확정 (12월 15일까지)\n- 다음 회의: 12월 첫째 주 월요일\n",
+      "notes-en.md": "# Supplier notes\nThe filter cartridges for product QX-4417 are supplied by Mirae Filtration.\n"
+    },
+    "turns": [
+      "하늘별 정수기(QX-4417)는 언제 출시돼? 담당자도 알려 줘."
+    ],
+    "checks": [
+      {
+        "kind": "answerContains",
+        "text": "2월 9일"
+      },
+      {
+        "kind": "answerContains",
+        "text": "출시계획.md"
+      },
+      {
+        "kind": "toolNotCalled",
+        "text": "write_file"
+      },
+      {
+        "kind": "finished"
+      }
+    ]
+  }
+]

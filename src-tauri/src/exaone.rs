@@ -363,13 +363,42 @@ pub fn build_tools_schema() -> Value {
     ])
 }
 
+/// `search_knowledge` 도구 정의(프로젝트에 지식 폴더가 있을 때만 준다)
+fn search_knowledge_schema() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": "search_knowledge",
+            "description": "이 프로젝트의 지식 폴더(사용자가 연결한 참고 자료)에서 질문과 관련 있는 부분을 찾습니다. 결과에는 조각 글과 출처 경로가 나옵니다. 승인 없이 바로 실행됩니다. 찾은 내용을 쓰면 답에 출처 경로를 밝히세요.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "찾을 내용 (핵심 낱말, 제품명, 번호, 사람 이름 등)"
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "돌려받을 조각 수 (기본 5, 최대 10)"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    })
+}
+
 /// 이번 요청에 줄 도구 목록. 프로젝트 도구와 Skill 도구 중 쓸 것이 없으면 None.
-pub fn tools_for(project: bool, skills: bool, mcp_tools: &[mcp::ToolSpec]) -> Option<Value> {
+/// `knowledge`: 프로젝트에 지식 폴더가 있으면 `search_knowledge`를 더한다(프로젝트 모드에서만).
+pub fn tools_for(project: bool, knowledge: bool, skills: bool, mcp_tools: &[mcp::ToolSpec]) -> Option<Value> {
     let mut tools: Vec<Value> = if project {
         build_tools_schema().as_array().cloned().unwrap_or_default()
     } else {
         Vec::new()
     };
+    if project && knowledge {
+        tools.push(search_knowledge_schema());
+    }
     if skills {
         tools.extend(skills::tools_schema());
     }
@@ -801,6 +830,12 @@ fn build_system_prompt(
     if let Some(p) = project {
         prompt.push_str(mode_section(mode));
         prompt.push_str(&crate::memory::memory_prompt_section(&p.memory, context_length));
+        if !p.knowledge_folders.is_empty() {
+            prompt.push_str("
+
+[지식 폴더]
+이 프로젝트에는 사용자가 연결한 지식 폴더(참고 자료)가 있습니다. 아래 [참고 자료]로 답할 수 있으면 search_knowledge를 부르지 말고 바로 답하세요. 필요한 자료가 [참고 자료]에 없거나 모자랄 때만 search_knowledge 도구로 찾아보세요. 지식 폴더의 내용을 쓰면 답에 출처 경로를 밝히세요. 지식 폴더의 파일은 read_file로 읽지 말고 search_knowledge로 찾으세요.");
+        }
         prompt.push_str(&project_files_section(Path::new(&p.root_path)));
     }
     if !mcp_tools.is_empty() {
@@ -905,6 +940,8 @@ pub struct TurnRequest<'a> {
     pub mode: &'a str,
     /// 답변을 받는 동안 지금까지의 내용을 넘겨받아 저장하는 함수. 앱이 꺼져도 받은 데까지는 남는다.
     pub checkpoint: Option<&'a (dyn Fn(&ChatMessage) + Send + Sync)>,
+    /// 턴 시작 때 지식 폴더에서 찾은 `[참고 자료]` 절(`knowledge::context_for_turn`). 시스템 프롬프트 뒤에 붙는다. 없으면 빈 문자열.
+    pub knowledge: &'a str,
 }
 
 /// 답변을 받는 동안 중간 저장을 하는 간격
@@ -1689,9 +1726,12 @@ pub async fn run_exaone_turn<R: Runtime>(
         Some(m) => m.tool_specs().await,
         None => Vec::new(),
     };
-    let tools = tools_for(req.project.is_some(), !available_skills.is_empty(), &mcp_tools);
+    let has_knowledge = req.project.is_some_and(|p| !p.knowledge_folders.is_empty());
+    let tools = tools_for(req.project.is_some(), has_knowledge, !available_skills.is_empty(), &mcp_tools);
     let tools_enabled = tools.is_some();
-    let sys_prompt = build_system_prompt(req.project, req.mode, &available_skills, &mcp_tools, model_name_for_prompt(req.model_display_name, req.model_key), req.context_length);
+    let mut sys_prompt = build_system_prompt(req.project, req.mode, &available_skills, &mcp_tools, model_name_for_prompt(req.model_display_name, req.model_key), req.context_length);
+    // 지식 폴더 참고 자료는 시스템 내용의 일부로 보낸다(줄이기 기준·압축 계산에 함께 들어간다).
+    sys_prompt.push_str(req.knowledge);
     let tune = tuning();
     let tool_cap = crate::context_budget::tool_output_cap(req.context_length);
     // 이전 답변의 추론은 다음 요청에 다시 보내지 않는다(LM Studio는 추론을 이어받지 않는다).
@@ -2467,6 +2507,15 @@ async fn run_tool<R: Runtime>(
                 Err(err) => fail(err, None),
             }
         }
+        "search_knowledge" => {
+            let cap = TOOL_CAP.try_with(|c| *c).unwrap_or(MAX_TOOL_OUTPUT_CHARS);
+            let (status, output) = crate::knowledge::search_tool(app, project_id, args, cap).await;
+            (
+                tool_record(call_id, name, args_json.clone(), status, output, None, None),
+                None,
+                false,
+            )
+        }
         "remember" => {
             let (status, output) = remember_tool(app, project_id, str_arg(args, "text"));
             (
@@ -2946,7 +2995,7 @@ mod tests {
 
     #[test]
     fn skill_tools_are_offered_even_without_project() {
-        assert!(tools_for(false, false, &[]).is_none());
+        assert!(tools_for(false, false, false, &[]).is_none());
         let spec = mcp::ToolSpec {
             exposed: "mcp__fs__read".into(),
             server_id: "s".into(),
@@ -2956,15 +3005,15 @@ mod tests {
             schema: json!({"type": "object", "properties": {}}),
             auto_approve: false,
         };
-        let chat_with_mcp = tools_for(false, false, std::slice::from_ref(&spec)).unwrap();
+        let chat_with_mcp = tools_for(false, false, false, std::slice::from_ref(&spec)).unwrap();
         assert_eq!(chat_with_mcp[0]["function"]["name"], "mcp__fs__read");
         let names = |v: Value| -> Vec<String> {
             v.as_array().unwrap().iter().map(|t| t["function"]["name"].as_str().unwrap().to_string()).collect()
         };
-        assert_eq!(names(tools_for(false, true, &[]).unwrap()), vec!["load_skill", "read_skill_file"]);
-        let all = names(tools_for(true, true, &[]).unwrap());
+        assert_eq!(names(tools_for(false, false, true, &[]).unwrap()), vec!["load_skill", "read_skill_file"]);
+        let all = names(tools_for(true, false, true, &[]).unwrap());
         assert!(all.contains(&"run_python".to_string()) && all.contains(&"load_skill".to_string()));
-        assert!(!names(tools_for(true, false, &[]).unwrap()).contains(&"load_skill".to_string()));
+        assert!(!names(tools_for(true, false, false, &[]).unwrap()).contains(&"load_skill".to_string()));
     }
 
     /// 프론트엔드 문서 변환기를 흉내 내는 응답기를 붙인 모의 앱
@@ -3181,6 +3230,7 @@ mod tests {
             created_at: String::new(),
             auto_approve: Vec::new(),
             memory: Vec::new(),
+            knowledge_folders: Vec::new(),
         }
     }
 
@@ -3205,8 +3255,8 @@ mod tests {
         let names = |v: Value| -> Vec<String> {
             v.as_array().unwrap().iter().map(|t| t["function"]["name"].as_str().unwrap().to_string()).collect()
         };
-        assert!(names(tools_for(true, false, &[]).unwrap()).contains(&"remember".to_string()));
-        assert!(tools_for(false, false, &[]).is_none());
+        assert!(names(tools_for(true, false, false, &[]).unwrap()).contains(&"remember".to_string()));
+        assert!(tools_for(false, false, false, &[]).is_none());
     }
 
     #[tokio::test]
@@ -3232,6 +3282,90 @@ mod tests {
         assert_eq!(db.projects[0].memory[0].source, "model");
         // 파일에도 저장됐다
         assert!(state.store.load().projects[0].memory.len() == 1);
+    }
+
+    #[test]
+    fn search_knowledge_is_listed_only_with_knowledge_folders() {
+        let names = |v: Value| -> Vec<String> {
+            v.as_array().unwrap().iter().map(|t| t["function"]["name"].as_str().unwrap().to_string()).collect()
+        };
+        assert!(!names(tools_for(true, false, false, &[]).unwrap()).contains(&"search_knowledge".to_string()));
+        assert!(names(tools_for(true, true, false, &[]).unwrap()).contains(&"search_knowledge".to_string()));
+        assert!(tools_for(false, true, false, &[]).is_none(), "일반 채팅에는 도구가 없다");
+        // 프롬프트 안내도 지식 폴더가 있을 때만
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = test_project(dir.path());
+        assert!(!build_system_prompt(Some(&p), "project", &[], &[], "m", 32768).contains("search_knowledge"));
+        p.knowledge_folders.push(dir.path().to_string_lossy().to_string());
+        assert!(build_system_prompt(Some(&p), "project", &[], &[], "m", 32768).contains("search_knowledge"));
+    }
+
+    #[tokio::test]
+    async fn search_knowledge_runs_without_approval_and_never_writes_into_the_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let kb = dir.path().join("kb");
+        std::fs::create_dir_all(&kb).unwrap();
+        std::fs::write(kb.join("launch.md"), "# 출시 계획\n\n신제품 ZK-7741의 출시일은 2027년 3월 14일이다.").unwrap();
+        std::fs::write(kb.join("other.txt"), "회의는 매주 월요일에 열린다.").unwrap();
+        let folder = kb.to_string_lossy().to_string();
+        let app = tauri::test::mock_app();
+        let store = crate::store::StoreManager::new(&dir.path().join("data"));
+        let mut db = store.load();
+        db.projects[0].id = "proj-k".into();
+        db.projects[0].knowledge_folders = vec![folder.clone()];
+        let project = db.projects[0].clone();
+        app.manage(crate::AppState { store, db: std::sync::Mutex::new(db), runs: Default::default() });
+        app.manage(crate::knowledge::KnowledgeManager::new(dir.path().join("data").join("knowledge")));
+        assert!(crate::knowledge::refresh_project(app.handle(), "proj-k", vec![folder.clone()], crate::knowledge::RefreshMode::Full).await);
+        assert!(dir.path().join("data").join("knowledge").join("proj-k.json").is_file(), "색인은 앱 데이터 폴더에");
+
+        let args = json!({"query": "ZK-7741 출시일", "top_k": 3});
+        let (r, snap, needs) = TOOL_CAP.scope(4_000, execute_or_queue_tool(app.handle(), dir.path(), "proj-k", "c1", "search_knowledge", &args)).await;
+        assert!(!needs && snap.is_none());
+        assert_eq!(r.status, "completed", "{}", r.output);
+        assert!(r.output.starts_with("[지식 폴더 검색: \"ZK-7741 출시일\""), "{}", r.output);
+        assert!(r.output.contains(&format!("### 출처: {}", kb.join("launch.md").to_string_lossy())), "{}", r.output);
+        assert!(r.output.contains("2027년 3월 14일"));
+
+        let (r, _, _) = TOOL_CAP.scope(4_000, execute_or_queue_tool(app.handle(), dir.path(), "proj-k", "c2", "search_knowledge", &json!({"query": " "}))).await;
+        assert_eq!(r.status, "error");
+
+        // 턴 시작 자동 참고
+        let sec = crate::knowledge::context_for_turn(app.handle(), Some(&project), "ZK-7741은 언제 출시돼?", 32768).await;
+        assert!(sec.starts_with("\n\n[참고 자료]") && sec.contains("launch.md") && sec.contains("2027년 3월 14일"), "{sec}");
+        assert_eq!(crate::knowledge::context_for_turn(app.handle(), None, "ZK-7741", 32768).await, "");
+        assert_eq!(crate::knowledge::context_for_turn(app.handle(), Some(&project), "전혀없는낱말", 32768).await, "");
+
+        // 지식 폴더에는 아무것도 쓰지 않았다
+        let mut names: Vec<String> = std::fs::read_dir(&kb).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+        names.sort();
+        assert_eq!(names, vec!["launch.md", "other.txt"]);
+    }
+
+    #[tokio::test]
+    async fn knowledge_section_is_sent_as_part_of_the_system_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, bodies) = mock_server(vec![vec![sse(json!({"choices":[{"delta":{"content":"답"}}]})), sse_done()]], 0).await;
+        let app = tauri::test::mock_app();
+        let settings = test_settings(url);
+        let mut project = test_project(dir.path());
+        project.knowledge_folders.push(dir.path().to_string_lossy().to_string());
+        let history = vec![msg("user", "질문")];
+        let section = "\n\n[참고 자료]\n안내\n\n### 출처: C:/kb/a.md\n조각 글";
+        run_exaone_turn(
+            app.handle(),
+            TurnRequest { settings: &settings, model_key: "m", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "project", checkpoint: None, knowledge: section },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+        let b = bodies.lock().unwrap();
+        let msgs = b[0]["messages"].as_array().unwrap();
+        let sys = msgs[0]["content"].as_str().unwrap();
+        assert_eq!(msgs[0]["role"], "system");
+        assert!(sys.ends_with(section), "시스템 프롬프트 뒤에 붙는다");
+        let tools: Vec<&str> = b[0]["tools"].as_array().unwrap().iter().map(|t| t["function"]["name"].as_str().unwrap()).collect();
+        assert!(tools.contains(&"search_knowledge"));
     }
 
     #[tokio::test]
@@ -3275,6 +3409,7 @@ mod tests {
                 continue_from: None,
                 mode: "",
                 checkpoint: None,
+                knowledge: "",
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -3362,6 +3497,7 @@ mod tests {
                 continue_from: None,
                 mode: "",
                 checkpoint: None,
+                knowledge: "",
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -3426,6 +3562,7 @@ mod tests {
                 continue_from: None,
                 mode: "",
                 checkpoint: None,
+                knowledge: "",
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -3450,6 +3587,7 @@ mod tests {
                 continue_from: Some(paused.clone()),
                 mode: "",
                 checkpoint: None,
+                knowledge: "",
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -3498,6 +3636,7 @@ mod tests {
                 continue_from: None,
                 mode: "",
                 checkpoint: None,
+                knowledge: "",
             },
             flag,
         )
@@ -3681,7 +3820,7 @@ mod tests {
         let history = vec![msg("user", "a.txt 읽어 줘")];
         let (out, _) = run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
+            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "" },
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -3710,7 +3849,7 @@ mod tests {
         let opts = vec!["off".to_string(), "on".to_string()];
         settings.model_prefs.insert("qwen3.5-9b".into(), crate::store::ModelPref { context_length: None, reasoning: Some("off".into()) });
         for o in [&opts[..], &[][..]] {
-            let req = TurnRequest { settings: &settings, model_key: "qwen3.5-9b", model_display_name: "", reasoning_options: o, context_length: 32768, project: None, conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None };
+            let req = TurnRequest { settings: &settings, model_key: "qwen3.5-9b", model_display_name: "", reasoning_options: o, context_length: 32768, project: None, conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "" };
             run_exaone_turn(app.handle(), req, Arc::new(AtomicBool::new(false))).await.unwrap();
         }
         let b = bodies.lock().unwrap();
@@ -3891,6 +4030,7 @@ content-length: {}
                 continue_from: None,
                 mode: "project",
                 checkpoint: Some(&checkpoint),
+                knowledge: "",
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -3925,7 +4065,7 @@ content-length: {}
             async move {
                 run_exaone_turn(
                     app.handle(),
-                    TurnRequest { settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history, compaction: None, continue_from: None, mode: "", checkpoint: None },
+                    TurnRequest { settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "" },
                     Arc::new(AtomicBool::new(false)),
                 )
                 .await
@@ -4000,7 +4140,7 @@ content-length: {}
         let settings = test_settings(url);
         run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: None, conversation_id: "conv-r", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
+            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: None, conversation_id: "conv-r", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "" },
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -4158,7 +4298,7 @@ content-length: {}
         let history = vec![msg("user", "a.txt 써줘")];
         let (out, _) = run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c-eof", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
+            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c-eof", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "" },
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -4188,7 +4328,7 @@ content-length: {}
         let history = vec![msg("user", "긴 문서 써줘")];
         let (out, _) = run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c-trunc", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
+            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c-trunc", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "" },
             Arc::new(AtomicBool::new(false)),
         )
         .await

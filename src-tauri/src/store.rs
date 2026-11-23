@@ -59,6 +59,9 @@ pub struct Project {
     /// 프로젝트 메모리: 모델(remember 도구)과 사용자가 함께 쓰는 짧은 사실 목록. 오래된 것이 앞.
     #[serde(default)]
     pub memory: Vec<MemoryItem>,
+    /// 지식 폴더(절대 경로). 앱은 읽기만 하고, 색인은 앱 데이터 폴더 `knowledge/<id>.json`에 둔다.
+    #[serde(default)]
+    pub knowledge_folders: Vec<String>,
 }
 
 /// 프로젝트 메모리 항목 하나
@@ -392,6 +395,7 @@ impl StoreManager {
             created_at: chrono::Local::now().to_rfc3339(),
             auto_approve: Vec::new(),
             memory: Vec::new(),
+            knowledge_folders: Vec::new(),
         };
 
         let db = AppDatabase {

@@ -23,7 +23,7 @@
 
 use crate::exaone::{self, RoundTrace, TurnRequest, Tuning};
 use crate::store::{AppSettings, ChatMessage, Project};
-use crate::{doc_bridge, lmstudio, run_approved_tool, runtime, skills};
+use crate::{doc_bridge, knowledge, lmstudio, run_approved_tool, runtime, skills};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -60,6 +60,10 @@ struct Scenario {
     files: BTreeMap<String, String>,
     /// 프로젝트 Skill (이름 → SKILL.md 내용)
     skills: BTreeMap<String, String>,
+    /// 지식 폴더로 쓸 파일 (상대 경로 → 내용). 프로젝트 폴더 밖 `work/<id>-kb`에 만든다.
+    knowledge_files: BTreeMap<String, String>,
+    /// 이미 있는 지식 폴더(절대 경로). 하니스는 읽기만 한다.
+    knowledge_folders: Vec<String>,
     /// 사용자가 차례로 보내는 메시지
     turns: Vec<String>,
     /// 승인을 요청받으면 허락할 도구 이름 (그 밖에는 거부)
@@ -314,6 +318,11 @@ async fn live() {
     skills::set_user_dir(out_dir.join("user-skills"));
 
     let app = mock_app_with_converter();
+    {
+        use tauri::Manager;
+        // 지식 폴더 색인(앱 상태가 없어 폴더 목록은 시나리오에서 받는다). 문서 변환은 위의 흉내 변환기.
+        app.manage(knowledge::KnowledgeManager::new(out_dir.join("knowledge")));
+    }
     exaone::trace_start();
     let mut stop_reason: Option<String> = None;
 
@@ -340,6 +349,19 @@ async fn live() {
             std::fs::create_dir_all(&p).unwrap();
             std::fs::write(p.join("SKILL.md"), md).unwrap();
         }
+        let mut kb_folders = sc.knowledge_folders.clone();
+        if !sc.knowledge_files.is_empty() {
+            let kb = out_dir.join("work").join(format!("{}-kb", sc.id));
+            if kb.exists() {
+                std::fs::remove_dir_all(&kb).unwrap();
+            }
+            for (rel, content) in &sc.knowledge_files {
+                let p = kb.join(rel);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(p, content).unwrap();
+            }
+            kb_folders.push(kb.to_string_lossy().trim_start_matches(r"\\?\").to_string());
+        }
         let project = (sc.mode == "project").then(|| Project {
             id: format!("harness-{}", sc.id),
             name: format!("시험 프로젝트 {}", sc.id),
@@ -349,6 +371,7 @@ async fn live() {
             created_at: chrono::Local::now().to_rfc3339(),
             auto_approve: Vec::new(),
             memory: Vec::new(),
+            knowledge_folders: kb_folders.clone(),
         });
         let root = project.as_ref().map(|p| PathBuf::from(&p.root_path)).unwrap_or_else(|| work.clone());
 
@@ -382,6 +405,12 @@ async fn live() {
                 wall_ms: 0,
             };
             let mut continue_from: Option<ChatMessage> = None;
+            // 앱의 턴 시작과 같다: 빠른 갱신 뒤 이번 메시지로 참고 자료를 찾는다.
+            let knowledge_section =
+                knowledge::context_for_turn(app.handle(), project.as_ref(), prompt, config.context_length).await;
+            if !knowledge_section.is_empty() {
+                println!("  · 참고 자료 {}자 ({}조각)", knowledge_section.chars().count(), knowledge_section.matches("### 출처: ").count());
+            }
 
             // 승인 대기로 멈추면 승인/거부를 처리하고 같은 메시지를 이어 간다 (앱의 승인 흐름과 같다).
             for _ in 0..12 {
@@ -400,6 +429,7 @@ async fn live() {
                         continue_from: continue_from.take(),
                         mode: &sc.mode,
                         checkpoint: None,
+                        knowledge: &knowledge_section,
                     },
                     Arc::new(AtomicBool::new(false)),
                 )

@@ -5,6 +5,7 @@ pub mod exaone;
 pub mod fs_ops;
 pub mod html_preview;
 pub mod lmstudio;
+pub mod knowledge;
 pub mod memory;
 pub mod mcp;
 pub mod mcp_oauth;
@@ -473,6 +474,7 @@ fn upsert_project(
         created_at: chrono::Local::now().to_rfc3339(),
         auto_approve: Vec::new(),
         memory: Vec::new(),
+        knowledge_folders: Vec::new(),
     };
     projects.push(proj.clone());
     proj
@@ -517,7 +519,7 @@ fn delete_project_memory(state: State<'_, AppState>, project_id: String, memory_
 }
 
 #[tauri::command]
-fn delete_project(state: State<'_, AppState>, project_id: String) -> Result<(), String> {
+fn delete_project(app: AppHandle, state: State<'_, AppState>, project_id: String) -> Result<(), String> {
     let mut db = state.db.lock().map_err(|e| e.to_string())?;
     if db.projects.len() <= 1 {
         return Err("최소 1개의 프로젝트는 유지되어야 합니다.".to_string());
@@ -525,7 +527,82 @@ fn delete_project(state: State<'_, AppState>, project_id: String) -> Result<(), 
     db.projects.retain(|p| p.id != project_id);
     db.conversations.retain(|c| c.project_id != project_id);
     state.store.save(&db)?;
+    // 앱 데이터 폴더의 색인만 지운다(지식 폴더 자체는 건드리지 않는다).
+    if let Some(k) = app.try_state::<knowledge::KnowledgeManager>() {
+        k.forget(&project_id);
+    }
     Ok(())
+}
+
+/// 지식 폴더 목록을 바꾸고 저장한 뒤 화면에 알린다.
+fn update_knowledge_folders(
+    app: &AppHandle,
+    state: &AppState,
+    project_id: &str,
+    change: impl FnOnce(&mut Vec<String>) -> Result<(), String>,
+) -> Result<Project, String> {
+    let updated = {
+        let mut db = state.db.lock().map_err(|e| e.to_string())?;
+        let proj = memory::project_memory_mut(&mut db.projects, project_id)?;
+        change(&mut proj.knowledge_folders)?;
+        let updated = proj.clone();
+        state.store.save(&db)?;
+        updated
+    };
+    let _ = app.emit(exaone::PROJECT_UPDATED_EVENT, &updated);
+    Ok(updated)
+}
+
+/// 색인을 뒤에서 돌린다(화면이 멈추지 않게). 진행·결과는 `anylm-knowledge-status` 이벤트로 알린다.
+fn spawn_knowledge_refresh(app: &AppHandle, project: &Project, mode: knowledge::RefreshMode) {
+    let app = app.clone();
+    let id = project.id.clone();
+    let folders = project.knowledge_folders.clone();
+    tauri::async_runtime::spawn(async move {
+        knowledge::refresh_project(&app, &id, folders, mode).await;
+    });
+}
+
+/// 지식 폴더를 더하고 색인을 시작한다. 폴더는 프로젝트 폴더 밖이어도 되고, 앱은 읽기만 한다.
+#[tauri::command]
+fn add_knowledge_folder(app: AppHandle, state: State<'_, AppState>, project_id: String, path: String) -> Result<Project, String> {
+    let updated = update_knowledge_folders(&app, &state, &project_id, |list| knowledge::add_folder(list, &path).map(|_| ()))?;
+    spawn_knowledge_refresh(&app, &updated, knowledge::RefreshMode::Full);
+    Ok(updated)
+}
+
+#[tauri::command]
+fn remove_knowledge_folder(app: AppHandle, state: State<'_, AppState>, project_id: String, path: String) -> Result<Project, String> {
+    let updated = update_knowledge_folders(&app, &state, &project_id, |list| knowledge::remove_folder(list, &path))?;
+    // 남은 폴더로 갱신해 빠진 폴더의 조각을 색인에서 지운다(바뀌지 않은 파일은 다시 읽지 않는다).
+    spawn_knowledge_refresh(&app, &updated, knowledge::RefreshMode::Full);
+    Ok(updated)
+}
+
+/// [다시 색인]: 모든 파일을 다시 추출한다.
+#[tauri::command]
+fn reindex_knowledge(app: AppHandle, state: State<'_, AppState>, project_id: String) -> Result<(), String> {
+    let project = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.projects.iter().find(|p| p.id == project_id).cloned().ok_or_else(|| "프로젝트를 찾을 수 없습니다.".to_string())?
+    };
+    if app.try_state::<knowledge::KnowledgeManager>().is_some_and(|k| k.is_indexing(&project_id)) {
+        return Err("이미 색인하는 중입니다. 끝난 뒤 다시 누르세요.".to_string());
+    }
+    spawn_knowledge_refresh(&app, &project, knowledge::RefreshMode::Rebuild);
+    Ok(())
+}
+
+#[tauri::command]
+async fn knowledge_status(app: AppHandle, state: State<'_, AppState>, project_id: String) -> Result<knowledge::KnowledgeStatus, String> {
+    let folders = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db.projects.iter().find(|p| p.id == project_id).map(|p| p.knowledge_folders.clone()).unwrap_or_default()
+    };
+    let mgr = app
+        .try_state::<knowledge::KnowledgeManager>()
+        .ok_or_else(|| "지식 폴더 색인을 사용할 수 없습니다.".to_string())?;
+    Ok(mgr.status(&project_id, &folders).await)
 }
 
 #[tauri::command]
@@ -784,10 +861,24 @@ fn created_after(a: &str, b: &str) -> bool {
 /// 압축이 덮은 구간 안에 있으면, 그 토큰 수는 압축 전 대화를 잰 값이라 쓰지 않는다. 그때는 실제로
 /// 보낼 부분(요약 + 덮이지 않은 메시지 + 새 글자)을 글자 수로 어림한다. 시각을 읽을 수 없으면
 /// 오래된 값으로 본다(어림으로 대신하므로 안전한 쪽).
+#[cfg(test)]
 fn should_auto_compact(
     settings: &AppSettings,
     conv: &Conversation,
     new_user_chars: usize,
+    context_length: u32,
+) -> bool {
+    should_auto_compact_with(settings, conv, new_user_chars, 0, context_length)
+}
+
+/// `should_auto_compact`에 이번 턴 시스템 내용에 더해지는 글자(지식 폴더 `[참고 자료]` 절)를 함께 본다.
+/// 마지막 답변의 `prompt_tokens`를 쓸 때는 그 요청에도 같은 예산의 참고 자료가 이미 들어 있었으므로 더하지 않고,
+/// 글자로 어림할 때만 더한다(어림은 시스템 프롬프트를 세지 않으므로).
+fn should_auto_compact_with(
+    settings: &AppSettings,
+    conv: &Conversation,
+    new_user_chars: usize,
+    extra_system_chars: usize,
     context_length: u32,
 ) -> bool {
     if !settings.auto_compact || compaction_job(conv, 2).is_none() {
@@ -806,9 +897,9 @@ fn should_auto_compact(
         (_, Some(c)) => {
             let active = &conv.messages[c.covered_messages.min(conv.messages.len())..];
             let active_chars = exaone::conversation_source_chars(Some(c), active);
-            context_budget::usage_ratio(None, active_chars + new_user_chars, context_length)
+            context_budget::usage_ratio(None, active_chars + new_user_chars + extra_system_chars, context_length)
         }
-        (_, None) => context_budget::usage_ratio(None, new_user_chars, context_length),
+        (_, None) => context_budget::usage_ratio(None, new_user_chars + extra_system_chars, context_length),
     };
     ratio >= context_budget::AUTO_COMPACT_RATIO
 }
@@ -853,8 +944,9 @@ fn auto_compaction_job(
     conv: &Conversation,
     new_user_chars: usize,
     context_length: u32,
+    extra_system_chars: usize,
 ) -> Option<CompactionJob> {
-    should_auto_compact(settings, conv, new_user_chars, context_length)
+    should_auto_compact_with(settings, conv, new_user_chars, extra_system_chars, context_length)
         .then(|| compaction_job(conv, 2))
         .flatten()
 }
@@ -937,6 +1029,8 @@ async fn send_chat_message(
     };
     let model_info = lmstudio::turn_model_info(&pre_settings, &pre_model_key).await;
     let context_length = context_budget::resolve_context(model_info.loaded_context);
+    // 지식 폴더: 빠른 갱신 뒤 이번 사용자 메시지(첨부 내용 제외)로 참고 자료를 찾는다. 자동 압축 판단에도 넣는다.
+    let knowledge = knowledge::context_for_turn(&app, attach_project.as_ref(), &user_content, context_length).await;
 
     let (settings, project, history_for_api, turn_mode, mut compaction, model_key, auto_job) = {
         let mut db = state.db.lock().map_err(|e| e.to_string())?;
@@ -950,7 +1044,13 @@ async fn send_chat_message(
         let project = conversation_project(&db, &db.conversations[conv_idx])?;
         let full_content = format!("{}{}", user_content, attachments_block);
         // 사용자 메시지를 넣기 전 대화로 자동 압축 여부를 정한다.
-        let auto_job = auto_compaction_job(&settings, &db.conversations[conv_idx], full_content.chars().count(), context_length);
+        let auto_job = auto_compaction_job(
+            &settings,
+            &db.conversations[conv_idx],
+            full_content.chars().count(),
+            context_length,
+            knowledge.chars().count(),
+        );
 
         let user_msg = ChatMessage {
             id: Uuid::new_v4().to_string(),
@@ -1015,6 +1115,7 @@ async fn send_chat_message(
             mode: &turn_mode,
             compaction: compaction.as_ref(),
             checkpoint: Some(&checkpoint),
+            knowledge: &knowledge,
         },
         cancel_flag,
     )
@@ -1116,6 +1217,7 @@ async fn edit_and_resend_message(
 
     let model_info = lmstudio::turn_model_info(&settings, &model_key).await;
     let context_length = context_budget::resolve_context(model_info.loaded_context);
+    let knowledge = knowledge::context_for_turn(&app, project.as_ref(), &new_content, context_length).await;
     let turn_res = exaone::run_exaone_turn(
         &app,
         TurnRequest {
@@ -1131,6 +1233,7 @@ async fn edit_and_resend_message(
             mode: &turn_mode,
             compaction: compaction.as_ref(),
             checkpoint: Some(&checkpoint),
+            knowledge: &knowledge,
         },
         cancel_flag,
     )
@@ -1428,6 +1531,9 @@ async fn resolve_tool_approval(
     let checkpoint = |m: &ChatMessage| save_checkpoint(&state, &conversation_id, m);
     let model_info = lmstudio::turn_model_info(&settings, &model_key).await;
     let context_length = context_budget::resolve_context(model_info.loaded_context);
+    // 승인 뒤 이어가기도 같은 질문(마지막 사용자 메시지)으로 참고 자료를 다시 넣는다.
+    let last_user = history.iter().rev().find(|m| m.role == "user").map(|m| m.content.clone()).unwrap_or_default();
+    let knowledge = knowledge::context_for_turn(&app, project.as_ref(), &last_user, context_length).await;
     let (updated_msg, new_snapshots) = exaone::run_exaone_turn(
         &app,
         TurnRequest {
@@ -1443,6 +1549,7 @@ async fn resolve_tool_approval(
             mode: &turn_mode,
             compaction: compaction.as_ref(),
             checkpoint: Some(&checkpoint),
+            knowledge: &knowledge,
         },
         run.cancel_flag(),
     )
@@ -2353,6 +2460,7 @@ pub fn run() {
                 runs: runs::RunRegistry::default(),
             });
             app.manage(doc_bridge::DocBridge::default());
+            app.manage(knowledge::KnowledgeManager::new(app_data_dir.join("knowledge")));
             app.manage(PathGrants::default());
             app.manage(html_preview::PreviewServer::start().map_err(|err| format!("HTML 미리보기 서버를 시작할 수 없습니다: {err}")));
             Ok(())
@@ -2369,6 +2477,10 @@ pub fn run() {
             add_project_memory,
             update_project_memory,
             delete_project_memory,
+            add_knowledge_folder,
+            remove_knowledge_folder,
+            reindex_knowledge,
+            knowledge_status,
             lm_server_running,
             lm_start_server,
             open_external_url,
@@ -2463,7 +2575,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn updating_a_project_keeps_its_memory_and_auto_approve() {
+    fn updating_a_project_keeps_its_memory_auto_approve_and_knowledge_folders() {
         let mut projects = vec![Project {
             id: "p1".into(),
             name: "옛 이름".into(),
@@ -2478,6 +2590,7 @@ mod tests {
                 updated_at: "t".into(),
                 source: "model".into(),
             }],
+            knowledge_folders: vec![r"D:\자료".into()],
         }];
         let updated = upsert_project(&mut projects, Some("p1".into()), "새 이름".into(), "C:/b".into(), "새 지침".into());
         assert_eq!(updated.name, "새 이름");
@@ -2485,9 +2598,11 @@ mod tests {
         assert_eq!(updated.memory.len(), 1);
         assert_eq!(projects[0].memory[0].text, "기억");
         assert_eq!(projects[0].auto_approve, vec!["run_python".to_string()]);
+        assert_eq!(updated.knowledge_folders, vec![r"D:\자료".to_string()], "지식 폴더도 그대로");
         // 새로 만들면 메모리는 비어 있다
         let created = upsert_project(&mut projects, None, "n".into(), "C:/c".into(), "".into());
         assert!(created.memory.is_empty());
+        assert!(created.knowledge_folders.is_empty());
         assert_eq!(projects.len(), 2);
     }
 
@@ -2558,7 +2673,7 @@ mod tests {
         stamp(&mut c, 0, "2026-11-23T10:00:00+09:00");
         let c = with_compaction(c, 2, "2026-11-23T10:05:00+09:00", "고친 요약");
         assert!(!should_auto_compact(&AppSettings::default(), &c, 0, 32768));
-        assert!(auto_compaction_job(&AppSettings::default(), &c, 0, 32768).is_none());
+        assert!(auto_compaction_job(&AppSettings::default(), &c, 0, 32768, 0).is_none());
 
         // 대화가 더 이어져 덮을 새 구간이 있어도, 마지막 답변이 압축 전(또는 요약 카드를 고치기 전)에
         // 잰 값이면 쓰지 않는다: u0 a1 u2 a3 u4 a5(전부 압축 전) → 실제로 보낼 부분은 작다.
@@ -2580,6 +2695,22 @@ mod tests {
     }
 
     #[test]
+    fn knowledge_section_counts_toward_auto_compaction_only_when_estimating() {
+        let s = AppSettings::default();
+        // 압축 전에 잰 토큰은 쓰지 않고 글자로 어림하는 경우: 보낼 대화 약 30,000자(61%) + 참고 자료 7,000자 → 75%
+        let mut c = conv_with(6, 30_000);
+        stamp(&mut c, 0, "2026-11-23T10:00:00+09:00");
+        c.messages[3].content = "가".repeat(30_000);
+        let c = with_compaction(c, 2, "2026-11-23T10:05:00+09:00", "요약");
+        assert!(!should_auto_compact_with(&s, &c, 0, 0, 32768));
+        assert!(should_auto_compact_with(&s, &c, 0, 7_000, 32768));
+        assert!(auto_compaction_job(&s, &c, 0, 32768, 7_000).is_some());
+        // 마지막 답변의 prompt_tokens를 믿을 수 있으면(그 요청에도 참고 자료가 들어 있었다) 더하지 않는다.
+        let fresh = conv_with(10, 20_000);
+        assert_eq!(should_auto_compact_with(&s, &fresh, 0, 7_000, 32768), should_auto_compact(&s, &fresh, 0, 32768));
+    }
+
+    #[test]
     fn auto_compact_skips_when_cut_is_not_past_previous_compaction() {
         // 새 답변이 압축 뒤에 잰 높은 값이어도, 덮을 지점(4)이 이전 지점(4) 뒤가 아니면 다시 요약하지 않는다.
         let mut c = conv_with(6, 30_000);
@@ -2598,7 +2729,7 @@ mod tests {
         stamp(&mut c, 0, "2026-11-23T10:00:00+09:00");
         stamp(&mut c, 2, "2026-11-23T10:10:00+09:00");
         let c = with_compaction(c, 2, "2026-11-23T10:05:00+09:00", "이전 누적 요약 본문");
-        let job = auto_compaction_job(&AppSettings::default(), &c, 0, 32768).expect("70%를 넘었으니 압축한다");
+        let job = auto_compaction_job(&AppSettings::default(), &c, 0, 32768, 0).expect("70%를 넘었으니 압축한다");
         assert_eq!(job.covered, 4);
         assert_eq!(job.prev.as_ref().map(|p| p.summary.as_str()), Some("이전 누적 요약 본문"));
         let slice: Vec<&str> = job.slice.iter().map(|m| m.content.as_str()).collect();
@@ -2608,7 +2739,7 @@ mod tests {
         assert!(summary.contains("이전 누적 요약 본문"), "{}", summary);
         assert_eq!(exaone::conversation_source_chars(job.prev.as_ref(), &job.slice), "이전 누적 요약 본문".chars().count() + 4);
         // 70% 아래면 압축하지 않는다.
-        assert!(auto_compaction_job(&AppSettings::default(), &conv_with(6, 20_000), 0, 32768).is_none());
+        assert!(auto_compaction_job(&AppSettings::default(), &conv_with(6, 20_000), 0, 32768, 0).is_none());
     }
 
     #[test]
