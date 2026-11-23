@@ -719,27 +719,49 @@ fn compaction_cut(conv: &Conversation, keep_recent: usize) -> Option<usize> {
     (covered > 0).then_some(covered)
 }
 
-/// 보내기 직전에 자동 요약 압축을 해야 하는지: 설정 켜짐 && 마지막 답변의 입력 토큰 수와
-/// 새 글자 추정이 로드된 컨텍스트의 70% 이상 && 덮을 이전 대화가 있음.
+/// `a`가 `b`보다 나중 시각인지(RFC 3339). 어느 쪽이든 읽을 수 없으면 `false`.
+fn created_after(a: &str, b: &str) -> bool {
+    match (chrono::DateTime::parse_from_rfc3339(a), chrono::DateTime::parse_from_rfc3339(b)) {
+        (Ok(a), Ok(b)) => a > b,
+        _ => false,
+    }
+}
+
+/// 보내기 직전에 자동 요약 압축을 해야 하는지: 설정 켜짐 && 덮을 새 대화가 있음(이전 압축 지점 뒤)
+/// && 다음 요청 크기가 로드된 컨텍스트의 70% 이상.
+///
+/// 다음 요청 크기는 마지막 답변의 `prompt_tokens` + 새 글자 추정이다. 단, 압축이 있고 그 답변이
+/// 압축보다 먼저 만들어졌거나(`created_at` < 압축의 `created_at`, 요약 카드를 고치면 압축 시각도 바뀐다)
+/// 압축이 덮은 구간 안에 있으면, 그 토큰 수는 압축 전 대화를 잰 값이라 쓰지 않는다. 그때는 실제로
+/// 보낼 부분(요약 + 덮이지 않은 메시지 + 새 글자)을 글자 수로 어림한다. 시각을 읽을 수 없으면
+/// 오래된 값으로 본다(어림으로 대신하므로 안전한 쪽).
 fn should_auto_compact(
     settings: &AppSettings,
     conv: &Conversation,
     new_user_chars: usize,
     context_length: u32,
 ) -> bool {
-    if !settings.auto_compact {
+    if !settings.auto_compact || compaction_job(conv, 2).is_none() {
         return false;
     }
-    let last_prompt = conv
-        .messages
-        .iter()
-        .rev()
-        .find(|m| m.role == "assistant")
-        .and_then(|m| m.stats.as_ref())
-        .map(|s| s.prompt_tokens);
-    context_budget::usage_ratio(last_prompt, new_user_chars, context_length)
-        >= context_budget::AUTO_COMPACT_RATIO
-        && compaction_cut(conv, 2).is_some()
+    let comp = conv.compaction.as_ref().filter(|c| c.covered_messages > 0);
+    let last = conv.messages.iter().enumerate().rev().find(|(_, m)| m.role == "assistant");
+    let fresh = |i: usize, m: &ChatMessage| match comp {
+        None => true,
+        Some(c) => i >= c.covered_messages && created_after(&m.created_at, &c.created_at),
+    };
+    let ratio = match (last, comp) {
+        (Some((i, m)), _) if fresh(i, m) => {
+            context_budget::usage_ratio(m.stats.as_ref().map(|s| s.prompt_tokens), new_user_chars, context_length)
+        }
+        (_, Some(c)) => {
+            let active = &conv.messages[c.covered_messages.min(conv.messages.len())..];
+            let active_chars = exaone::conversation_source_chars(Some(c), active);
+            context_budget::usage_ratio(None, active_chars + new_user_chars, context_length)
+        }
+        (_, None) => context_budget::usage_ratio(None, new_user_chars, context_length),
+    };
+    ratio >= context_budget::AUTO_COMPACT_RATIO
 }
 
 const AUTO_COMPACTION_EVENT: &str = "anylm-auto-compaction";
@@ -763,15 +785,29 @@ struct CompactionJob {
     slice: Vec<ChatMessage>,
 }
 
+/// 이전 압축이 있으면 그 요약 + 새로 덮을 메시지(`prev.covered..cut`)로 이어 요약한다(수동 압축과 같은 규칙).
+/// 새 지점이 이전 지점보다 뒤가 아니면 `None`: 이미 요약된 대화를 처음부터 다시 요약해
+/// 사용자가 고친 요약이나 AI 요약을 버리지 않는다.
 fn compaction_job(conv: &Conversation, keep_recent: usize) -> Option<CompactionJob> {
     let covered = compaction_cut(conv, keep_recent)?;
-    let (prev, slice) = match conv.compaction.as_ref() {
-        Some(p) if p.covered_messages > 0 && p.covered_messages < covered => {
-            (Some(p.clone()), conv.messages[p.covered_messages..covered].to_vec())
-        }
-        _ => (None, conv.messages[..covered].to_vec()),
+    let (prev, slice) = match conv.compaction.as_ref().filter(|p| p.covered_messages > 0) {
+        Some(p) if covered <= p.covered_messages => return None,
+        Some(p) => (Some(p.clone()), conv.messages[p.covered_messages..covered].to_vec()),
+        None => (None, conv.messages[..covered].to_vec()),
     };
     Some(CompactionJob { covered, prev, slice })
+}
+
+/// 보내기 전 자동 압축 판단과 입력을 한 번에 만든다(`send_chat_message`가 쓴다).
+fn auto_compaction_job(
+    settings: &AppSettings,
+    conv: &Conversation,
+    new_user_chars: usize,
+    context_length: u32,
+) -> Option<CompactionJob> {
+    should_auto_compact(settings, conv, new_user_chars, context_length)
+        .then(|| compaction_job(conv, 2))
+        .flatten()
 }
 
 /// 자동 요약: AI 요약, 실패하면 로컬 요약. 결과를 대화에 저장하고 돌려준다.
@@ -865,11 +901,7 @@ async fn send_chat_message(
         let project = conversation_project(&db, &db.conversations[conv_idx])?;
         let full_content = format!("{}{}", user_content, attachments_block);
         // 사용자 메시지를 넣기 전 대화로 자동 압축 여부를 정한다.
-        let auto_job = if should_auto_compact(&settings, &db.conversations[conv_idx], full_content.chars().count(), context_length) {
-            compaction_job(&db.conversations[conv_idx], 2)
-        } else {
-            None
-        };
+        let auto_job = auto_compaction_job(&settings, &db.conversations[conv_idx], full_content.chars().count(), context_length);
 
         let user_msg = ChatMessage {
             id: Uuid::new_v4().to_string(),
@@ -2418,6 +2450,84 @@ mod tests {
     fn auto_compact_skips_when_nothing_to_cover() {
         assert!(!should_auto_compact(&AppSettings::default(), &conv_with(1, 30_000), 0, 32768));
         assert!(!should_auto_compact(&AppSettings::default(), &conv_with(2, 30_000), 0, 32768));
+    }
+
+    /// 대화 앞 `covered`개를 덮은 압축을 단다(압축 시각 `at`).
+    fn with_compaction(mut c: Conversation, covered: usize, at: &str, summary: &str) -> Conversation {
+        c.compaction = Some(store::ContextCompaction {
+            covered_messages: covered,
+            created_at: at.into(),
+            summary: summary.into(),
+            focus: None,
+            source_chars: None,
+        });
+        c
+    }
+
+    fn stamp(c: &mut Conversation, from: usize, at: &str) {
+        for m in &mut c.messages[from..] {
+            m.created_at = at.into();
+        }
+    }
+
+    #[test]
+    fn auto_compact_ignores_prompt_tokens_measured_before_the_compaction() {
+        // u0 a1 u2 a3(30000토큰, 압축 전 측정) + 압축(앞 2개, a3 뒤에 만듦). 수동 압축 직후의 모습.
+        let mut c = conv_with(4, 30_000);
+        stamp(&mut c, 0, "2026-11-23T10:00:00+09:00");
+        let c = with_compaction(c, 2, "2026-11-23T10:05:00+09:00", "고친 요약");
+        assert!(!should_auto_compact(&AppSettings::default(), &c, 0, 32768));
+        assert!(auto_compaction_job(&AppSettings::default(), &c, 0, 32768).is_none());
+
+        // 대화가 더 이어져 덮을 새 구간이 있어도, 마지막 답변이 압축 전(또는 요약 카드를 고치기 전)에
+        // 잰 값이면 쓰지 않는다: u0 a1 u2 a3 u4 a5(전부 압축 전) → 실제로 보낼 부분은 작다.
+        let mut c = conv_with(6, 30_000);
+        stamp(&mut c, 0, "2026-11-23T10:00:00+09:00");
+        let c = with_compaction(c, 2, "2026-11-23T10:05:00+09:00", "요약");
+        assert!(!should_auto_compact(&AppSettings::default(), &c, 0, 32768));
+
+        // 시각을 읽을 수 없는 오래된 기록도 같다(글자 어림으로 대신한다).
+        let c = with_compaction(conv_with(6, 30_000), 2, "", "요약");
+        assert!(!should_auto_compact(&AppSettings::default(), &c, 0, 32768));
+
+        // 단, 보낼 부분 자체가 크면(요약+남은 메시지 글자 어림) 압축한다: 40000자 / 1.5 ≈ 26667토큰 ≥ 70%.
+        let mut c = conv_with(6, 30_000);
+        stamp(&mut c, 0, "2026-11-23T10:00:00+09:00");
+        c.messages[3].content = "가".repeat(40_000);
+        let c = with_compaction(c, 2, "2026-11-23T10:05:00+09:00", "요약");
+        assert!(should_auto_compact(&AppSettings::default(), &c, 0, 32768));
+    }
+
+    #[test]
+    fn auto_compact_skips_when_cut_is_not_past_previous_compaction() {
+        // 새 답변이 압축 뒤에 잰 높은 값이어도, 덮을 지점(4)이 이전 지점(4) 뒤가 아니면 다시 요약하지 않는다.
+        let mut c = conv_with(6, 30_000);
+        stamp(&mut c, 0, "2026-11-23T10:00:00+09:00");
+        stamp(&mut c, 4, "2026-11-23T10:10:00+09:00");
+        let c = with_compaction(c, 4, "2026-11-23T10:05:00+09:00", "요약");
+        assert_eq!(compaction_cut(&c, 2), Some(4));
+        assert!(compaction_job(&c, 2).is_none());
+        assert!(!should_auto_compact(&AppSettings::default(), &c, 0, 32768));
+    }
+
+    #[test]
+    fn auto_path_with_previous_compaction_builds_on_previous_summary() {
+        // u0 a1 | 압축(앞 2개) | u2 a3 u4 a5 — a5는 압축 뒤에 받은 답변이고 25000토큰(76%).
+        let mut c = conv_with(6, 25_000);
+        stamp(&mut c, 0, "2026-11-23T10:00:00+09:00");
+        stamp(&mut c, 2, "2026-11-23T10:10:00+09:00");
+        let c = with_compaction(c, 2, "2026-11-23T10:05:00+09:00", "이전 누적 요약 본문");
+        let job = auto_compaction_job(&AppSettings::default(), &c, 0, 32768).expect("70%를 넘었으니 압축한다");
+        assert_eq!(job.covered, 4);
+        assert_eq!(job.prev.as_ref().map(|p| p.summary.as_str()), Some("이전 누적 요약 본문"));
+        let slice: Vec<&str> = job.slice.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(slice, vec!["m2", "m3"], "새로 덮는 메시지만 요약에 넣는다");
+        // 로컬 요약(실패 시 대체)도 이전 요약 위에 쌓인다. AI 요약도 같은 prev/slice를 받는다.
+        let summary = exaone::build_local_compaction_summary(job.prev.as_ref(), &job.slice, None);
+        assert!(summary.contains("이전 누적 요약 본문"), "{}", summary);
+        assert_eq!(exaone::conversation_source_chars(job.prev.as_ref(), &job.slice), "이전 누적 요약 본문".chars().count() + 4);
+        // 70% 아래면 압축하지 않는다.
+        assert!(auto_compaction_job(&AppSettings::default(), &conv_with(6, 20_000), 0, 32768).is_none());
     }
 
     #[test]
