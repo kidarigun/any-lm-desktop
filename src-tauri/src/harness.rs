@@ -1,25 +1,29 @@
 //! 실제 LM Studio 서버로 앱의 에이전트 루프를 그대로 돌려 보는 테스트 하니스.
 //!
 //! 앱과 같은 코드(`run_exaone_turn`, 도구 실행, 승인 처리)를 쓰고, 화면 대신 시나리오 파일이 사용자를 맡는다.
-//! API 키는 앱처럼 Windows 자격 증명 관리자에서 읽으며 어디에도 출력하지 않는다.
+//! 앱 설정 파일이나 자격 증명 관리자는 읽지 않는다. 서버 주소와 모델은 환경 변수로만 받는다.
 //!
-//! 실행 (src-tauri 폴더에서):
+//! 실행 (PowerShell, 저장소 루트에서):
+//!   $env:ANYLM_MODEL = "qwen3.5-9b"
+//!   cd src-tauri
 //!   cargo test --lib harness::live -- --ignored --nocapture
 //!
 //! 환경 변수:
-//!   EXA_SCENARIOS   시나리오 JSON 파일 (기본: ../harness/scenarios.json)
-//!   EXA_OUT         결과 폴더 (기본: ../harness/runs/default)
-//!   EXA_ONLY        실행할 시나리오 id를 쉼표로 (없으면 전부)
-//!   EXA_MAX_CALLS   이번 실행에서 쓸 API 호출 수 상한 (기본 20)
-//!   EXA_DAY_RESERVE 하루 남은 호출 수가 이 값 아래로 내려가면 멈춘다 (기본 100)
-//!   EXA_PAUSE_SEC   시나리오 사이에 쉬는 시간 (기본 5초)
-//!   EXA_RERUN       1이면 이미 결과가 있는 시나리오도 다시 실행
+//!   ANYLM_MODEL      시험할 모델 key (필수)
+//!   ANYLM_SERVER     LM Studio 서버 주소 (기본: http://localhost:1234)
+//!   ANYLM_CONTEXT    모델이 로드된 컨텍스트 길이 (기본: 32768) — 줄이기 기준 계산에 쓴다
+//!   ANYLM_TOKEN      LM Studio API 토큰 (선택)
+//!   ANYLM_SCENARIOS  시나리오 JSON 파일 (기본: ../harness/scenarios.json)
+//!   ANYLM_OUT        결과 폴더 (기본: ../harness/runs/default)
+//!   ANYLM_ONLY       실행할 시나리오 id를 쉼표로 (없으면 전부)
+//!   ANYLM_PAUSE_SEC  시나리오 사이에 쉬는 시간 (기본 1초)
+//!   ANYLM_RERUN      1이면 이미 결과가 있는 시나리오도 다시 실행
 //!
-//! 이용약관상 부하 시험·같은 요청의 반복은 금지되어 있으므로, 한 번에 하나씩 천천히 실행한다.
+//! 이 하니스는 모델을 로드하거나 내리지 않는다. LM Studio에서 모델을 미리 로드해 둘 것.
 
 use crate::exaone::{self, RoundTrace, TurnRequest, Tuning};
 use crate::store::{AppSettings, ChatMessage, Project};
-use crate::{doc_bridge, run_approved_tool, runtime, secrets, skills};
+use crate::{doc_bridge, lmstudio, run_approved_tool, runtime, skills};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -80,6 +84,32 @@ fn env_or(name: &str, default: &str) -> String {
 
 fn env_num(name: &str, default: u64) -> u64 {
     std::env::var(name).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
+}
+
+/// 하니스 실행 설정. 앱 설정 대신 환경 변수에서 만든다.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HarnessConfig {
+    pub server_url: String,
+    pub model: String,
+    pub context_length: u32,
+    pub out_dir: PathBuf,
+}
+
+/// `get`으로 환경 변수를 읽어 설정을 만든다(테스트에서 실제 환경을 건드리지 않으려고 getter를 받는다).
+pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> Result<HarnessConfig, String> {
+    let val = |name: &str| get(name).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let model = val("ANYLM_MODEL")
+        .ok_or_else(|| "ANYLM_MODEL 환경 변수에 시험할 모델 key를 넣어 주세요. (예: qwen3.5-9b)".to_string())?;
+    let context_length = match val("ANYLM_CONTEXT") {
+        Some(v) => v.parse::<u32>().map_err(|_| format!("ANYLM_CONTEXT는 숫자여야 합니다: {}", v))?,
+        None => 32768,
+    };
+    Ok(HarnessConfig {
+        server_url: val("ANYLM_SERVER").unwrap_or_else(|| "http://localhost:1234".to_string()),
+        model,
+        context_length,
+        out_dir: PathBuf::from(val("ANYLM_OUT").unwrap_or_else(|| "../harness/runs/default".to_string())),
+    })
 }
 
 /// 화면의 문서 변환기 대신 쓰는 흉내: docx/xlsx/pptx를 Markdown 글 그대로 저장하고 읽는다.
@@ -233,21 +263,21 @@ fn usage_num(t: &RoundTrace, key: &str) -> u64 {
     t.usage.as_ref().and_then(|u| u.get(key)).and_then(Value::as_u64).unwrap_or(0)
 }
 
-/// 실행을 통째로 멈춰야 하는 오류인지 (키 문제, 한도 초과)
+/// 실행을 통째로 멈춰야 하는 오류인지 (토큰 문제)
 fn is_fatal(err: &str) -> bool {
-    err.contains("인증을 요구") || err.contains("계속 바쁩") || err.contains("(401") || err.contains("(403")
+    err.contains("인증을 요구") || err.contains("(401") || err.contains("(403")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "실제 LM Studio 서버를 호출한다"]
 async fn live() {
-    let scenarios_path = PathBuf::from(env_or("EXA_SCENARIOS", "../harness/scenarios.json"));
-    let out_dir = PathBuf::from(env_or("EXA_OUT", "../harness/runs/default"));
-    let max_calls = env_num("EXA_MAX_CALLS", 20) as usize;
-    let pause = Duration::from_secs(env_num("EXA_PAUSE_SEC", 5));
-    let rerun = env_or("EXA_RERUN", "0") == "1";
+    let config = config_from_env(|k| std::env::var(k).ok()).unwrap_or_else(|e| panic!("{}", e));
+    let scenarios_path = PathBuf::from(env_or("ANYLM_SCENARIOS", "../harness/scenarios.json"));
+    let out_dir = config.out_dir.clone();
+    let pause = Duration::from_secs(env_num("ANYLM_PAUSE_SEC", 1));
+    let rerun = env_or("ANYLM_RERUN", "0") == "1";
     let only: Vec<String> =
-        env_or("EXA_ONLY", "").split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        env_or("ANYLM_ONLY", "").split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
 
     let raw = std::fs::read_to_string(&scenarios_path)
         .unwrap_or_else(|e| panic!("시나리오 파일을 읽지 못했습니다 ({}): {}", scenarios_path.display(), e));
@@ -264,19 +294,27 @@ async fn live() {
         .filter_map(|v| v["id"].as_str().map(str::to_string))
         .collect();
 
-    // LM Studio 토큰은 선택이다. 비어 있으면 인증 헤더 없이 보낸다. (하니스 전면 개편은 작업 11)
-    let api_key = secrets::load_api_key().expect("자격 증명 관리자를 열 수 없습니다").unwrap_or_default();
-    let base_settings = AppSettings { api_key_set: !api_key.trim().is_empty(), api_key, ..AppSettings::default() };
+    // 토큰은 선택이다. 없으면 인증 헤더 없이 보낸다.
+    let api_key = std::env::var("ANYLM_TOKEN").unwrap_or_default();
+    let base_settings = AppSettings {
+        api_key_set: !api_key.trim().is_empty(),
+        api_key,
+        server_url: config.server_url.clone(),
+        model: config.model.clone(),
+        ..AppSettings::default()
+    };
+    let info = lmstudio::turn_model_info(&base_settings, &config.model).await;
+    let display_name = info.display_name.clone().unwrap_or_else(|| config.model.clone());
+    println!("서버 {} / 모델 {} ({}) / 컨텍스트 {}", config.server_url, config.model, display_name, config.context_length);
 
     // 앱이 설치해 둔 Python을 쓰고, 사용자 Skill은 섞이지 않게 빈 폴더를 쓴다.
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        runtime::set_root(Path::new(&local).join("io.github.kidarigun.kexaone-desktop").join("runtimes"));
+        runtime::set_root(Path::new(&local).join("io.github.kidarigun.anylm-desktop").join("runtimes"));
     }
     skills::set_user_dir(out_dir.join("user-skills"));
 
     let app = mock_app_with_converter();
     exaone::trace_start();
-    let mut calls_used = 0usize;
     let mut stop_reason: Option<String> = None;
 
     for sc in &scenarios {
@@ -287,11 +325,6 @@ async fn live() {
             println!("[건너뜀] {} (이미 결과 있음)", sc.id);
             continue;
         }
-        if calls_used >= max_calls {
-            stop_reason = Some(format!("호출 상한 {}회에 도달", max_calls));
-            break;
-        }
-
         let work = out_dir.join("work").join(&sc.id);
         if work.exists() {
             std::fs::remove_dir_all(&work).unwrap();
@@ -329,10 +362,6 @@ async fn live() {
         let mut fatal = false;
 
         for prompt in &sc.turns {
-            if calls_used >= max_calls {
-                stop_reason = Some(format!("호출 상한 {}회에 도달", max_calls));
-                break;
-            }
             let turn_start = Instant::now();
             history.push(ChatMessage {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -359,10 +388,10 @@ async fn live() {
                     app.handle(),
                     TurnRequest {
                         settings: &settings,
-                        model_key: &settings.model,
-                        model_display_name: "",
-                        reasoning_options: &[],
-                        context_length: crate::context_budget::FALLBACK_CONTEXT,
+                        model_key: &config.model,
+                        model_display_name: &display_name,
+                        reasoning_options: &info.reasoning_options,
+                        context_length: config.context_length,
                         project: project.as_ref(),
                         conversation_id: &sc.id,
                         history: &history,
@@ -375,7 +404,6 @@ async fn live() {
                 )
                 .await;
                 let traces = exaone::trace_take();
-                calls_used += traces.len();
                 log.traces.extend(traces);
 
                 let mut msg = match res {
@@ -429,10 +457,6 @@ async fn live() {
                 history.push(msg.clone());
                 log.message = Some(msg.clone());
                 continue_from = Some(msg);
-                if calls_used >= max_calls {
-                    stop_reason = Some(format!("호출 상한 {}회에 도달", max_calls));
-                    break;
-                }
             }
 
             log.wall_ms = turn_start.elapsed().as_millis() as u64;
@@ -523,7 +547,7 @@ async fn live() {
         );
 
         if fatal {
-            stop_reason = Some("키 또는 한도 문제로 중단".to_string());
+            stop_reason = Some("서버 연결 또는 인증 문제로 중단".to_string());
         }
         if stop_reason.is_some() {
             break;
@@ -531,7 +555,6 @@ async fn live() {
         tokio::time::sleep(pause).await;
     }
 
-    println!("\n이번 실행의 API 호출: {}회", calls_used);
     if let Some(r) = stop_reason {
         println!("중단 이유: {}", r);
     }
@@ -557,4 +580,36 @@ fn guard_blocks_risky_commands_and_scripts() {
     assert!(py("net.py").is_some());
     assert!(py("../x.py").is_some());
     assert!(unsafe_reason("delete_path", &json!({ "relative_path": "a.txt" }), dir.path()).is_none());
+}
+
+#[test]
+fn config_requires_model() {
+    let err = config_from_env(|_| None).unwrap_err();
+    assert!(err.contains("ANYLM_MODEL"), "{}", err);
+    let err = config_from_env(|k| (k == "ANYLM_MODEL").then(|| "  ".to_string())).unwrap_err();
+    assert!(err.contains("ANYLM_MODEL"), "{}", err);
+}
+
+#[test]
+fn config_defaults() {
+    let c = config_from_env(|k| (k == "ANYLM_MODEL").then(|| "qwen3.5-9b".to_string())).unwrap();
+    assert_eq!(c.server_url, "http://localhost:1234");
+    assert_eq!(c.context_length, 32768);
+    assert_eq!(c.model, "qwen3.5-9b");
+    assert_eq!(c.out_dir, PathBuf::from("../harness/runs/default"));
+}
+
+#[test]
+fn config_reads_overrides() {
+    let c = config_from_env(|k| match k {
+        "ANYLM_MODEL" => Some("m".into()),
+        "ANYLM_SERVER" => Some("http://127.0.0.1:5000".into()),
+        "ANYLM_CONTEXT" => Some("8192".into()),
+        "ANYLM_OUT" => Some("out".into()),
+        _ => None,
+    })
+    .unwrap();
+    assert_eq!((c.server_url.as_str(), c.context_length), ("http://127.0.0.1:5000", 8192));
+    assert_eq!(c.out_dir, PathBuf::from("out"));
+    assert!(config_from_env(|k| match k { "ANYLM_MODEL" => Some("m".into()), "ANYLM_CONTEXT" => Some("x".into()), _ => None }).is_err());
 }

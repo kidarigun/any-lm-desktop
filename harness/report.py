@@ -51,9 +51,6 @@ def summary(run_dir):
                       f" | {speed(t):5.1f} 토큰/초"
                       f" | 종료 {t.get('finishReason')} | 도구 {tools}"
                       f"{' | 오류 ' + t['error'][:80] if t.get('error') else ''}")
-        rl = dict(s.get("rateLimits") or [])
-        if rl:
-            print(f"   하루 한도 {rl.get('x-day-rate-limit')} 중 남은 {rl.get('x-day-rate-limit-remaining')}")
 
 
 def detail(run_dir, sid):

@@ -519,13 +519,13 @@ it("has no K-EXAONE branding in UI sources", () => {
 **Interfaces:**
 - Produces: `harness::config_from_env(get: impl Fn(&str) -> Option<String>) -> Result<HarnessConfig, String>`, `HarnessConfig { server_url: String, model: String, context_length: u32, out_dir: PathBuf }`
 
-- [ ] **Step 1: 실패하는 테스트** — `config_requires_model`(ANYLM_MODEL 없으면 Err에 "ANYLM_MODEL"), `config_defaults`(server_url·context 기본값).
+- [x] **Step 1: 실패하는 테스트** — `config_requires_model`(ANYLM_MODEL 없으면 Err에 "ANYLM_MODEL"), `config_defaults`(server_url·context 기본값).
 
-- [ ] **Step 2: 실패 확인 → 구현 → 통과 확인.** README: 무엇인지, 필요한 것(Windows, LM Studio 0.4 이상, 서버 켜기), 개발 명령, harness 사용법, 데이터 위치(`%APPDATA%\io.github.kidarigun.anylm-desktop`), "K-EXAONE Desktop 0.4.4(Apache-2.0)에서 갈라져 나온 비공개 프로젝트". CHANGELOG `## 0.1.0 — 미출시`에 작업 2~10 요약. NOTICE에 출처와 상표 안내.
+- [x] **Step 2: 실패 확인 → 구현 → 통과 확인.** README: 무엇인지, 필요한 것(Windows, LM Studio 0.4 이상, 서버 켜기), 개발 명령, harness 사용법, 데이터 위치(`%APPDATA%\io.github.kidarigun.anylm-desktop`), "K-EXAONE Desktop 0.4.4(Apache-2.0)에서 갈라져 나온 비공개 프로젝트". CHANGELOG `## 0.1.0 — 미출시`에 작업 2~10 요약. NOTICE에 출처와 상표 안내.
 
-- [ ] **Step 3: 실측** — `$env:ANYLM_MODEL="qwen3.5-9b"; cd src-tauri; cargo test --lib harness::live -- --ignored --nocapture` → 시나리오가 끝까지 돈다. 결과 요약을 STATUS "마지막 확인"에.
+- [x] **Step 3: 실측** — `$env:ANYLM_MODEL="qwen3.5-9b"; cd src-tauri; cargo test --lib harness::live -- --ignored --nocapture` → 시나리오가 끝까지 돈다. 결과 요약을 STATUS "마지막 확인"에.
 
-- [ ] **Step 4: 커밋** — `chore: point harness at LM Studio and rewrite docs`
+- [x] **Step 4: 커밋** — `chore: point harness at LM Studio and rewrite docs`
 
 ---
 

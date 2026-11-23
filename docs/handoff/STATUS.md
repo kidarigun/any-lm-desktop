@@ -18,14 +18,15 @@
 - 작업 9(자동 요약 압축): 완료. `send_chat_message`가 사용자 메시지를 넣기 전에 `should_auto_compact`(자동 압축 켜짐 && 마지막 답변 `prompt_tokens`+새 글자 추정이 로드된 컨텍스트의 70% 이상 && 덮을 대화 있음)를 보고, 참이면 `anylm-auto-compaction` started → AI 요약(대화의 모델, 생각 끄기 반영; 실패하면 로컬 요약 fallback) → 저장 → 턴 진행. 모델 목록은 턴당 한 번만 읽는다(보내기 전에 읽어 압축 판단과 턴이 함께 씀). 수동 압축도 같은 요약 요청 규칙을 쓴다. 다시 보내기·승인 후 이어가기에서는 자동 압축을 하지 않는다.
 
 - 작업 10(K-EXAONE 전용 요소 걷어 내기): 완료. 호출 한도 표시·추적·오류 문구와 `rate_info` 명령을 지우고, 시스템 프롬프트·헤더·문서 메타데이터·MCP clientInfo·User-Agent 등 사용자에게 보이는 브랜드 문구를 Any LM Desktop/LM Studio로 바꿨다. 모델 표시 이름은 턴 시작 모델 목록(`TurnModelInfo.display_name`)에서 온다. 통계 줄은 `입력 · 출력 · 추론토큰 · 초당 토큰 · 모델`. 하니스의 하루 예비 한도 로직은 삭제(작업 11에서 하니스 전체 정리).
+- 작업 11(harness를 LM Studio로, 문서 정리): 완료. `harness::config_from_env`(ANYLM_MODEL 필수, ANYLM_SERVER 기본 http://localhost:1234, ANYLM_CONTEXT 기본 32768, 선택 ANYLM_TOKEN)로 설정을 만들고 앱 설정·자격 증명 관리자는 읽지 않는다. 호출 상한 로직 삭제, 시험용 변수는 모두 `ANYLM_*`(EXA_* 없음). README·CHANGELOG(0.1.0)·NOTICE 재작성, THIRD_PARTY_NOTICES 재생성(updater 항목 제거).
 
 ## 마지막 확인
-2026-11-23, 작업 10 완료 시점:
+2026-11-23, 작업 11 완료 시점:
 - `npm test` → 통과 (20 파일, 114 통과, 1 건너뜀)
 - `npx tsc --noEmit` → 통과 (오류 없음)
-- `cd src-tauri && cargo test --lib` → 통과 (156 통과, 0 실패, 8 무시)
-- `npm run build` → 성공 (GUI 확인은 못 함)
-1. 계획의 작업 11부터 이어서 진행한다(`docs/superpowers/plans/2026-11-23-any-lm-desktop.md`).
+- `cd src-tauri && cargo test --lib` → 통과 (159 통과, 0 실패, 8 무시)
+- 실측 하니스: `ANYLM_MODEL=qwen3.5-9b`, `ANYLM_SCENARIOS=../harness/smoke.json`로 `harness::live` 실행 → smoke-hello 1개 시나리오가 끝까지 돌고 검사 1/1 통과(호출 1회, 52초, 입력 189·출력 1780 토큰). LM Studio는 qwen3.5-9b(32768) 1개만 로드된 상태 그대로(로드·언로드 안 함). 전체 시나리오(`make_scenarios.py`)는 돌리지 않았다.
+1. 계획의 작업 12부터 이어서 진행한다(`docs/superpowers/plans/2026-11-23-any-lm-desktop.md`).
 2. 작업 1의 단계 6은 사용자가 승인하면 한다: "`kidarigun/any-lm-desktop` 비공개 저장소를 만들고 main을 올릴까요?" → 승인 시 `gh repo create kidarigun/any-lm-desktop --private --source . --remote origin --push`.
 
 ## 결정 필요

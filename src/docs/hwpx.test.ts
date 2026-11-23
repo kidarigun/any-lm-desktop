@@ -48,9 +48,9 @@ print("안녕")
 마지막 문단.
 `;
 
-/** EXA_HWPX_OUT 폴더를 주면 만든 파일을 남긴다 (한글·이음오피스로 열어 확인할 때). */
+/** ANYLM_HWPX_OUT 폴더를 주면 만든 파일을 남긴다 (한글·이음오피스로 열어 확인할 때). */
 function keep(name: string, bytes: Uint8Array) {
-  const dir = process.env.EXA_HWPX_OUT;
+  const dir = process.env.ANYLM_HWPX_OUT;
   if (!dir) return;
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, name), bytes);

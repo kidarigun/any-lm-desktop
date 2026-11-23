@@ -495,11 +495,11 @@ mod tests {
     }
 
     /// 실제로 쓰던 저장 파일의 사본이 새 코드에서 그대로 읽히는지 본다.
-    /// 실행: EXA_REAL_STORE=<저장 파일 경로> cargo test --lib store::tests::reads_a_real_store -- --ignored --nocapture
+    /// 실행: ANYLM_REAL_STORE=<저장 파일 경로> cargo test --lib store::tests::reads_a_real_store -- --ignored --nocapture
     #[test]
-    #[ignore = "EXA_REAL_STORE에 저장 파일 경로를 줘야 한다"]
+    #[ignore = "ANYLM_REAL_STORE에 저장 파일 경로를 줘야 한다"]
     fn reads_a_real_store_file() {
-        let src = std::env::var("EXA_REAL_STORE").expect("EXA_REAL_STORE");
+        let src = std::env::var("ANYLM_REAL_STORE").expect("ANYLM_REAL_STORE");
         let dir = tempfile::tempdir().unwrap();
         fs::copy(&src, dir.path().join("exaone_desktop_store.json")).unwrap();
         let store = StoreManager::new(dir.path());

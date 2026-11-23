@@ -1,8 +1,11 @@
-Desktop App for LG K-EXAONE
+Any LM Desktop
 Copyright 2026 김기군
 
-This is an unofficial, community project. It is not made, endorsed or
-supported by LG AI Research or LG Corp.
+This is a private project. It is derived from K-EXAONE Desktop 0.4.4
+(Apache License 2.0, Copyright 2026 김기군; "Desktop App for LG K-EXAONE"),
+with the commit history preserved, and has been converted to work with
+LM Studio. It is not made, endorsed or supported by LG AI Research,
+LG Corp. or LM Studio / Element Labs.
 
 This product is licensed under the Apache License, Version 2.0 (see LICENSE).
 
@@ -11,4 +14,5 @@ licenses are listed in THIRD_PARTY_NOTICES.md.
 
 "EXAONE" and "K-EXAONE" are trademarks of LG AI Research. As stated in
 Section 6 of the Apache License 2.0, this license does not grant permission
-to use those trade names or trademarks.
+to use those trade names or trademarks. "LM Studio" is a trademark of its
+respective owner and is named here only to describe compatibility.
