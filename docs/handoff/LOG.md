@@ -6,4 +6,5 @@
 - 2026-11-23 | claude-code | 정체성 분리(이름·identifier·버전·포트·자격 증명 서비스명 등)와 업데이트 기능 제거(작업 2). 원본과 동시 실행 확인 | (작업 2 커밋)
 - 2026-11-23 | claude-code | 설정을 LM Studio 연결로 교체(작업 3): lmstudio.rs, AppSettings 개편, API 키 필수 검사·추론 강도 UI 삭제 | c7a87c1
 - 2026-11-23 | claude-code | 모델 목록·로드 계획·로드/언로드·서버 상태/시작 구현(작업 4), 실측 결정 기록 0002, lm_* 명령과 TS 바인딩 | 95e9899
-- 2026-11-23 | claude-code | 작업 4 보완: 이미 로드된 모델의 두 번째 인스턴스 로드를 거부(ensure_not_loaded), 컨텍스트를 못 읽은 인스턴스도 로드된 것으로 유지 | (이 커밋)
+- 2026-11-23 | claude-code | 작업 4 보완: 이미 로드된 모델의 두 번째 인스턴스 로드를 거부(ensure_not_loaded), 컨텍스트를 못 읽은 인스턴스도 로드된 것으로 유지 | 09f89de
+- 2026-11-23 | claude-code | LM Studio 연결 창(ConnectionDialog, modelText)과 사이드바 연결 점 추가(작업 5) | (이 커밋)

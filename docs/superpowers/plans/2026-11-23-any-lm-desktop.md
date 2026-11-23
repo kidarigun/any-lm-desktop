@@ -273,7 +273,7 @@ fn wanted_context_respects_prefs_and_max() { /* pref 없음 → 32768, pref 8192
 - Consumes: 작업 4의 `BackendAPI.listModels/serverRunning/startServer/loadModel/unloadModel`, 작업 3의 `AppSettings.modelPrefs`.
 - Produces: `describeModel(m: LmModel): string`, `loadedLabel(m: LmModel): string`, `capabilityBadges(m: LmModel): ("vision" | "tools" | "reasoning")[]`; `<ConnectionDialog settings onSave onClose />`.
 
-- [ ] **Step 1: 실패하는 테스트** (`modelText.test.ts`)
+- [x] **Step 1: 실패하는 테스트** (`modelText.test.ts`)
 
 ```ts
 it("describes a model in one line", () => {
@@ -290,13 +290,13 @@ it("lists capability badges", () => {
 
 (`qwen9b`, `qwen35`은 작업 4 테스트 데이터와 같은 값의 TS 객체. 크기는 `size_bytes / 1024^3`을 소수 첫째 자리로.)
 
-- [ ] **Step 2: 실패 확인** — `npx vitest run src/lmstudio` → FAIL
+- [x] **Step 2: 실패 확인** — `npx vitest run src/lmstudio` → FAIL
 
-- [ ] **Step 3: 구현.** 창 구성(위에서 아래): 서버 주소 입력 + 연결 상태(초록 "연결됨"/빨강 "꺼져 있음" + [서버 시작]) → 선택 사항 "API 토큰"(LM Studio에서 인증을 켠 경우만, 원본처럼 저장 후 화면에 돌려주지 않음) → 모델 목록(행마다 표시 이름, `describeModel`, `loadedLabel`, 기능 배지, "기본 모델" 라디오, 컨텍스트 입력(기본 32768, 최대 `maxContextLength`), [로드]/[언로드]) → "자동 요약 압축" 토글(기본 켬) → 문체 선택(원본 유지). 원본 디자인 언어(Tailwind 클래스)를 따른다.
+- [x] **Step 3: 구현.** 창 구성(위에서 아래): 서버 주소 입력 + 연결 상태(초록 "연결됨"/빨강 "꺼져 있음" + [서버 시작]) → 선택 사항 "API 토큰"(LM Studio에서 인증을 켠 경우만, 원본처럼 저장 후 화면에 돌려주지 않음) → 모델 목록(행마다 표시 이름, `describeModel`, `loadedLabel`, 기능 배지, "기본 모델" 라디오, 컨텍스트 입력(기본 32768, 최대 `maxContextLength`), [로드]/[언로드]) → "자동 요약 압축" 토글(기본 켬) → 문체 선택(원본 유지). 원본 디자인 언어(Tailwind 클래스)를 따른다.
 
-- [ ] **Step 4: 통과 확인** — 세 검증 명령 PASS. `npm run tauri dev`에서 창을 열어 두 모델이 보이고, 9B 행이 "로드됨 · 32K"인지 확인.
+- [x] **Step 4: 통과 확인** — 세 검증 명령 PASS. `npm run tauri dev`에서 창을 열어 두 모델이 보이고, 9B 행이 "로드됨 · 32K"인지 확인.
 
-- [ ] **Step 5: 커밋** — `feat: add LM Studio connection dialog`
+- [x] **Step 5: 커밋** — `feat: add LM Studio connection dialog`
 
 ---
 

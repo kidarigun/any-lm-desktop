@@ -54,6 +54,7 @@ import { fileHistory } from "./diff/history";
 import { PanelResizer } from "./ui/PanelResizer";
 import { SkillsDialog } from "./skills/SkillsDialog";
 import { McpDialog } from "./mcp/McpDialog";
+import { ConnectionDialog } from "./lmstudio/ConnectionDialog";
 import { RuntimePanel } from "./runtime/RuntimePanel";
 import {
   CANVAS_DEFAULT_WIDTH,
@@ -460,6 +461,20 @@ export default function App() {
   /** Python 실행 창에 띄운 스크립트 (프로젝트 기준 상대 경로) */
   const [pythonRun, setPythonRun] = useState<string | null>(null);
   const [settingsError, setSettingsError] = useState<string | null>(null);
+  /** LM Studio 서버 연결 상태(null = 아직 모름) */
+  const [serverUp, setServerUp] = useState<boolean | null>(null);
+  const refreshServerStatus = React.useCallback(async () => {
+    try {
+      setServerUp(await BackendAPI.serverRunning());
+    } catch {
+      setServerUp(false);
+    }
+  }, []);
+  useEffect(() => {
+    void refreshServerStatus();
+    const t = window.setInterval(() => void refreshServerStatus(), 15000);
+    return () => window.clearInterval(t);
+  }, [refreshServerStatus, showSettingsModal]);
   /** 저장하지 않고 닫으면 입력하던 키는 버린다. */
   function closeSettingsModal() {
     setSettings((s) => ({ ...s, apiKey: "" }));
@@ -1719,9 +1734,19 @@ export default function App() {
           >
             <span className="flex items-center gap-1.5">
               <Settings className="w-3.5 h-3.5 text-stone-500 dark:text-stone-400" />
-              LM Studio 연결 설정
+              LM Studio 연결
             </span>
-            <span className="text-xs font-semibold text-emerald-700 dark:text-emerald-400">LM Studio</span>
+            <span
+              className="flex items-center gap-1 text-[11px] font-semibold text-stone-500 dark:text-stone-400"
+              title={serverUp === null ? "확인 중" : serverUp ? "연결됨" : "꺼져 있음"}
+            >
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  serverUp === null ? "bg-stone-400" : serverUp ? "bg-emerald-500" : "bg-red-500"
+                }`}
+              />
+              {serverUp === null ? "" : serverUp ? "연결됨" : "꺼져 있음"}
+            </span>
           </button>
         </div>
       </aside>
@@ -2820,123 +2845,20 @@ export default function App() {
 
       {showMcp && <McpDialog onClose={() => setShowMcp(false)} />}
 
-      {/* Modal 1: API & Model Settings */}
+      {/* Modal 1: LM Studio 연결 */}
       {showSettingsModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-white dark:bg-[#262624] border border-stone-200 dark:border-[#3A3A36] rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-6 shadow-xl space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-bold text-stone-900 dark:text-stone-100">
-                LM Studio 연결 설정
-              </h3>
-              <button onClick={closeSettingsModal}>
-                <X className="w-4 h-4 text-stone-400" />
-              </button>
-            </div>
-
-            <div className="space-y-3 text-xs">
-              <div>
-                <label className="font-semibold text-stone-700 dark:text-stone-300 block mb-1">
-                  LM Studio API 토큰 (선택)
-                </label>
-                <input
-                  type="password"
-                  autoComplete="off"
-                  value={settings.apiKey ?? ""}
-                  onChange={(e) =>
-                    setSettings({ ...settings, apiKey: e.target.value })
-                  }
-                  placeholder={
-                    settings.apiKeySet
-                      ? "저장된 토큰 사용 중 — 바꾸려면 새 토큰 입력"
-                      : "LM Studio에서 인증을 켠 경우에만 입력"
-                  }
-                  className="w-full bg-white dark:bg-[#1E1E1C] border border-stone-300 dark:border-[#3A3A36] rounded-xl px-3 py-2 text-stone-900 dark:text-stone-100 focus:outline-none focus:border-[#A50034]"
-                />
-                <div className="mt-1 flex items-center justify-between text-[11px] text-stone-500 dark:text-stone-400">
-                  <span>토큰은 Windows 자격 증명 관리자에 암호화되어 저장됩니다.</span>
-                  {settings.apiKeySet && (
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        if (!window.confirm("저장된 토큰을 삭제할까요?")) return;
-                        try {
-                          const saved = await BackendAPI.clearApiKey();
-                          setSettings({ ...saved, apiKey: "" });
-                          setSettingsError(null);
-                        } catch (err) {
-                          setSettingsError(String(err));
-                        }
-                      }}
-                      className="text-[#A50034] dark:text-[#FF5C8D] font-semibold hover:underline cursor-pointer"
-                    >
-                      저장된 토큰 삭제
-                    </button>
-                  )}
-                </div>
-              </div>
-              <div>
-                <label className="font-semibold text-stone-700 dark:text-stone-300 block mb-1">
-                  LM Studio 서버 주소
-                </label>
-                <input
-                  type="text"
-                  value={settings.serverUrl}
-                  onChange={(e) =>
-                    setSettings({ ...settings, serverUrl: e.target.value })
-                  }
-                  className="w-full bg-white dark:bg-[#1E1E1C] border border-stone-300 dark:border-[#3A3A36] rounded-xl px-3 py-2 font-mono text-stone-900 dark:text-stone-100 focus:outline-none focus:border-[#A50034]"
-                />
-              </div>
-              <div>
-                <label className="font-semibold text-stone-700 dark:text-stone-300 block mb-1">
-                  모델 이름
-                </label>
-                <input
-                  type="text"
-                  value={settings.model}
-                  onChange={(e) =>
-                    setSettings({ ...settings, model: e.target.value })
-                  }
-                  className="w-full bg-white dark:bg-[#1E1E1C] border border-stone-300 dark:border-[#3A3A36] rounded-xl px-3 py-2 font-mono text-stone-900 dark:text-stone-100 focus:outline-none focus:border-[#A50034]"
-                />
-              </div>
-            </div>
-
-            <div className="pt-3 border-t border-stone-200 dark:border-[#34342F] text-xs space-y-2">
-              <h4 className="font-bold text-stone-900 dark:text-stone-100">실행 환경</h4>
-              <RuntimePanel />
-            </div>
-
-            {settingsError && (
-              <div className="rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 px-3 py-2 text-xs text-red-700 dark:text-red-300">
-                {settingsError}
-              </div>
-            )}
-            <div className="flex justify-end gap-2 pt-2">
-              <button
-                onClick={closeSettingsModal}
-                className="px-4 py-2 rounded-xl bg-stone-100 dark:bg-[#32322F] text-stone-700 dark:text-stone-200 text-xs font-semibold cursor-pointer"
-              >
-                취소
-              </button>
-              <button
-                onClick={async () => {
-                  try {
-                    const saved = await BackendAPI.saveSettings(settings);
-                    setSettings({ ...saved, apiKey: "" });
-                    setSettingsError(null);
-                    setShowSettingsModal(false);
-                  } catch (err) {
-                    setSettingsError(String(err));
-                  }
-                }}
-                className="px-4 py-2 rounded-xl bg-[#A50034] text-white text-xs font-bold cursor-pointer"
-              >
-                저장
-              </button>
-            </div>
-          </div>
-        </div>
+        <ConnectionDialog
+          settings={settings}
+          onSettingsChanged={(saved) => setSettings({ ...saved, apiKey: "" })}
+          onSave={async (next) => {
+            const saved = await BackendAPI.saveSettings(next);
+            setSettings({ ...saved, apiKey: "" });
+            setSettingsError(null);
+            setShowSettingsModal(false);
+            void refreshServerStatus();
+          }}
+          onClose={closeSettingsModal}
+        />
       )}
 
       {/* Modal 2: Project Configuration with Native Folder Explorer Picker */}
