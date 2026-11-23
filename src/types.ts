@@ -31,6 +31,17 @@ export interface Project {
   createdAt: string;
   /** 이 프로젝트에서 묻지 않고 실행하도록 허락한 도구 ("run_python" | "run_command") */
   autoApprove?: string[];
+  /** 프로젝트 메모리 (오래된 항목이 앞) */
+  memory?: MemoryItem[];
+}
+
+export interface MemoryItem {
+  id: string;
+  text: string;
+  createdAt: string;
+  updatedAt: string;
+  /** "model": remember 도구로 모델이 저장, "user": 사용자가 직접 */
+  source: "model" | "user";
 }
 
 export interface ToolExecutionRecord {

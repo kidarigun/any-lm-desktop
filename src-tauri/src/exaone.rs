@@ -342,6 +342,23 @@ pub fn build_tools_schema() -> Value {
                     "required": ["relative_path"]
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "remember",
+                "description": "이 프로젝트의 모든 대화에서 기억할 짧은 사실 한 가지를 저장합니다 (선호, 결정, 용어, 마감 등). 한 항목은 500자 이내로 쓰세요. 승인 없이 바로 저장됩니다.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "description": "기억할 내용 (한두 문장)"
+                        }
+                    },
+                    "required": ["text"]
+                }
+            }
         }
     ])
 }
@@ -778,10 +795,12 @@ fn build_system_prompt(
     skills: &[skills::SkillInfo],
     mcp_tools: &[mcp::ToolSpec],
     model_display_name: &str,
+    context_length: u32,
 ) -> String {
     let mut prompt = base_system_prompt(project, model_display_name);
     if let Some(p) = project {
         prompt.push_str(mode_section(mode));
+        prompt.push_str(&crate::memory::memory_prompt_section(&p.memory, context_length));
         prompt.push_str(&project_files_section(Path::new(&p.root_path)));
     }
     if !mcp_tools.is_empty() {
@@ -1672,7 +1691,7 @@ pub async fn run_exaone_turn<R: Runtime>(
     };
     let tools = tools_for(req.project.is_some(), !available_skills.is_empty(), &mcp_tools);
     let tools_enabled = tools.is_some();
-    let sys_prompt = build_system_prompt(req.project, req.mode, &available_skills, &mcp_tools, model_name_for_prompt(req.model_display_name, req.model_key));
+    let sys_prompt = build_system_prompt(req.project, req.mode, &available_skills, &mcp_tools, model_name_for_prompt(req.model_display_name, req.model_key), req.context_length);
     let tune = tuning();
     let tool_cap = crate::context_budget::tool_output_cap(req.context_length);
     // 이전 답변의 추론은 다음 요청에 다시 보내지 않는다(LM Studio는 추론을 이어받지 않는다).
@@ -2365,6 +2384,34 @@ pub async fn execute_tool_now<R: Runtime>(
     (rec, snap.map(|s| s.with_source("agent")), pending)
 }
 
+/// 프로젝트 메모리가 바뀌었을 때 화면에 보내는 이벤트 (값은 바뀐 `Project`)
+pub const PROJECT_UPDATED_EVENT: &str = "anylm-project-updated";
+
+/// `remember` 도구: 앱 저장소의 프로젝트 메모리에 바로 저장하고 화면에 알린다. 승인은 받지 않는다.
+fn remember_tool<R: Runtime>(app: &AppHandle<R>, project_id: &str, text: &str) -> (&'static str, String) {
+    let Some(state) = app.try_state::<crate::AppState>() else {
+        return ("error", "앱 저장소를 찾을 수 없어 저장하지 못했습니다.".to_string());
+    };
+    let mut db = match state.db.lock() {
+        Ok(db) => db,
+        Err(e) => return ("error", e.to_string()),
+    };
+    let proj = match crate::memory::project_memory_mut(&mut db.projects, project_id) {
+        Ok(p) => p,
+        Err(e) => return ("error", e),
+    };
+    let now = chrono::Local::now().to_rfc3339();
+    let (status, output, changed) = crate::memory::remember_outcome(&mut proj.memory, text, &now);
+    if changed {
+        let updated = proj.clone();
+        if let Err(e) = state.store.save(&db) {
+            return ("error", format!("저장하지 못했습니다: {}", e));
+        }
+        let _ = app.emit(PROJECT_UPDATED_EVENT, updated);
+    }
+    (status, output)
+}
+
 async fn run_tool<R: Runtime>(
     app: &AppHandle<R>,
     root: &Path,
@@ -2419,6 +2466,14 @@ async fn run_tool<R: Runtime>(
                 Ok(out) => done(out, None),
                 Err(err) => fail(err, None),
             }
+        }
+        "remember" => {
+            let (status, output) = remember_tool(app, project_id, str_arg(args, "text"));
+            (
+                tool_record(call_id, name, args_json.clone(), status, output, None, None),
+                None,
+                false,
+            )
         }
         "read_file" => {
             let rel = str_arg(args, "relative_path");
@@ -3125,7 +3180,72 @@ mod tests {
             instructions: String::new(),
             created_at: String::new(),
             auto_approve: Vec::new(),
+            memory: Vec::new(),
         }
+    }
+
+    #[test]
+    fn project_prompt_has_memory_section_but_general_chat_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = test_project(dir.path());
+        p.memory.push(crate::store::MemoryItem {
+            id: "m1".into(),
+            text: "보고서는 존댓말로 쓴다".into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            source: "user".into(),
+        });
+        let prompt = build_system_prompt(Some(&p), "project", &[], &[], "테스트 모델", 32768);
+        assert!(prompt.contains("[프로젝트 메모리]") && prompt.contains("- 보고서는 존댓말로 쓴다"), "{prompt}");
+        assert!(!build_system_prompt(None, "chat", &[], &[], "테스트 모델", 32768).contains("프로젝트 메모리"));
+    }
+
+    #[test]
+    fn remember_is_a_project_tool_only() {
+        let names = |v: Value| -> Vec<String> {
+            v.as_array().unwrap().iter().map(|t| t["function"]["name"].as_str().unwrap().to_string()).collect()
+        };
+        assert!(names(tools_for(true, false, &[]).unwrap()).contains(&"remember".to_string()));
+        assert!(tools_for(false, false, &[]).is_none());
+    }
+
+    #[tokio::test]
+    async fn remember_tool_saves_without_approval_and_reports_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = tauri::test::mock_app();
+        let store = crate::store::StoreManager::new(dir.path());
+        let mut db = store.load();
+        db.projects[0].id = "proj-x".into();
+        app.manage(crate::AppState { store, db: std::sync::Mutex::new(db), runs: Default::default() });
+        let args = json!({"text": " 발표는 15분 "});
+        let (r, _, needs) = execute_or_queue_tool(app.handle(), dir.path(), "proj-x", "c1", "remember", &args).await;
+        assert!(!needs);
+        assert_eq!(r.status, "completed");
+        assert!(r.output.contains("기억했습니다"), "{}", r.output);
+        let (r, _, needs) = execute_or_queue_tool(app.handle(), dir.path(), "proj-x", "c2", "remember", &args).await;
+        assert!(!needs);
+        assert_eq!(r.output, "이미 기억하고 있습니다.");
+        let state = app.state::<crate::AppState>();
+        let db = state.db.lock().unwrap();
+        assert_eq!(db.projects[0].memory.len(), 1);
+        assert_eq!(db.projects[0].memory[0].text, "발표는 15분");
+        assert_eq!(db.projects[0].memory[0].source, "model");
+        // 파일에도 저장됐다
+        assert!(state.store.load().projects[0].memory.len() == 1);
+    }
+
+    #[tokio::test]
+    async fn remember_tool_rejects_over_limit_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = tauri::test::mock_app();
+        let store = crate::store::StoreManager::new(dir.path());
+        let mut db = store.load();
+        db.projects[0].id = "proj-x".into();
+        app.manage(crate::AppState { store, db: std::sync::Mutex::new(db), runs: Default::default() });
+        let args = json!({"text": "가".repeat(501)});
+        let (r, _, _) = execute_or_queue_tool(app.handle(), dir.path(), "proj-x", "c1", "remember", &args).await;
+        assert_eq!(r.status, "error");
+        assert!(r.output.contains("500"));
     }
 
     #[tokio::test]
@@ -3266,7 +3386,7 @@ mod tests {
         let bodies = bodies.lock().unwrap();
         assert_eq!(bodies.len(), 2);
         let tools = bodies[0]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 9);
         assert!(tools.iter().any(|t| t["function"]["name"] == "run_python"));
         assert!(bodies[0].get("reasoning_effort").is_none());
         let msgs = bodies[1]["messages"].as_array().unwrap();
@@ -3500,13 +3620,13 @@ mod tests {
         std::fs::write(dir.path().join("data/2025/sales.csv"), "a,b\n1,2\n").unwrap();
         std::fs::write(dir.path().join("README.md"), "x".repeat(2048)).unwrap();
         std::fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
-        let prompt = build_system_prompt(Some(&test_project(dir.path())), "project", &[], &[], "테스트 모델");
+        let prompt = build_system_prompt(Some(&test_project(dir.path())), "project", &[], &[], "테스트 모델", 32768);
         assert!(prompt.contains("[프로젝트 파일 목록]"));
         assert!(prompt.contains("data/2025/sales.csv (8B)"), "{}", prompt);
         assert!(prompt.contains("README.md (2KB)"));
         assert!(!prompt.contains("node_modules"));
         // 일반 채팅에는 넣지 않는다.
-        assert!(!build_system_prompt(None, "chat", &[], &[], "테스트 모델").contains("프로젝트 파일 목록"));
+        assert!(!build_system_prompt(None, "chat", &[], &[], "테스트 모델", 32768).contains("프로젝트 파일 목록"));
 
         let big = tempfile::tempdir().unwrap();
         for i in 0..200 {
@@ -3730,11 +3850,11 @@ content-length: {}
     fn each_screen_gets_its_own_guidance() {
         let dir = tempfile::tempdir().unwrap();
         let project = test_project(dir.path());
-        let code = build_system_prompt(Some(&project), "code", &[], &[], "테스트 모델");
-        let doc = build_system_prompt(Some(&project), "project", &[], &[], "테스트 모델");
+        let code = build_system_prompt(Some(&project), "code", &[], &[], "테스트 모델", 32768);
+        let doc = build_system_prompt(Some(&project), "project", &[], &[], "테스트 모델", 32768);
         assert!(code.contains("[코딩 화면]") && !code.contains("[프로젝트 화면]"));
         assert!(doc.contains("[프로젝트 화면]") && !doc.contains("[코딩 화면]"));
-        assert!(!build_system_prompt(Some(&project), "", &[], &[], "테스트 모델").contains("화면]"));
+        assert!(!build_system_prompt(Some(&project), "", &[], &[], "테스트 모델", 32768).contains("화면]"));
     }
 
     #[tokio::test]

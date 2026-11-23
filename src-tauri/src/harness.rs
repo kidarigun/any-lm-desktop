@@ -348,6 +348,7 @@ async fn live() {
             instructions: sc.instructions.clone(),
             created_at: chrono::Local::now().to_rfc3339(),
             auto_approve: Vec::new(),
+            memory: Vec::new(),
         });
         let root = project.as_ref().map(|p| PathBuf::from(&p.root_path)).unwrap_or_else(|| work.clone());
 

@@ -5,6 +5,7 @@ pub mod exaone;
 pub mod fs_ops;
 pub mod html_preview;
 pub mod lmstudio;
+pub mod memory;
 pub mod mcp;
 pub mod mcp_oauth;
 pub mod python_runner;
@@ -443,17 +444,27 @@ fn create_or_update_project(
     }
 
     let mut db = state.db.lock().map_err(|e| e.to_string())?;
+    let proj = upsert_project(&mut db.projects, id, name, root_path, instructions);
+    state.store.save(&db)?;
+    Ok(proj)
+}
+
+/// 프로젝트를 고치거나 새로 만든다. 고칠 때는 이름·폴더·지침만 바꾸고 메모리 등 나머지는 그대로 둔다.
+fn upsert_project(
+    projects: &mut Vec<Project>,
+    id: Option<String>,
+    name: String,
+    root_path: String,
+    instructions: String,
+) -> Project {
     if let Some(existing_id) = id {
-        if let Some(proj) = db.projects.iter_mut().find(|p| p.id == existing_id) {
+        if let Some(proj) = projects.iter_mut().find(|p| p.id == existing_id) {
             proj.name = name;
             proj.root_path = root_path;
             proj.instructions = instructions;
-            let updated = proj.clone();
-            state.store.save(&db)?;
-            return Ok(updated);
+            return proj.clone();
         }
     }
-
     let proj = Project {
         id: format!("proj-{}", Uuid::new_v4().simple()),
         name,
@@ -461,10 +472,48 @@ fn create_or_update_project(
         instructions,
         created_at: chrono::Local::now().to_rfc3339(),
         auto_approve: Vec::new(),
+        memory: Vec::new(),
     };
-    db.projects.push(proj.clone());
+    projects.push(proj.clone());
+    proj
+}
+
+/// 프로젝트 메모리에 사용자가 직접 항목을 더한다.
+#[tauri::command]
+fn add_project_memory(state: State<'_, AppState>, project_id: String, text: String) -> Result<Project, String> {
+    let mut db = state.db.lock().map_err(|e| e.to_string())?;
+    let proj = memory::project_memory_mut(&mut db.projects, &project_id)?;
+    let now = chrono::Local::now().to_rfc3339();
+    memory::add_item(&mut proj.memory, &text, "user", &now)?;
+    let updated = proj.clone();
     state.store.save(&db)?;
-    Ok(proj)
+    Ok(updated)
+}
+
+#[tauri::command]
+fn update_project_memory(
+    state: State<'_, AppState>,
+    project_id: String,
+    memory_id: String,
+    text: String,
+) -> Result<Project, String> {
+    let mut db = state.db.lock().map_err(|e| e.to_string())?;
+    let proj = memory::project_memory_mut(&mut db.projects, &project_id)?;
+    let now = chrono::Local::now().to_rfc3339();
+    memory::update_item(&mut proj.memory, &memory_id, &text, &now)?;
+    let updated = proj.clone();
+    state.store.save(&db)?;
+    Ok(updated)
+}
+
+#[tauri::command]
+fn delete_project_memory(state: State<'_, AppState>, project_id: String, memory_id: String) -> Result<Project, String> {
+    let mut db = state.db.lock().map_err(|e| e.to_string())?;
+    let proj = memory::project_memory_mut(&mut db.projects, &project_id)?;
+    memory::delete_item(&mut proj.memory, &memory_id)?;
+    let updated = proj.clone();
+    state.store.save(&db)?;
+    Ok(updated)
 }
 
 #[tauri::command]
@@ -2317,6 +2366,9 @@ pub fn run() {
             lm_load_model,
             lm_unload,
             set_conversation_model,
+            add_project_memory,
+            update_project_memory,
+            delete_project_memory,
             lm_server_running,
             lm_start_server,
             open_external_url,
@@ -2409,6 +2461,35 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn updating_a_project_keeps_its_memory_and_auto_approve() {
+        let mut projects = vec![Project {
+            id: "p1".into(),
+            name: "옛 이름".into(),
+            root_path: "C:/a".into(),
+            instructions: "옛 지침".into(),
+            created_at: "t".into(),
+            auto_approve: vec!["run_python".into()],
+            memory: vec![store::MemoryItem {
+                id: "m1".into(),
+                text: "기억".into(),
+                created_at: "t".into(),
+                updated_at: "t".into(),
+                source: "model".into(),
+            }],
+        }];
+        let updated = upsert_project(&mut projects, Some("p1".into()), "새 이름".into(), "C:/b".into(), "새 지침".into());
+        assert_eq!(updated.name, "새 이름");
+        assert_eq!(updated.instructions, "새 지침");
+        assert_eq!(updated.memory.len(), 1);
+        assert_eq!(projects[0].memory[0].text, "기억");
+        assert_eq!(projects[0].auto_approve, vec!["run_python".to_string()]);
+        // 새로 만들면 메모리는 비어 있다
+        let created = upsert_project(&mut projects, None, "n".into(), "C:/c".into(), "".into());
+        assert!(created.memory.is_empty());
+        assert_eq!(projects.len(), 2);
+    }
 
     fn conv_with(n: usize, last_prompt_tokens: u64) -> Conversation {
         let mut c = Conversation::default();

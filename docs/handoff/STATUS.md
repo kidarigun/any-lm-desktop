@@ -29,6 +29,8 @@
   6. 오류 띠의 [서버 시작](연결 창과 같은 경로), `lms server start`가 파이프 때문에 멈추지 않게(빈 입력·로그 파일·60초 제한).
   7. 로드 실패 시 [{N}K로 다시 시도](시도한 컨텍스트의 절반, 바닥 4096), 오류 띠와 연결 창 모두. 사소한 점 8(컨텍스트 표시를 로드된 컨텍스트·1.5자 기준으로)과 16(runtime.rs 주석)도 고쳤다.
 
+- 프로젝트 메모리(스펙 `2026-11-23-project-memory-knowledge.md` 3절): 완료. 4~6절(지침 편집기·지식 폴더)은 아직. 구현 위치: `store.rs`(`Project.memory`, `MemoryItem`), `memory.rs`(한도·중복·프롬프트 절), `exaone.rs`(`remember` 도구 `remember_tool`, 프롬프트 절 `build_system_prompt(..., context_length)`), `lib.rs`(`upsert_project`, `*_project_memory` 명령), `src/project/`(ProjectMemoryCard, memoryFormat). 메모리는 턴 시작 때의 프로젝트 복사본으로 프롬프트에 들어가므로 같은 턴 중에 저장한 것은 다음 턴부터 프롬프트에 보인다. 하니스는 앱 상태가 없어 `remember`를 실행하지 못한다.
+
 ## 다음 할 일
 1. **화면 수동 확인**: 아래 "수동 확인 목록"을 사용자와 함께 앱 화면에서 확인한다(`npm run tauri dev`). 문제가 나오면 고치고 목록에서 지운다.
 2. **인계 연습(완료 기준 9, 작업 12 단계 2)**: 사용자가 Codex 또는 Antigravity 새 세션에 `docs/handoff/START.md`의 시작 문구를 붙여 넣어, 그 도구가 AGENTS → STATUS → 계획 순서로 읽고 이어서 작업할 수 있는지 본다. 결과는 LOG에 남긴다.
@@ -110,3 +112,6 @@
 - 도구: claude-code
 - 모델: Claude Opus 5.5
 - 시각: 2026-11-23
+
+### 프로젝트 화면 · 메모리
+- 모델이 `remember`로 저장하면(예: "이 프로젝트 보고서는 항상 존댓말로 쓴다고 기억해") 대화 중 도구 카드가 뜨고 프로젝트 화면 "프로젝트 메모리" 카드에 [모델] 표시로 바로 보이는지, [추가]로 직접 쓴 항목은 [직접]으로 보이는지, 편집·삭제(삭제 전 확인)가 되는지, 새 대화에서 모델이 그 내용을 아는지 확인.

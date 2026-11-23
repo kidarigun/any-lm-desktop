@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AppLogo } from "./ui/AppLogo";
+import { ProjectMemoryCard } from "./project/ProjectMemoryCard";
 import { isExternalLink, renderMarkdownSafe } from "./security/sanitize";
 import {
   Check,
@@ -910,6 +911,23 @@ export default function App() {
       }
     });
 
+    return () => {
+      cancelled = true;
+      if (unlistenFn) unlistenFn();
+    };
+  }, []);
+
+  // 모델이 remember로 메모리를 저장하는 등 백엔드가 프로젝트를 바꾸면 목록에 반영
+  useEffect(() => {
+    let cancelled = false;
+    let unlistenFn: (() => void) | null = null;
+    BackendAPI.onProjectUpdated((updated) => {
+      if (cancelled) return;
+      setProjects((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlistenFn = fn;
+    });
     return () => {
       cancelled = true;
       if (unlistenFn) unlistenFn();
@@ -2230,6 +2248,11 @@ export default function App() {
                     </p>
                   </div>
                 </div>
+
+                <ProjectMemoryCard
+                  project={activeProject}
+                  onChange={(updated) => setProjects((prev) => prev.map((p) => (p.id === updated.id ? updated : p)))}
+                />
 
                 <div className="p-4 rounded-xl bg-[#FAF9F5] dark:bg-[#1E1E1C] border border-stone-200/80 dark:border-[#343430] space-y-2">
                   <div className="text-xs font-bold text-stone-700 dark:text-stone-300">묻지 않고 실행</div>

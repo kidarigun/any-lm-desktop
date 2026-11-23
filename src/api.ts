@@ -805,6 +805,32 @@ export const BackendAPI = {
     return proj;
   },
 
+  /** 프로젝트 메모리 조작. 바뀐 Project를 돌려준다. */
+  async addProjectMemory(projectId: string, text: string): Promise<Project> {
+    if (!isTauri()) throw new Error("프로젝트 메모리는 앱에서만 쓸 수 있습니다.");
+    return await invoke<Project>("add_project_memory", { projectId, text });
+  },
+
+  async updateProjectMemory(projectId: string, memoryId: string, text: string): Promise<Project> {
+    if (!isTauri()) throw new Error("프로젝트 메모리는 앱에서만 쓸 수 있습니다.");
+    return await invoke<Project>("update_project_memory", { projectId, memoryId, text });
+  },
+
+  async deleteProjectMemory(projectId: string, memoryId: string): Promise<Project> {
+    if (!isTauri()) throw new Error("프로젝트 메모리는 앱에서만 쓸 수 있습니다.");
+    return await invoke<Project>("delete_project_memory", { projectId, memoryId });
+  },
+
+  /** 모델이 remember로 메모리를 저장하는 등 프로젝트가 바뀌면 알려 준다. */
+  async onProjectUpdated(handler: (project: Project) => void): Promise<UnlistenFn> {
+    if (isTauri()) {
+      return await listen<Project>("anylm-project-updated", (event) => {
+        handler(event.payload);
+      });
+    }
+    return () => {};
+  },
+
   async onExaoneStream(
     handler: (payload: StreamChunkPayload) => void
   ): Promise<UnlistenFn> {

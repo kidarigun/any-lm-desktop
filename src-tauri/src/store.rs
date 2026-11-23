@@ -56,6 +56,21 @@ pub struct Project {
     /// 이 프로젝트에서 묻지 않고 실행하도록 사용자가 허락한 도구 ("run_python", "run_command")
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub auto_approve: Vec<String>,
+    /// 프로젝트 메모리: 모델(remember 도구)과 사용자가 함께 쓰는 짧은 사실 목록. 오래된 것이 앞.
+    #[serde(default)]
+    pub memory: Vec<MemoryItem>,
+}
+
+/// 프로젝트 메모리 항목 하나
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryItem {
+    pub id: String,
+    pub text: String,
+    pub created_at: String,
+    pub updated_at: String,
+    /// "model" | "user"
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -376,6 +391,7 @@ impl StoreManager {
             instructions: "당신은 최고 수준의 한국어 글쓰기·보고서·문서 작성 및 로컬 코딩 에이전트입니다. 사용자의 프로젝트 폴더 내 파일들을 직접 읽고, 작성하고, 수정하여 완성도 높은 결과물을 만드세요.".to_string(),
             created_at: chrono::Local::now().to_rfc3339(),
             auto_approve: Vec::new(),
+            memory: Vec::new(),
         };
 
         let db = AppDatabase {
