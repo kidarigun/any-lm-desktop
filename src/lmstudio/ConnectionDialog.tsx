@@ -4,6 +4,7 @@ import { BackendAPI } from "../api";
 import { RuntimePanel } from "../runtime/RuntimePanel";
 import type { AppSettings, LmModel } from "../types";
 import { capabilityBadges, describeModel, loadedLabel, normalizeContext } from "./modelText";
+import { isServerOffMessage, smallerContext, smallerContextLabel } from "./sendFlow";
 
 const DEFAULT_CONTEXT = 32768;
 const BADGE_TEXT = { vision: "비전", tools: "도구", reasoning: "추론" } as const;
@@ -27,6 +28,8 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged 
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** 로드에 실패한 모델과 시도한 컨텍스트 (오류 옆에 [N K로 다시 시도]) */
+  const [loadFailed, setLoadFailed] = useState<{ key: string; context: number } | null>(null);
 
   const refresh = useCallback(async () => {
     let up = false;
@@ -43,6 +46,7 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged 
     try {
       setModels(await BackendAPI.listModels());
     } catch (err) {
+      setLoadFailed(null);
       setError(String(err));
     }
   }, []);
@@ -82,6 +86,7 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged 
   async function startServer() {
     setStarting(true);
     setError(null);
+    setLoadFailed(null);
     try {
       await BackendAPI.startServer();
     } catch (err) {
@@ -92,11 +97,13 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged 
     }
   }
 
-  async function load(m: LmModel, reload: boolean) {
+  async function load(m: LmModel, reload: boolean, context?: number) {
     const raw = ctxText[m.key];
-    const ctx = raw !== undefined ? (normalizeContext(raw, m.maxContextLength) ?? contextOf(m)) : contextOf(m);
+    const ctx =
+      context ?? (raw !== undefined ? (normalizeContext(raw, m.maxContextLength) ?? contextOf(m)) : contextOf(m));
     setBusyKey(m.key);
     setError(null);
+    setLoadFailed(null);
     try {
       if (reload) {
         for (const inst of m.loaded) await BackendAPI.unloadModel(inst.id);
@@ -104,15 +111,28 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged 
       await BackendAPI.loadModel(m.key, ctx);
     } catch (err) {
       setError(String(err));
+      setLoadFailed({ key: m.key, context: ctx });
     } finally {
       setBusyKey(null);
       await refresh();
     }
   }
 
+  /** [N K로 다시 시도]: 절반 컨텍스트(바닥 4K)를 이 모델의 컨텍스트 칸에 넣고 로드한다([저장]하면 유지된다). */
+  async function retrySmaller() {
+    if (!loadFailed) return;
+    const n = smallerContext(loadFailed.context);
+    const m = models.find((x) => x.key === loadFailed.key);
+    if (n === null || !m) return;
+    setDraft((d) => commitContext(d, m, String(n)));
+    setCtxText(({ [m.key]: _drop, ...rest }) => rest);
+    await load(m, m.loaded.length > 0, n);
+  }
+
   async function unload(m: LmModel) {
     setBusyKey(m.key);
     setError(null);
+    setLoadFailed(null);
     try {
       for (const inst of m.loaded) await BackendAPI.unloadModel(inst.id);
     } catch (err) {
@@ -132,6 +152,7 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged 
     try {
       await onSave(next);
     } catch (err) {
+      setLoadFailed(null);
       setError(String(err));
     }
   }
@@ -352,8 +373,17 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged 
         </div>
 
         {error && (
-          <div className="rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 px-3 py-2 text-xs text-red-700 dark:text-red-300">
-            {error}
+          <div className="rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 px-3 py-2 text-xs text-red-700 dark:text-red-300 flex items-center justify-between gap-3">
+            <span className="min-w-0 break-words">{error}</span>
+            {loadFailed && !isServerOffMessage(error) && smallerContext(loadFailed.context) !== null && (
+              <button
+                onClick={() => void retrySmaller()}
+                disabled={busyKey !== null}
+                className="shrink-0 px-2 py-1 rounded-md border border-red-300 dark:border-red-800 font-semibold cursor-pointer disabled:opacity-50"
+              >
+                {smallerContextLabel(smallerContext(loadFailed.context)!)}
+              </button>
+            )}
           </div>
         )}
         <div className="flex justify-end gap-2 pt-2">

@@ -341,23 +341,70 @@ pub fn lms_path() -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
-/// `lms server start`를 창 없이 실행한다.
+/// `lms server start`가 끝나기를 기다리는 최대 시간.
+const START_SERVER_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// `lms server start`를 창 없이 실행한다. 늘 시간 안에 돌아온다.
 pub fn start_server() -> Result<(), String> {
     let lms = lms_path().ok_or_else(|| LMS_MISSING_MESSAGE.to_string())?;
     let mut cmd = std::process::Command::new(lms);
     cmd.args(["server", "start"]);
+    let (ok, msg) = run_quiet(cmd, START_SERVER_TIMEOUT)?;
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("서버를 시작하지 못했습니다: {}", msg.trim().chars().take(300).collect::<String>()))
+    }
+}
+
+/// 명령을 창 없이 실행하고 (성공 여부, stdout+stderr)를 돌려준다.
+///
+/// `Command::output()`은 출력 파이프가 닫힐 때까지 기다리므로, 명령이 띄운 상주 프로세스(LM Studio
+/// 데몬)가 파이프를 물려받으면 끝나지 않는다. 그래서 입력은 비우고 출력은 임시 파일로 받으며,
+/// 명령 자체가 끝나기만 기다린다(`timeout`을 넘기면 그 명령만 끝내고 오류).
+fn run_quiet(mut cmd: std::process::Command, timeout: Duration) -> Result<(bool, String), String> {
+    use std::process::Stdio;
+    let log_path = std::env::temp_dir().join(format!("anylm-cmd-{}.log", uuid::Uuid::new_v4()));
+    let log = std::fs::File::create(&log_path).map_err(|e| format!("임시 파일을 만들지 못했습니다: {e}"))?;
+    let log_err = log.try_clone().map_err(|e| e.to_string())?;
+    cmd.stdin(Stdio::null()).stdout(Stdio::from(log)).stderr(Stdio::from(log_err));
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let out = cmd.output().map_err(|e| format!("lms 실행 실패: {e}"))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        let msg = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-        Err(format!("서버를 시작하지 못했습니다: {}", msg.trim().chars().take(300).collect::<String>()))
+    let read_log = |p: &std::path::Path| {
+        let text = std::fs::read(p).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+        let _ = std::fs::remove_file(p);
+        text
+    };
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = std::fs::remove_file(&log_path);
+            return Err(format!("lms 실행 실패: {e}"));
+        }
+    };
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok((status.success(), read_log(&log_path))),
+            Ok(None) if started.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = read_log(&log_path);
+                return Err(format!(
+                    "서버 시작 명령이 {}초 안에 끝나지 않았습니다. LM Studio를 직접 열어 서버를 켜 주세요.",
+                    timeout.as_secs()
+                ));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) => {
+                let _ = read_log(&log_path);
+                return Err(format!("lms 실행 실패: {e}"));
+            }
+        }
     }
 }
 
@@ -378,6 +425,47 @@ mod tests {
         assert!(server_urls("https://localhost.evil.com").is_err());
         assert!(server_urls("http://user:pw@localhost:1234").is_err());
         assert!(server_urls("not a url").is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn run_quiet_returns_even_if_a_child_keeps_running() {
+        // `lms server start`처럼, 명령은 바로 끝나지만 띄운 프로세스가 5초 더 살아 있다.
+        // Command::output()이었다면 그 프로세스가 출력 파이프를 물려받아 5초 넘게 기다린다.
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/C", "start", "/B", "ping", "-n", "6", "127.0.0.1", "&", "echo", "started"]);
+        let t = std::time::Instant::now();
+        let (ok, out) = run_quiet(cmd, Duration::from_secs(20)).unwrap();
+        assert!(ok);
+        assert!(out.contains("started"), "{out}");
+        assert!(t.elapsed() < Duration::from_secs(4), "{:?}", t.elapsed());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn run_quiet_times_out_and_reports_failure() {
+        let mut cmd = std::process::Command::new("ping");
+        cmd.args(["-n", "30", "127.0.0.1"]);
+        let t = std::time::Instant::now();
+        let err = run_quiet(cmd, Duration::from_millis(800)).unwrap_err();
+        assert!(err.contains("끝나지 않았습니다"), "{err}");
+        assert!(t.elapsed() < Duration::from_secs(5));
+
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/C", "echo", "bad", "&", "exit", "3"]);
+        let (ok, out) = run_quiet(cmd, Duration::from_secs(10)).unwrap();
+        assert!(!ok && out.contains("bad"), "{out}");
+    }
+
+    /// 실제 `lms`로 확인(LM Studio가 설치된 PC에서만): 서버를 건드리지 않는 `lms server status`.
+    #[test]
+    #[ignore]
+    fn lms_status_returns_through_run_quiet() {
+        let Some(lms) = lms_path() else { return };
+        let mut cmd = std::process::Command::new(lms);
+        cmd.args(["server", "status"]);
+        let (ok, out) = run_quiet(cmd, Duration::from_secs(30)).unwrap();
+        eprintln!("ok={ok} out={out}");
     }
 
     #[test]

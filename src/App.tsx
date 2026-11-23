@@ -58,7 +58,15 @@ import { ConnectionDialog } from "./lmstudio/ConnectionDialog";
 import { LoadChoiceDialog, type LoadChoice } from "./lmstudio/LoadChoiceDialog";
 import { ModelPicker, ReasoningToggle } from "./lmstudio/ModelPicker";
 import { reasoningEnabled, withReasoning } from "./lmstudio/modelText";
-import { MODEL_MISSING_TEXT, nextSendStep, wantedContext } from "./lmstudio/sendFlow";
+import {
+  MODEL_MISSING_TEXT,
+  isServerOffMessage,
+  nextSendStep,
+  smallerContext,
+  smallerContextLabel,
+  wantedContext,
+} from "./lmstudio/sendFlow";
+import { StartServerButton } from "./lmstudio/StartServerButton";
 import { statsLineText } from "./chat/statsLine";
 import { RuntimePanel } from "./runtime/RuntimePanel";
 import {
@@ -158,7 +166,14 @@ function isInterruptedAssistantMessage(content: string): boolean {
   return content.includes('"계속"이라고 입력');
 }
 
-function estimateContextInfo(conv: Conversation | null) {
+/** 컨텍스트 길이를 알 수 없을 때(백엔드 `context_budget::FALLBACK_CONTEXT`와 같다) */
+const FALLBACK_CONTEXT = 8192;
+
+/**
+ * 입력창의 컨텍스트 표시. 로드된 컨텍스트(`contextLength`) 대비 비율이다(자동 압축 기준 70%와 같은 잣대).
+ * 토큰은 압축 뒤에 받은 마지막 답변의 prompt_tokens, 없으면 글자 수 / 1.5(전역 규칙).
+ */
+function estimateContextInfo(conv: Conversation | null, contextLength: number) {
   if (!conv) {
     return {
       totalMessages: 0,
@@ -175,18 +190,21 @@ function estimateContextInfo(conv: Conversation | null) {
   const summaryChars = conv.compaction?.summary.length ?? 0;
   let activeChars = summaryChars;
   let lastActivePromptTokens = 0;
+  // 압축(또는 요약 카드 수정)보다 먼저 잰 토큰 수는 압축 전 대화 크기라 쓰지 않는다(백엔드 should_auto_compact와 같다).
+  const compactedAt = conv.compaction ? Date.parse(conv.compaction.createdAt) : NaN;
   for (const m of active) {
     activeChars += m.content?.length ?? 0;
     for (const tr of m.toolRecords ?? []) {
       activeChars += tr.output?.length ?? 0;
     }
-    if (m.stats && m.stats.promptTokens > 0) {
+    const fresh = !conv.compaction || Date.parse(m.createdAt) > compactedAt;
+    if (fresh && m.stats && m.stats.promptTokens > 0) {
       lastActivePromptTokens = m.stats.promptTokens;
     }
   }
   const approxTokens =
-    lastActivePromptTokens > 0 ? lastActivePromptTokens : Math.round(activeChars / 3.2);
-  const percent = Math.min(100, Math.round((activeChars / 120000) * 100));
+    lastActivePromptTokens > 0 ? lastActivePromptTokens : Math.ceil(activeChars / 1.5);
+  const percent = Math.min(100, Math.round((approxTokens / Math.max(1, contextLength)) * 100));
   return {
     totalMessages: conv.messages.length,
     coveredMessages: covered,
@@ -502,10 +520,6 @@ export default function App() {
   const shownConvId = activeConversation?.id ?? "";
   const shownConvIdRef = useRef(shownConvId);
   shownConvIdRef.current = shownConvId;
-  const contextInfo = useMemo(
-    () => estimateContextInfo(activeConversation),
-    [activeConversation]
-  );
   const activeRun = shownConvId ? runs[shownConvId] : undefined;
   const isStreaming = !!activeRun;
 
@@ -520,8 +534,8 @@ export default function App() {
     wantedName: string;
     resolve: (c: LoadChoice) => void;
   } | null>(null);
-  /** 로드에 실패한 모델 (오류 옆에 [내리고 로드]를 보여 준다) */
-  const [loadFailure, setLoadFailure] = useState<{ key: string } | null>(null);
+  /** 로드에 실패한 모델과 시도한 컨텍스트 (오류 옆에 [내리고 로드]·[N K로 다시 시도]를 보여 준다) */
+  const [loadFailure, setLoadFailure] = useState<{ key: string; context: number } | null>(null);
   const preparingModel = useRef(false);
   const refreshModels = React.useCallback(async () => {
     try {
@@ -537,6 +551,12 @@ export default function App() {
     ? activeConversation.modelKey || settings.model
     : pendingModelKey || settings.model;
   const modelName = (key: string) => models.find((m) => m.key === key)?.displayName ?? key;
+  const loadedContext =
+    models.find((m) => m.key === effectiveModelKey)?.loaded[0]?.contextLength || FALLBACK_CONTEXT;
+  const contextInfo = useMemo(
+    () => estimateContextInfo(activeConversation, loadedContext),
+    [activeConversation, loadedContext]
+  );
   const kLabel = (n: number) => `${Math.round(n / 1024)}K`;
 
   /** "생각하기" 토글: 모델별 설정에 저장한다. 다음 요청부터 적용된다. */
@@ -569,12 +589,17 @@ export default function App() {
     }
   }
 
-  /** 모델을 로드한다. unloadOthers면 다른 모델의 로드된 인스턴스를 먼저 내린다. 실패하면 던진다. */
-  async function loadModelForSend(key: string, unloadOthers: boolean) {
+  /**
+   * 모델을 로드한다. unloadOthers면 다른 모델의 로드된 인스턴스를 먼저 내린다. context가 없으면 원하는 컨텍스트.
+   * 실패하면 던진다.
+   */
+  async function loadModelForSend(key: string, unloadOthers: boolean, context?: number) {
+    let attempted = context ?? 0;
     try {
       const fresh = await BackendAPI.listModels();
       const model = fresh.find((m) => m.key === key);
       if (!model) throw new Error(MODEL_MISSING_TEXT);
+      attempted = context ?? wantedContext(settings, model);
       setModelNotice(`${model.displayName} 로드 중…`);
       if (unloadOthers) {
         for (const m of fresh) {
@@ -582,10 +607,10 @@ export default function App() {
           for (const inst of m.loaded) await BackendAPI.unloadModel(inst.id);
         }
       }
-      await BackendAPI.loadModel(key, wantedContext(settings, model));
+      await BackendAPI.loadModel(key, attempted);
       setLoadFailure(null);
     } catch (err) {
-      setLoadFailure({ key });
+      setLoadFailure({ key, context: attempted });
       throw err;
     } finally {
       setModelNotice(null);
@@ -640,7 +665,7 @@ export default function App() {
       setReloadHint(null);
     } catch (err: any) {
       setErrorBanner(String(err));
-      setLoadFailure({ key: hint.key });
+      setLoadFailure({ key: hint.key, context: hint.wanted });
     } finally {
       setModelNotice(null);
       preparingModel.current = false;
@@ -650,17 +675,63 @@ export default function App() {
 
   async function retryLoadUnloadingOthers() {
     if (!loadFailure || preparingModel.current) return;
-    const key = loadFailure.key;
+    const { key, context } = loadFailure;
     preparingModel.current = true;
     setErrorBanner(null);
     try {
-      await loadModelForSend(key, true);
+      // 작게 다시 시도한 뒤 실패했다면 그 작은 값으로 다시 로드한다.
+      await loadModelForSend(key, true, context > 0 ? context : undefined);
       setReloadHint(null);
     } catch (err: any) {
       setErrorBanner(String(err));
     } finally {
       preparingModel.current = false;
     }
+  }
+
+  /** [N K로 다시 시도]: 시도한 컨텍스트의 절반(바닥 4K)으로 로드하고, 되면 그 값을 모델별 설정에 저장한다. */
+  async function retryLoadSmaller() {
+    if (!loadFailure || preparingModel.current) return;
+    const { key, context } = loadFailure;
+    const smaller = smallerContext(context);
+    if (smaller === null) return;
+    preparingModel.current = true;
+    setErrorBanner(null);
+    try {
+      await loadModelForSend(key, false, smaller);
+      setReloadHint(null);
+      // 다음 보내기에서 "작게 로드됨" 안내가 뜨지 않게 원하는 컨텍스트도 맞춘다.
+      const prefs = settings.modelPrefs ?? {};
+      const saved = await BackendAPI.saveSettings({
+        ...settings,
+        apiKey: "",
+        modelPrefs: { ...prefs, [key]: { ...prefs[key], contextLength: smaller } },
+      });
+      setSettings({ ...saved, apiKey: "" });
+    } catch (err: any) {
+      setErrorBanner(String(err));
+    } finally {
+      preparingModel.current = false;
+    }
+  }
+
+  /** [서버 시작]이 끝나면 연결을 다시 확인하고, 켜졌으면 "서버가 꺼져 있습니다" 안내를 지운다. */
+  async function afterServerStart() {
+    let up = false;
+    try {
+      up = await BackendAPI.serverRunning();
+    } catch {
+      up = false;
+    }
+    setServerUp(up);
+    if (!up) return;
+    setErrorBanner((prev) => (isServerOffMessage(prev) ? null : prev));
+    setRunErrors((prev) => {
+      const next = { ...prev };
+      for (const [id, text] of Object.entries(next)) if (isServerOffMessage(text)) delete next[id];
+      return next;
+    });
+    void refreshModels();
   }
   const streamingReasoning = activeRun?.reasoning ?? "";
   const streamingContent = activeRun?.content ?? "";
@@ -2030,6 +2101,10 @@ export default function App() {
         {shownConvId && runErrors[shownConvId] && !isStreaming && (
           <div className="bg-red-50 dark:bg-red-950/60 border-b border-red-200 dark:border-red-900 px-6 py-2 text-xs text-red-700 dark:text-red-300 flex items-center justify-between gap-3">
             <span className="min-w-0 break-words">{runErrors[shownConvId]}</span>
+            <span className="flex items-center gap-3 shrink-0 max-w-[50%]">
+            {(isServerOffMessage(runErrors[shownConvId]) || serverUp === false) && (
+              <StartServerButton onDone={afterServerStart} />
+            )}
             <button
               onClick={() =>
                 setRunErrors((prev) => {
@@ -2043,14 +2118,26 @@ export default function App() {
             >
               <X className="w-3.5 h-3.5" />
             </button>
+            </span>
           </div>
         )}
 
         {errorBanner && (
-          <div className="bg-red-50 dark:bg-red-950/60 border-b border-red-200 dark:border-red-900 px-6 py-2 text-xs text-red-700 dark:text-red-300 flex items-center justify-between">
-            <span>{errorBanner}</span>
-            <span className="flex items-center gap-3 shrink-0">
-              {loadFailure && (
+          <div className="bg-red-50 dark:bg-red-950/60 border-b border-red-200 dark:border-red-900 px-6 py-2 text-xs text-red-700 dark:text-red-300 flex items-center justify-between gap-3">
+            <span className="min-w-0 break-words">{errorBanner}</span>
+            <span className="flex items-center gap-3 shrink-0 max-w-[50%]">
+              {(isServerOffMessage(errorBanner) || serverUp === false) && (
+                <StartServerButton onDone={afterServerStart} />
+              )}
+              {loadFailure && !isServerOffMessage(errorBanner) && smallerContext(loadFailure.context) !== null && (
+                <button
+                  onClick={() => void retryLoadSmaller()}
+                  className="px-2 py-1 rounded-md border border-red-300 dark:border-red-800 font-semibold cursor-pointer"
+                >
+                  {smallerContextLabel(smallerContext(loadFailure.context)!)}
+                </button>
+              )}
+              {loadFailure && !isServerOffMessage(errorBanner) && (
                 <button
                   onClick={() => void retryLoadUnloadingOthers()}
                   className="px-2 py-1 rounded-md border border-red-300 dark:border-red-800 font-semibold cursor-pointer"
@@ -2883,9 +2970,9 @@ export default function App() {
                         type="button"
                         disabled={isStreaming}
                         onClick={() => openCompactModal()}
-                        title={`지금까지의 대화를 요약해 컨텍스트 창을 비웁니다 (/compact)\n현재 활성 컨텍스트: 약 ${contextInfo.approxTokens.toLocaleString()} 토큰 (${contextInfo.activeChars.toLocaleString()}자)`}
+                        title={`지금까지의 대화를 요약해 컨텍스트 창을 비웁니다 (/compact)\n현재 활성 컨텍스트: 약 ${contextInfo.approxTokens.toLocaleString()} 토큰 (${contextInfo.activeChars.toLocaleString()}자) · 로드된 컨텍스트의 ${contextInfo.percent}%`}
                         className={`ml-0.5 pl-2 pr-2.5 py-1 rounded-lg border-l border-stone-200 dark:border-[#383834] text-xs font-medium flex items-center gap-1.5 cursor-pointer transition disabled:opacity-40 ${
-                          contextInfo.percent >= 80
+                          contextInfo.percent >= 70
                             ? "text-[#A50034] dark:text-[#FF5C8D] bg-[#A50034]/10 dark:bg-[#FF5C8D]/15"
                             : contextInfo.percent >= 55
                               ? "text-amber-700 dark:text-amber-300 bg-amber-500/10"
