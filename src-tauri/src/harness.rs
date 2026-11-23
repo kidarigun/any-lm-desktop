@@ -19,11 +19,14 @@
 //!   ANYLM_PAUSE_SEC  시나리오 사이에 쉬는 시간 (기본 1초)
 //!   ANYLM_RERUN      1이면 이미 결과가 있는 시나리오도 다시 실행
 //!
+//! 시나리오의 `mcpServers`에 적은 MCP 서버는 앱의 `mcp` 모듈(McpManager)로 연결해 앱과 같은 도구 목록·[MCP] 절로 시험하고,
+//! 시나리오가 끝나면 지운다. 비밀 값(헤더·환경 변수)은 메모리에만 둔다(자격 증명 관리자에 쓰지 않는다).
+//!
 //! 이 하니스는 모델을 로드하거나 내리지 않는다. LM Studio에서 모델을 미리 로드해 둘 것.
 
 use crate::exaone::{self, RoundTrace, TurnRequest, Tuning};
 use crate::store::{AppSettings, ChatMessage, Project};
-use crate::{doc_bridge, knowledge, lmstudio, run_approved_tool, runtime, skills};
+use crate::{doc_bridge, knowledge, lmstudio, mcp, run_approved_tool, runtime, skills};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -36,7 +39,7 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 struct Check {
-    /// fileExists | fileMissing | fileContains | fileNotContains | toolCalled | toolNotCalled
+    /// fileExists | fileMissing | fileContains | fileNotContains | toolCalled | toolCalledContains | toolNotCalled
     /// | answerContains | answerNotContains | answerMinChars | answerMaxChars | noToolErrors | finished
     kind: String,
     path: String,
@@ -66,9 +69,90 @@ struct Scenario {
     knowledge_folders: Vec<String>,
     /// 사용자가 차례로 보내는 메시지
     turns: Vec<String>,
-    /// 승인을 요청받으면 허락할 도구 이름 (그 밖에는 거부)
+    /// 승인을 요청받으면 허락할 도구 이름 (그 밖에는 거부). MCP 도구는 여기 없어도 하니스가 승인하고 기록에 남긴다.
     approve: Vec<String>,
+    /// 연결할 MCP 서버 (앱의 mcp 모듈로 연결한다)
+    mcp_servers: Vec<HarnessMcp>,
+    /// false면 Skill 자동 불러오기를 끈다 (없으면 앱 기본값: 켜짐)
+    skill_auto_load: Option<bool>,
     checks: Vec<Check>,
+}
+
+/// 시나리오에서 연결할 MCP 서버 하나. `url`이 있으면 원격(HTTP), 없으면 `command`를 실행하는 로컬 서버.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+struct HarnessMcp {
+    name: String,
+    url: String,
+    headers: BTreeMap<String, String>,
+    command: String,
+    args: Vec<String>,
+    env: BTreeMap<String, String>,
+    /// 찾아보기 항목 ID (예: "exa" — 내장 검색 서버면 [MCP] 절에 웹 검색 안내 줄이 붙는다)
+    catalog_id: String,
+    /// 승인 없이 실행할 도구 (서버의 원래 도구 이름). 나머지는 승인 요청으로 멈추고 하니스가 승인한다.
+    auto_approve: Vec<String>,
+}
+
+impl HarnessMcp {
+    fn config(&self) -> mcp::McpServerConfig {
+        mcp::McpServerConfig {
+            name: self.name.clone(),
+            enabled: true,
+            transport: if self.url.trim().is_empty() { "stdio" } else { "http" }.to_string(),
+            command: self.command.clone(),
+            args: self.args.clone(),
+            url: self.url.clone(),
+            env_keys: self.env.keys().cloned().collect(),
+            header_keys: self.headers.keys().cloned().collect(),
+            auto_approve: self.auto_approve.clone(),
+            catalog_id: self.catalog_id.clone(),
+            ..Default::default()
+        }
+    }
+}
+
+/// MCP 서버 연결 시도의 최대 대기 시간
+const MCP_CONNECT_WAIT: Duration = Duration::from_secs(60);
+
+/// 시나리오의 MCP 서버를 앱과 같은 관리자에 추가하고 연결될 때까지 기다린다. (서버 ID, 기록) 목록.
+async fn connect_mcp_servers(mgr: &Arc<mcp::McpManager>, servers: &[HarnessMcp]) -> Vec<(Option<String>, Value)> {
+    let mut out = Vec::new();
+    for s in servers {
+        let env = s.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let headers = s.headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let cfg = match mgr.save(s.config(), env, headers, None) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("  ! MCP '{}' 설정 오류: {}", s.name, e);
+                out.push((None, json!({ "name": s.name, "status": "error", "error": e })));
+                continue;
+            }
+        };
+        let started = Instant::now();
+        let view = loop {
+            let view = mgr.list().into_iter().find(|v| v.config.id == cfg.id);
+            let settled = view.as_ref().is_some_and(|v| !matches!(v.state.status.as_str(), "connecting" | ""));
+            if settled || started.elapsed() > MCP_CONNECT_WAIT {
+                break view;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
+        let (status, error, tools) = match &view {
+            Some(v) => (v.state.status.clone(), v.state.error.clone(), v.state.tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>()),
+            None => ("error".to_string(), Some("서버를 찾지 못했습니다.".to_string()), Vec::new()),
+        };
+        println!(
+            "  · MCP '{}' {} ({}ms){} 도구 {:?}",
+            s.name,
+            status,
+            started.elapsed().as_millis(),
+            error.as_deref().map(|e| format!(" 오류: {}", e.chars().take(160).collect::<String>())).unwrap_or_default(),
+            tools
+        );
+        out.push((Some(cfg.id.clone()), json!({ "name": s.name, "status": status, "error": error, "tools": tools, "connectMs": started.elapsed().as_millis() as u64 })));
+    }
+    out
 }
 
 #[derive(Debug, Serialize)]
@@ -240,6 +324,8 @@ fn run_check(c: &Check, root: &Path, turns: &[TurnLog]) -> (bool, String) {
         "maxCalls" => turns.iter().map(|t| t.traces.len()).sum::<usize>() <= c.n,
         "fileNotContains" => root.join(&c.path).is_file() && !file().contains(&c.text),
         "toolCalled" => all_tools.iter().any(|t| t.tool_name == c.text),
+        // MCP 도구는 모델에 mcp__<서버>__<도구>로 보이므로 이름의 일부로 찾는다.
+        "toolCalledContains" => all_tools.iter().any(|t| t.tool_name.contains(&c.text)),
         "toolNotCalled" => !all_tools.iter().any(|t| t.tool_name == c.text),
         "answerContains" => answer.contains(&c.text),
         "answerNotContains" => !answer.contains(&c.text),
@@ -318,10 +404,15 @@ async fn live() {
     skills::set_user_dir(out_dir.join("user-skills"));
 
     let app = mock_app_with_converter();
+    // MCP: 앱과 같은 관리자. 설정 파일은 결과 폴더에 두고(지난 실행의 것은 지운다), 비밀 값은 메모리에만.
+    let mcp_path = out_dir.join("mcp-servers.json");
+    let _ = std::fs::remove_file(&mcp_path);
+    let mcp_manager = mcp::McpManager::new(mcp_path, Box::new(mcp::MemorySecrets::default()));
     {
         use tauri::Manager;
         // 지식 폴더 색인(앱 상태가 없어 폴더 목록은 시나리오에서 받는다). 문서 변환은 위의 흉내 변환기.
         app.manage(knowledge::KnowledgeManager::new(out_dir.join("knowledge")));
+        app.manage(mcp_manager.clone());
     }
     exaone::trace_start();
     let mut stop_reason: Option<String> = None;
@@ -380,10 +471,15 @@ async fn live() {
             knowledge::refresh_project(app.handle(), &p.id, p.knowledge_folders.clone(), knowledge::RefreshMode::Full).await;
         }
 
-        let settings = base_settings.clone();
+        let mut settings = base_settings.clone();
+        if let Some(on) = sc.skill_auto_load {
+            settings.skill_auto_load = on;
+        }
         exaone::set_tuning(sc.tuning.clone());
 
         println!("\n=== {} [{}] {}", sc.id, sc.mode, sc.note);
+        let mcp_conn = connect_mcp_servers(&mcp_manager, &sc.mcp_servers).await;
+        let mut auto_skills: Vec<String> = Vec::new();
         let started_at = chrono::Local::now().to_rfc3339();
         let sc_start = Instant::now();
         let mut history: Vec<ChatMessage> = Vec::new();
@@ -416,6 +512,13 @@ async fn live() {
             if !knowledge_section.is_empty() {
                 println!("  · 참고 자료 {}자 ({}조각)", knowledge_section.chars().count(), knowledge_section.matches("### 출처: ").count());
             }
+            // 앱의 턴 시작과 같다: 이번 메시지에 맞는 Skill을 골라 미리 넣는다(설정이 켜져 있을 때).
+            let project_ctx = project.as_ref().map(|p| (p.id.as_str(), Path::new(&p.root_path)));
+            let auto_skill = skills::auto_for_turn(project_ctx, prompt, config.context_length, settings.skill_auto_load);
+            if let Some(s) = &auto_skill {
+                println!("  · Skill 자동 불러옴: {} ({:?}, {}자{})", s.name, s.reason, s.text.chars().count(), if s.truncated { ", 잘림" } else { "" });
+                auto_skills.push(s.name.clone());
+            }
 
             // 승인 대기로 멈추면 승인/거부를 처리하고 같은 메시지를 이어 간다 (앱의 승인 흐름과 같다).
             for _ in 0..12 {
@@ -435,6 +538,7 @@ async fn live() {
                         mode: &sc.mode,
                         checkpoint: None,
                         knowledge: &knowledge_section,
+                        auto_skill: auto_skill.as_ref(),
                     },
                     Arc::new(AtomicBool::new(false)),
                 )
@@ -474,7 +578,9 @@ async fn live() {
                         (r.id.clone(), r.tool_name.clone(), serde_json::from_str::<Value>(&r.arguments_json).unwrap_or_default())
                     };
                     let blocked = unsafe_reason(&tool_name, &args, &root);
-                    let allowed = sc.approve.contains(&tool_name);
+                    // MCP 도구: 앱이라면 사용자에게 승인을 물었을 도구다. 하니스는 승인하고 기록에 남긴다.
+                    let is_mcp = tool_name.starts_with(mcp::TOOL_PREFIX);
+                    let allowed = sc.approve.contains(&tool_name) || is_mcp;
                     let (status, output, produced) = if !allowed {
                         ("rejected".to_string(), "사용자가 실행을 거부했습니다.".to_string(), Vec::new())
                     } else if let Some(why) = &blocked {
@@ -483,8 +589,8 @@ async fn live() {
                         let run = run_approved_tool(app.handle(), project.as_ref(), &tool_id, &tool_name, &args, false).await;
                         (run.status.to_string(), run.output, run.produced)
                     };
-                    println!("  · 승인 요청 {} → {}", tool_name, status);
-                    log.approvals.push(json!({ "tool": tool_name, "args": args, "allowed": allowed, "blocked": blocked, "status": status }));
+                    println!("  · 승인 요청 {} → {}{}", tool_name, status, if is_mcp { " (MCP: 앱이면 승인을 물었을 도구, 하니스가 승인)" } else { "" });
+                    log.approvals.push(json!({ "tool": tool_name, "args": args, "allowed": allowed, "blocked": blocked, "status": status, "wouldAskApproval": true, "harnessApproved": is_mcp }));
                     let r = &mut msg.tool_records[i];
                     r.status = status;
                     r.output = output;
@@ -520,6 +626,11 @@ async fn live() {
             }
         }
 
+        // MCP 서버 연결 끊기·지우기 (다음 시나리오에 남지 않게)
+        for id in mcp_conn.iter().filter_map(|(id, _)| id.as_ref()) {
+            let _ = mcp_manager.delete(id);
+        }
+
         let checks: Vec<Value> = sc
             .checks
             .iter()
@@ -553,6 +664,9 @@ async fn live() {
             "reasoningChars": all_traces.iter().map(|t| t.reasoning_chars).sum::<usize>(),
             "contentChars": all_traces.iter().map(|t| t.content_chars).sum::<usize>(),
             "maxGapMs": all_traces.iter().map(|t| t.max_gap_ms).max().unwrap_or(0),
+            // 앱이 미리 불러온 Skill (모델이 부른 load_skill은 "tools"에 있다)
+            "autoSkills": auto_skills,
+            "mcp": mcp_conn.iter().map(|(_, v)| v.clone()).collect::<Vec<_>>(),
             "checksPassed": checks.iter().filter(|c| c["ok"] == true).count(),
             "checksTotal": checks.len(),
             "checks": checks,
@@ -648,4 +762,69 @@ fn config_reads_overrides() {
     assert_eq!((c.server_url.as_str(), c.context_length), ("http://127.0.0.1:5000", 8192));
     assert_eq!(c.out_dir, PathBuf::from("out"));
     assert!(config_from_env(|k| match k { "ANYLM_MODEL" => Some("m".into()), "ANYLM_CONTEXT" => Some("x".into()), _ => None }).is_err());
+}
+
+#[test]
+fn scenario_reads_mcp_servers_and_skill_switch() {
+    let sc: Scenario = serde_json::from_value(json!({
+        "id": "s",
+        "mode": "project",
+        "skillAutoLoad": false,
+        "mcpServers": [
+            { "name": "Exa", "url": "https://mcp.exa.ai/mcp", "catalogId": "exa", "autoApprove": ["web_search_exa"] },
+            { "name": "Local", "command": "npx", "args": ["-y", "pkg"], "env": { "KEY": "v" } }
+        ]
+    }))
+    .unwrap();
+    assert_eq!(sc.skill_auto_load, Some(false));
+    let exa = sc.mcp_servers[0].config();
+    assert_eq!((exa.transport.as_str(), exa.url.as_str(), exa.catalog_id.as_str()), ("http", "https://mcp.exa.ai/mcp", "exa"));
+    assert_eq!(exa.auto_approve, vec!["web_search_exa".to_string()]);
+    let local = sc.mcp_servers[1].config();
+    assert_eq!((local.transport.as_str(), local.command.as_str()), ("stdio", "npx"));
+    assert_eq!(local.env_keys, vec!["KEY".to_string()]);
+}
+
+#[test]
+fn tool_called_contains_matches_prefixed_mcp_names() {
+    let mut m = ChatMessage { role: "assistant".into(), content: "https://lmstudio.ai 참고".into(), ..Default::default() };
+    m.tool_records.push(crate::store::ToolExecutionRecord { tool_name: "mcp__exa__web_search_exa".into(), status: "completed".into(), ..Default::default() });
+    let turns = vec![TurnLog { prompt: "q".into(), error: None, message: Some(m), approvals: vec![], traces: vec![], wall_ms: 0 }];
+    let check = |kind: &str, text: &str| run_check(&Check { kind: kind.into(), text: text.into(), ..Default::default() }, Path::new("."), &turns).0;
+    assert!(check("toolCalledContains", "web_search_exa"));
+    assert!(!check("toolCalled", "web_search_exa"), "toolCalled는 이름 전체가 같아야 한다");
+    assert!(!check("toolCalledContains", "crawling_exa"));
+    assert!(check("answerContains", "http"));
+}
+
+#[tokio::test]
+async fn scenario_mcp_servers_connect_through_the_app_manager_and_are_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = crate::mcp::tests::http_server(false).await;
+    let mgr = mcp::McpManager::new(dir.path().join("mcp.json"), Box::new(mcp::MemorySecrets::default()));
+    let servers = vec![HarnessMcp {
+        name: "Remote".into(),
+        url,
+        headers: BTreeMap::from([("Authorization".to_string(), "Bearer tok".to_string())]),
+        catalog_id: "exa".into(),
+        auto_approve: vec!["search".into()],
+        ..Default::default()
+    }];
+    let conn = connect_mcp_servers(&mgr, &servers).await;
+    assert_eq!(conn.len(), 1);
+    assert_eq!(conn[0].1["status"], "connected", "{}", conn[0].1);
+    assert_eq!(conn[0].1["tools"], json!(["search"]));
+    // 앱과 같은 도구 목록: mcp__<서버>__<도구>, 찾아보기 ID(내장 검색이면 [MCP] 절에 검색 안내 줄)
+    let specs = mgr.tool_specs().await;
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0].exposed, "mcp__remote__search");
+    assert!(specs[0].auto_approve);
+    assert!(mcp::is_builtin_search_catalog_id(&specs[0].catalog_id));
+    let (text, is_err) = mgr.call(&specs[0].server_id, "search", &json!({ "q": "모델" })).await.unwrap();
+    assert_eq!((text.as_str(), is_err), ("찾음: 모델", false));
+    for id in conn.iter().filter_map(|(id, _)| id.as_ref()) {
+        mgr.delete(id).unwrap();
+    }
+    assert!(mgr.tool_specs().await.is_empty());
+    assert!(mgr.list().is_empty());
 }

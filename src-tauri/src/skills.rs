@@ -349,7 +349,7 @@ pub fn prompt_section(skills: &[SkillInfo]) -> Option<String> {
         return None;
     }
     let mut out = String::from(
-        "\n\n[Skill]\n사용자가 설치한 작업 지침(Skill)이 있습니다. 요청이 아래 Skill의 설명에 해당하면, 답하거나 작업하기 전에 먼저 load_skill로 그 Skill의 지침을 읽고 그대로 따르세요. 해당하지 않으면 쓰지 마세요.\n",
+        "\n\n[Skill]\n사용자가 설치한 작업 지침(Skill)이 있습니다. 요청이 아래 Skill의 설명에 해당하면, 답하거나 작업하기 전에 먼저 load_skill로 그 Skill의 지침을 읽고 그대로 따르세요. 해당하지 않으면 쓰지 마세요.\n질문에 맞는 Skill이 [Skill: …] 로 이미 들어와 있으면 load_skill을 다시 부르지 말고 그 지침을 따르세요.\n",
     );
     for s in skills {
         out.push_str(&format!("- {}: {}\n", s.name, s.description.replace('\n', " ")));
@@ -378,6 +378,170 @@ pub fn load_for_model(skill: &SkillInfo, can_run_python: bool) -> Result<String,
     out.push_str("\n---\n\n");
     out.push_str(&parsed.body);
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Skill 자동 불러오기 (결정 0007)
+// ---------------------------------------------------------------------------
+
+/// 설명으로 고를 때 맞아야 하는 서로 다른 토큰 수의 최소값
+pub const SKILL_AUTO_MIN_HITS: usize = 2;
+/// 설명으로 고를 때 필요한 비율: (Skill 이름·설명에 든 요청 토큰 수) / (요청의 서로 다른 토큰 수)
+pub const SKILL_AUTO_MIN_COVERAGE: f64 = 0.25;
+/// 1등이 2등보다 이만큼은 앞서야 고른다(비슷하면 고르지 않는다).
+pub const SKILL_AUTO_MIN_MARGIN: f64 = 0.05;
+/// 자동으로 넣는 Skill 지침의 최대 글자 수와 컨텍스트(글자) 대비 비율
+const SKILL_AUTO_BUDGET_CAP: usize = 10_000;
+const SKILL_AUTO_BUDGET_RATIO: f64 = 0.20;
+/// 머리 줄 `[Skill: <이름> — ...]`의 이름 뒤 부분
+pub const AUTO_HEADER_TAIL: &str = "앱이 이 요청에 맞는 Skill로 판단해 미리 불러왔습니다. 아래 지침을 그대로 따르세요. 맞지 않으면 무시하세요.";
+/// 자동으로 불러온 Skill을 모델이 같은 턴에 다시 load_skill로 부를 때 돌려주는 답
+pub const ALREADY_LOADED: &str = "이미 이 턴에 불러온 Skill입니다(위 지침 참고).";
+
+/// Skill을 고른 이유
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectReason {
+    /// 요청에 `/<이름>`이나 이름이 그대로 들어 있다.
+    Explicit,
+    /// 요청 내용이 Skill 이름·설명과 맞는다.
+    Implicit,
+}
+
+/// 이번 턴에 앱이 미리 불러온 Skill
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutoSkill {
+    pub name: String,
+    pub reason: SelectReason,
+    /// 모델에 넣을 글(머리 줄 + 지침). 예산을 넘으면 잘려 있다.
+    pub text: String,
+    /// 예산 때문에 지침을 잘랐는지 (그러면 load_skill로 전체를 다시 읽을 수 있다)
+    pub truncated: bool,
+}
+
+fn usable(s: &SkillInfo) -> bool {
+    s.enabled && s.error.is_none() && !s.shadowed
+}
+
+fn is_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-' || c == '_'
+}
+
+/// `name`이 `text` 안에 낱말 하나로(앞뒤가 이름 글자가 아님) 들어 있는지. 둘 다 소문자로 준다.
+fn contains_whole_name(text: &str, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    text.match_indices(name).any(|(i, m)| {
+        let before = text[..i].chars().next_back();
+        let after = text[i + m.len()..].chars().next();
+        !before.is_some_and(is_name_char) && !after.is_some_and(is_name_char)
+    })
+}
+
+/// 사용자 메시지에 맞는 Skill을 하나 고른다(없으면 None). 켜져 있고 문제없고 가려지지 않은 Skill만 본다.
+/// - 이름을 부르면(`/weekly-report`, `weekly-report`) 그것(여럿이면 긴 이름).
+/// - 아니면 요청 토큰(지식 폴더와 같은 `knowledge::tokenize`)이 이름·설명에 얼마나 들어 있는지로 고른다.
+pub fn select_for_message(skills: &[SkillInfo], message: &str) -> Option<(SkillInfo, SelectReason)> {
+    let candidates: Vec<&SkillInfo> = skills.iter().filter(|s| usable(s)).collect();
+    let lower = message.to_lowercase();
+    if let Some(s) = candidates
+        .iter()
+        .filter(|s| contains_whole_name(&lower, &s.name.trim().to_lowercase()))
+        .max_by_key(|s| s.name.chars().count())
+    {
+        return Some(((*s).clone(), SelectReason::Explicit));
+    }
+
+    let query: BTreeSet<String> = crate::knowledge::tokenize(message).into_iter().collect();
+    if query.is_empty() {
+        return None;
+    }
+    let mut scored: Vec<(f64, usize, &SkillInfo)> = candidates
+        .iter()
+        .map(|s| {
+            let own: HashSet<String> =
+                crate::knowledge::tokenize(&format!("{} {}", s.name, s.description)).into_iter().collect();
+            let hits = query.iter().filter(|t| own.contains(*t)).count();
+            (hits as f64 / query.len() as f64, hits, *s)
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let (best, hits, skill) = *scored.first()?;
+    let runner_up = scored.get(1).map_or(0.0, |r| r.0);
+    (hits >= SKILL_AUTO_MIN_HITS && best >= SKILL_AUTO_MIN_COVERAGE && best - runner_up >= SKILL_AUTO_MIN_MARGIN)
+        .then(|| (skill.clone(), SelectReason::Implicit))
+}
+
+/// 자동으로 넣는 Skill 지침의 글자 예산 = min(10,000, 컨텍스트 × 1.5 × 0.20)
+pub fn auto_skill_budget(context_length: u32) -> usize {
+    let ctx_chars = context_length as f64 * crate::context_budget::CHARS_PER_TOKEN;
+    ((ctx_chars * SKILL_AUTO_BUDGET_RATIO) as usize).min(SKILL_AUTO_BUDGET_CAP)
+}
+
+/// 고른 Skill의 지침(`load_for_model`과 같은 글)에 머리 줄을 붙이고 예산에 맞춘다.
+pub fn build_auto_skill(skill: &SkillInfo, reason: SelectReason, context_length: u32, can_run_python: bool) -> Result<AutoSkill, String> {
+    let header = format!("[Skill: {} — {}]\n\n", skill.name, AUTO_HEADER_TAIL);
+    let body = load_for_model(skill, can_run_python)?;
+    let budget = auto_skill_budget(context_length);
+    let full = format!("{}{}", header, body);
+    if full.chars().count() <= budget {
+        return Ok(AutoSkill { name: skill.name.clone(), reason, text: full, truncated: false });
+    }
+    let note = format!(
+        "\n\n…(지침이 길어 여기까지만 넣었습니다. 나머지는 read_skill_file(skill=\"{0}\", path=\"SKILL.md\") 또는 load_skill(name=\"{0}\")로 읽으세요.)",
+        skill.name
+    );
+    let keep = budget.saturating_sub(note.chars().count());
+    let text: String = full.chars().take(keep).collect::<String>() + &note;
+    Ok(AutoSkill { name: skill.name.clone(), reason, text, truncated: true })
+}
+
+/// 턴 시작 때 부른다: 켜져 있으면 쓸 수 있는 Skill 중 이번 메시지에 맞는 것을 골라 지침을 만든다.
+/// `message`는 첨부 파일 내용을 뺀 사용자 글. 프로젝트가 있으면 Skill 스크립트 실행 안내도 넣는다.
+pub fn auto_for_turn(project: Option<(&str, &Path)>, message: &str, context_length: u32, enabled: bool) -> Option<AutoSkill> {
+    if !enabled || message.trim().is_empty() {
+        return None;
+    }
+    let skills = available(project);
+    let (skill, reason) = select_for_message(&skills, message)?;
+    build_auto_skill(&skill, reason, context_length, project.is_some()).ok()
+}
+
+/// 자동으로 불러온 Skill을 모델이 다시 load_skill로 부르면 짧은 답을 준다(지침을 잘라 넣었으면 None: 전체를 읽게 둔다).
+pub fn already_loaded_reply(auto: Option<&AutoSkill>, tool: &str, args: &serde_json::Value) -> Option<String> {
+    let auto = auto.filter(|a| !a.truncated)?;
+    let want = args.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
+    (tool == "load_skill" && want.eq_ignore_ascii_case(&auto.name)).then(|| ALREADY_LOADED.to_string())
+}
+
+impl AutoSkill {
+    /// 화면에 "Skill 자동 불러옴" 카드로 보일 기록(`automatic`이라 다음 요청의 도구 기록으로는 보내지 않는다).
+    pub fn tool_record(&self) -> crate::store::ToolExecutionRecord {
+        let why = match self.reason {
+            SelectReason::Explicit => "요청에 Skill 이름이 있어",
+            SelectReason::Implicit => "요청 내용이 Skill 설명과 맞아",
+        };
+        let cut = if self.truncated { ", 길어서 앞부분만" } else { "" };
+        crate::store::ToolExecutionRecord {
+            id: format!("auto-skill-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]),
+            tool_name: "load_skill".to_string(),
+            arguments_json: serde_json::json!({ "name": self.name }).to_string(),
+            status: "completed".to_string(),
+            output: format!("Skill 자동 불러옴: {} ({} 앱이 미리 넣음{})", self.name, why, cut),
+            automatic: true,
+            ..Default::default()
+        }
+    }
+
+    /// 이 Skill을 자동으로 불러온 기록인지 (승인 뒤 이어갈 때 같은 Skill을 다시 넣을지 판단)
+    pub fn matches_record(&self, r: &crate::store::ToolExecutionRecord) -> bool {
+        r.automatic
+            && r.tool_name == "load_skill"
+            && serde_json::from_str::<serde_json::Value>(&r.arguments_json)
+                .ok()
+                .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(|n| n.eq_ignore_ascii_case(&self.name)))
+                .unwrap_or(false)
+    }
 }
 
 /// Skill 폴더 안의 파일을 읽는다 (Skill 폴더 밖으로는 나갈 수 없다).
@@ -895,5 +1059,156 @@ mod tests {
         // 삭제는 사용자 Skill만
         assert!(delete_user_skill("project:p1:.skills/report").is_err());
         assert!(delete_user_skill("user:../x").is_err());
+    }
+    // -----------------------------------------------------------------------
+    // Skill 자동 불러오기
+    // -----------------------------------------------------------------------
+
+    const WEEKLY_DESC: &str = "주간 업무 보고서를 회사 양식으로 작성한다. 사용자가 주간 보고, 주간 업무 보고서, 이번 주 업무 정리를 요청할 때 쓴다.";
+
+    fn info(name: &str, description: &str) -> SkillInfo {
+        SkillInfo {
+            id: format!("project:p:.skills/{}", name),
+            name: name.to_string(),
+            description: description.to_string(),
+            scope: "project".into(),
+            location: format!(".skills/{}", name),
+            enabled: true,
+            error: None,
+            shadowed: false,
+            files: Vec::new(),
+            dir: PathBuf::new(),
+        }
+    }
+
+    fn sample_skills() -> Vec<SkillInfo> {
+        vec![
+            info("weekly-report", WEEKLY_DESC),
+            info("meeting-minutes", "회의록을 정해진 양식으로 정리한다. 회의 내용 정리, 회의록 작성을 요청할 때 쓴다."),
+            info("pptx-design", "발표 자료(PPTX) 슬라이드를 디자인 규칙에 맞게 만든다."),
+        ]
+    }
+
+    fn picked(skills: &[SkillInfo], msg: &str) -> Option<(String, SelectReason)> {
+        select_for_message(skills, msg).map(|(s, r)| (s.name, r))
+    }
+
+    #[test]
+    fn explicit_name_or_slash_selects_the_skill() {
+        let skills = sample_skills();
+        assert_eq!(picked(&skills, "/weekly-report 써 줘"), Some(("weekly-report".into(), SelectReason::Explicit)));
+        assert_eq!(picked(&skills, "Weekly-Report로 정리해 줘"), Some(("weekly-report".into(), SelectReason::Explicit)));
+        assert_eq!(picked(&skills, "이건 meeting-minutes 양식으로"), Some(("meeting-minutes".into(), SelectReason::Explicit)));
+        // 이름의 일부이거나 더 긴 낱말 안에 들어 있으면 이름을 부른 것이 아니다.
+        assert_ne!(picked(&skills, "weekly-reports 폴더"), Some(("weekly-report".into(), SelectReason::Explicit)));
+        assert_ne!(picked(&skills, "my-weekly-report"), Some(("weekly-report".into(), SelectReason::Explicit)));
+    }
+
+    #[test]
+    fn korean_request_matching_the_description_selects_implicitly() {
+        let skills = sample_skills();
+        assert_eq!(
+            picked(&skills, "이번 주 주간 업무 보고서를 만들어 줘"),
+            Some(("weekly-report".into(), SelectReason::Implicit))
+        );
+        // 하니스 proj-skill 시나리오의 요청
+        assert_eq!(
+            picked(&skills, "notes/week.md 메모를 바탕으로 이번 주 주간 업무 보고서를 만들어 줘."),
+            Some(("weekly-report".into(), SelectReason::Implicit))
+        );
+        assert_eq!(picked(&skills, "어제 회의 내용으로 회의록 작성해 줘"), Some(("meeting-minutes".into(), SelectReason::Implicit)));
+    }
+
+    #[test]
+    fn unrelated_or_short_requests_select_nothing() {
+        let skills = sample_skills();
+        assert_eq!(picked(&skills, "안녕"), None);
+        assert_eq!(picked(&skills, "엑셀 차트 그려 줘"), None);
+        assert_eq!(picked(&skills, "계속"), None);
+        assert_eq!(picked(&skills, ""), None);
+        // 맞는 토큰이 하나뿐이면(비율이 높아도) 고르지 않는다.
+        assert_eq!(picked(&skills, "보고"), None);
+    }
+
+    #[test]
+    fn a_tie_selects_nothing() {
+        let skills = vec![info("report-a", WEEKLY_DESC), info("report-b", WEEKLY_DESC)];
+        assert_eq!(picked(&skills, "이번 주 주간 업무 보고서를 만들어 줘"), None);
+        // 이름을 부르면 같은 설명이어도 그것을 고른다.
+        assert_eq!(picked(&skills, "/report-b 로 이번 주 주간 업무 보고서"), Some(("report-b".into(), SelectReason::Explicit)));
+    }
+
+    #[test]
+    fn disabled_broken_or_shadowed_skills_are_never_selected() {
+        for f in [
+            (|s: &mut SkillInfo| s.enabled = false) as fn(&mut SkillInfo),
+            |s: &mut SkillInfo| s.error = Some("x".into()),
+            |s: &mut SkillInfo| s.shadowed = true,
+        ] {
+            let mut skills = sample_skills();
+            f(&mut skills[0]);
+            assert_eq!(picked(&skills, "/weekly-report"), None);
+            assert_eq!(picked(&skills, "이번 주 주간 업무 보고서를 만들어 줘"), None);
+        }
+    }
+
+    #[test]
+    fn auto_skill_text_has_header_and_respects_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = info("weekly-report", WEEKLY_DESC);
+        s.dir = dir.path().join("weekly-report");
+        write(&s.dir.join(SKILL_FILE), &format!("---\nname: weekly-report\ndescription: {}\n---\n\n# 양식\n보고 양식 버전: W-7\n", WEEKLY_DESC));
+        let auto = build_auto_skill(&s, SelectReason::Implicit, 32768, true).unwrap();
+        assert!(auto.text.starts_with(&format!("[Skill: weekly-report — {}]", AUTO_HEADER_TAIL)), "{}", auto.text);
+        assert!(auto.text.contains("보고 양식 버전: W-7"));
+        assert!(!auto.truncated);
+        assert_eq!(auto.name, "weekly-report");
+
+        // 예산 = min(10,000, 컨텍스트 × 1.5 × 0.20)
+        assert_eq!(auto_skill_budget(32768), 9_830);
+        assert_eq!(auto_skill_budget(8192), 2_457);
+        assert_eq!(auto_skill_budget(200_000), 10_000);
+
+        // 긴 SKILL.md는 예산에 맞춰 자르고, 나머지를 읽는 방법을 적는다.
+        let long = "가".repeat(5_000);
+        write(&s.dir.join(SKILL_FILE), &format!("---\nname: weekly-report\ndescription: d\n---\n\n{}", long));
+        let auto = build_auto_skill(&s, SelectReason::Explicit, 8192, true).unwrap();
+        assert!(auto.truncated);
+        assert!(auto.text.chars().count() <= auto_skill_budget(8192), "{}", auto.text.chars().count());
+        assert!(auto.text.contains("read_skill_file"), "{}", auto.text);
+        assert!(auto.text.contains("load_skill"), "{}", auto.text);
+    }
+
+    #[test]
+    fn load_skill_for_the_auto_loaded_skill_gets_a_short_reply() {
+        let auto = AutoSkill { name: "weekly-report".into(), reason: SelectReason::Implicit, text: "x".into(), truncated: false };
+        let args = serde_json::json!({ "name": "Weekly-Report" });
+        assert_eq!(already_loaded_reply(Some(&auto), "load_skill", &args).as_deref(), Some(ALREADY_LOADED));
+        assert_eq!(already_loaded_reply(Some(&auto), "load_skill", &serde_json::json!({ "name": "other" })), None);
+        assert_eq!(already_loaded_reply(Some(&auto), "read_skill_file", &args), None);
+        assert_eq!(already_loaded_reply(None, "load_skill", &args), None);
+        // 잘라서 넣었으면 전체를 다시 읽을 수 있어야 한다.
+        let cut = AutoSkill { truncated: true, ..auto };
+        assert_eq!(already_loaded_reply(Some(&cut), "load_skill", &args), None);
+    }
+
+    #[test]
+    fn auto_record_is_a_completed_automatic_load_skill_card() {
+        let auto = AutoSkill { name: "weekly-report".into(), reason: SelectReason::Implicit, text: "x".repeat(10), truncated: false };
+        let r = auto.tool_record();
+        assert!(r.automatic);
+        assert_eq!((r.tool_name.as_str(), r.status.as_str(), r.round), ("load_skill", "completed", 0));
+        let args: serde_json::Value = serde_json::from_str(&r.arguments_json).unwrap();
+        assert_eq!(args["name"], "weekly-report");
+        assert!(r.output.contains("weekly-report"), "{}", r.output);
+        assert!(auto.matches_record(&r));
+        let other = AutoSkill { name: "meeting-minutes".into(), ..auto.clone() };
+        assert!(!other.matches_record(&r));
+    }
+
+    #[test]
+    fn prompt_section_tells_the_model_not_to_reload_an_injected_skill() {
+        let s = prompt_section(&sample_skills()).unwrap();
+        assert!(s.contains("질문에 맞는 Skill이 [Skill: …] 로 이미 들어와 있으면 load_skill을 다시 부르지 말고 그 지침을 따르세요."), "{}", s);
     }
 }

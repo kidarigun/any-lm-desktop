@@ -574,12 +574,14 @@ impl RoundAccumulator {
 // ---------------------------------------------------------------------------
 
 /// 어시스턴트 메시지를 라운드별 (텍스트, 도구 기록) 묶음으로 나눈다.
+/// 앱이 스스로 한 일의 기록(`automatic`, Skill 자동 불러오기 카드)은 모델이 부른 도구가 아니라서 넣지 않는다.
 pub fn message_rounds(msg: &ChatMessage) -> Vec<(String, Vec<&ToolExecutionRecord>)> {
+    let model_records = || msg.tool_records.iter().filter(|r| !r.automatic);
     if msg.round_contents.is_empty() {
         // 라운드 정보가 없는 이전 버전 메시지: 도구 호출을 먼저, 최종 답변을 나중에 둔다.
         let mut rounds = Vec::new();
-        if !msg.tool_records.is_empty() {
-            rounds.push((String::new(), msg.tool_records.iter().collect()));
+        if model_records().next().is_some() {
+            rounds.push((String::new(), model_records().collect()));
         }
         if !msg.content.is_empty() {
             rounds.push((msg.content.clone(), Vec::new()));
@@ -587,21 +589,13 @@ pub fn message_rounds(msg: &ChatMessage) -> Vec<(String, Vec<&ToolExecutionRecor
         return rounds;
     }
 
-    let tool_rounds = msg
-        .tool_records
-        .iter()
-        .map(|r| r.round as usize + 1)
-        .max()
-        .unwrap_or(0);
+    let tool_rounds = model_records().map(|r| r.round as usize + 1).max().unwrap_or(0);
     let n = msg.round_contents.len().max(tool_rounds);
     (0..n)
         .map(|r| {
             (
                 msg.round_contents.get(r).cloned().unwrap_or_default(),
-                msg.tool_records
-                    .iter()
-                    .filter(|t| t.round as usize == r)
-                    .collect(),
+                model_records().filter(|t| t.round as usize == r).collect(),
             )
         })
         .collect()
@@ -720,7 +714,7 @@ pub fn build_api_messages_with_compaction(
         match msg.role.as_str() {
             "user" => out.push(json!({ "role": "user", "content": msg.content })),
             "assistant" => {
-                if !include_tools || msg.tool_records.is_empty() {
+                if !include_tools || msg.tool_records.iter().all(|r| r.automatic) {
                     let content = if msg.content.is_empty() {
                         "(응답 없음)"
                     } else {
@@ -950,6 +944,8 @@ pub struct TurnRequest<'a> {
     pub checkpoint: Option<&'a (dyn Fn(&ChatMessage) + Send + Sync)>,
     /// 턴 시작 때 지식 폴더에서 찾은 `[참고 자료]` 절(`knowledge::context_for_turn`). 시스템 프롬프트 뒤에 붙는다. 없으면 빈 문자열.
     pub knowledge: &'a str,
+    /// 턴 시작 때 앱이 이번 메시지에 맞춰 고른 Skill(`skills::auto_for_turn`). 참고 자료 쌍 뒤, 마지막 사용자 메시지 바로 앞에 넣는다.
+    pub auto_skill: Option<&'a skills::AutoSkill>,
 }
 
 /// 답변을 받는 동안 중간 저장을 하는 간격
@@ -1213,6 +1209,21 @@ fn insert_knowledge_message(msgs: &mut Vec<Value>, knowledge: &str) {
     msgs.insert(
         pos + 1,
         json!({ "role": "assistant", "content": "참고 자료를 확인했습니다. 다음 질문과 관련 있을 때만 자료로 활용하고, 활용하면 출처 경로를 밝히겠습니다." }),
+    );
+}
+
+/// 앱이 고른 Skill 지침을 참고 자료와 같은 방식(사용자 메시지 + 짧은 확인 답)으로 마지막 사용자 메시지 바로 앞에 넣는다.
+/// 참고 자료 쌍을 먼저 넣은 뒤 부르므로 Skill 쌍이 질문에 더 가깝다. 저장하지 않는다.
+fn insert_skill_message(msgs: &mut Vec<Value>, skill_text: &str) {
+    let text = skill_text.trim();
+    if text.is_empty() {
+        return;
+    }
+    let Some(pos) = msgs.iter().rposition(|m| m.get("role").and_then(Value::as_str) == Some("user")) else { return };
+    msgs.insert(pos, json!({ "role": "user", "content": text }));
+    msgs.insert(
+        pos + 1,
+        json!({ "role": "assistant", "content": "Skill 지침을 확인했습니다. 다음 요청에 맞으면 이 지침을 그대로 따르고, 맞지 않으면 무시하겠습니다." }),
     );
 }
 
@@ -1783,9 +1794,15 @@ pub async fn run_exaone_turn<R: Runtime>(
     if msg.round_contents.is_empty() && !msg.content.is_empty() {
         msg.round_contents.push(msg.content.clone());
     }
+    // 앱이 이번 턴에 고른 Skill: 새 답변이면 넣고 카드를 남긴다. 승인 뒤 이어가기면 그 답변이 자동으로 불러온 Skill일 때만 다시 넣는다.
+    let auto_skill = req.auto_skill.filter(|s| !resuming || msg.tool_records.iter().any(|r| s.matches_record(r)));
+    if let Some(s) = auto_skill {
+        insert_skill_message(&mut api_messages, &s.text);
+    }
     let start_round = msg
         .tool_records
         .iter()
+        .filter(|r| !r.automatic)
         .map(|r| r.round as usize + 1)
         .max()
         .unwrap_or(0)
@@ -1797,6 +1814,11 @@ pub async fn run_exaone_turn<R: Runtime>(
         conversation_id: req.conversation_id.to_string(),
         message_id: msg.id.clone(),
     };
+    if let Some(s) = auto_skill.filter(|_| !resuming) {
+        let record = s.tool_record();
+        sink.tool(record.clone(), None);
+        msg.tool_records.push(record);
+    }
 
     let client = reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
@@ -2169,6 +2191,11 @@ pub async fn run_exaone_turn<R: Runtime>(
                             ),
                         }
                     }
+                    Ok(args) if skills::already_loaded_reply(auto_skill, &call.name, &args).is_some() => {
+                        let output = skills::already_loaded_reply(auto_skill, &call.name, &args).unwrap_or_default();
+                        let args_json = serde_json::to_string(&args).unwrap_or_default();
+                        (tool_record(&call_id, &call.name, args_json, "completed", output, None, None), None, false)
+                    }
                     Ok(args) => match (skills::run_tool(&call.name, &args, project_ctx), req.project) {
                         (Some(res), _) => {
                             let (status, output) = match res {
@@ -2275,7 +2302,7 @@ pub async fn run_exaone_turn<R: Runtime>(
         msg.round_contents.push(note.to_string());
     }
     if let Some(err) = &failure {
-        let produced = !msg.tool_records.is_empty()
+        let produced = msg.tool_records.iter().any(|r| !r.automatic)
             || msg.round_contents.iter().any(|c| !c.trim().is_empty())
             || msg.reasoning_content.as_deref().is_some_and(|r| !r.trim().is_empty());
         if !produced && !resuming {
@@ -2342,6 +2369,7 @@ fn tool_record(
         snapshot_id,
         round: 0,
         produced_files: Vec::new(),
+        automatic: false,
     }
 }
 
@@ -2826,6 +2854,7 @@ mod tests {
             snapshot_id: None,
             round,
             produced_files: Vec::new(),
+            automatic: false,
         }
     }
 
@@ -3380,7 +3409,7 @@ mod tests {
         let section = "[참고 자료]\n안내\n\n### 출처: C:/kb/a.md\n조각 글";
         run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, model_key: "m", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "project", checkpoint: None, knowledge: section },
+            TurnRequest { settings: &settings, model_key: "m", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "project", checkpoint: None, knowledge: section, auto_skill: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -3419,6 +3448,131 @@ mod tests {
         let mut m = base.clone();
         insert_knowledge_message(&mut m, "  ");
         assert_eq!(m, base);
+    }
+
+    fn auto_skill(name: &str) -> skills::AutoSkill {
+        skills::AutoSkill {
+            name: name.into(),
+            reason: skills::SelectReason::Implicit,
+            text: format!("[Skill: {} — {}]\n\n# Skill: {}\n\n보고 양식 버전: W-7", name, skills::AUTO_HEADER_TAIL, name),
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn skill_message_goes_after_knowledge_right_before_the_last_user_message() {
+        let base = vec![
+            json!({"role": "system", "content": "sys"}),
+            json!({"role": "user", "content": "질문"}),
+            json!({"role": "assistant", "content": "", "tool_calls": []}),
+            json!({"role": "tool", "content": "결과"}),
+        ];
+        let mut m = base.clone();
+        insert_knowledge_message(&mut m, "[참고 자료]\n가나다");
+        insert_skill_message(&mut m, "[Skill: a — 지침]\n본문");
+        let roles: Vec<&str> = m.iter().map(|v| v["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, vec!["system", "user", "assistant", "user", "assistant", "user", "assistant", "tool"]);
+        assert_eq!(m[1]["content"], "[참고 자료]\n가나다");
+        assert_eq!(m[3]["content"], "[Skill: a — 지침]\n본문", "Skill 쌍이 질문에 더 가깝다");
+        assert_eq!(m[5]["content"], "질문");
+        assert!(total_chars(&m) >= total_chars(&base) + "[Skill: a — 지침]\n본문".chars().count() + "[참고 자료]\n가나다".chars().count());
+        let mut m = base.clone();
+        insert_skill_message(&mut m, " ");
+        assert_eq!(m, base);
+    }
+
+    #[tokio::test]
+    async fn auto_skill_is_injected_shown_as_a_card_and_not_reloaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = vec![
+            sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_ls","function":{"name":"load_skill","arguments":"{\"name\":\"weekly-report\"}"}}]}}]})),
+            sse_done(),
+        ];
+        let second = vec![sse(json!({"choices":[{"delta":{"content":"보고서를 썼습니다."}}]})), sse_done()];
+        let (url, bodies) = mock_server(vec![first, second], 0).await;
+        let app = tauri::test::mock_app();
+        let settings = test_settings(url);
+        let project = test_project(dir.path());
+        let history = vec![msg("user", "이번 주 주간 업무 보고서를 만들어 줘")];
+        let skill = auto_skill("weekly-report");
+        let (out, _) = run_exaone_turn(
+            app.handle(),
+            TurnRequest { settings: &settings, model_key: "m", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "project", checkpoint: None, knowledge: "[참고 자료]\n자료", auto_skill: Some(&skill) },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+
+        // 화면 카드: 맨 앞의 자동 기록, 그다음 모델이 부른 load_skill은 짧은 답
+        assert_eq!(out.tool_records.len(), 2);
+        assert!(out.tool_records[0].automatic && out.tool_records[0].tool_name == "load_skill");
+        assert!(skill.matches_record(&out.tool_records[0]));
+        assert!(!out.tool_records[1].automatic);
+        assert_eq!(out.tool_records[1].output, skills::ALREADY_LOADED);
+        assert_eq!(out.tool_records[1].round, 0, "자동 기록이 라운드 번호를 밀지 않는다");
+        assert_eq!(out.content, "보고서를 썼습니다.");
+
+        let b = bodies.lock().unwrap();
+        let msgs = b[0]["messages"].as_array().unwrap();
+        let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, vec!["system", "user", "assistant", "user", "assistant", "user"]);
+        assert_eq!(msgs[1]["content"], "[참고 자료]\n자료");
+        assert_eq!(msgs[3]["content"], skill.text.as_str());
+        assert_eq!(msgs[5]["content"], "이번 주 주간 업무 보고서를 만들어 줘");
+        let second_msgs = b[1]["messages"].as_array().unwrap();
+        let last = second_msgs.last().unwrap();
+        assert_eq!((last["role"].as_str(), last["tool_call_id"].as_str()), (Some("tool"), Some("call_ls")));
+        assert_eq!(last["content"], skills::ALREADY_LOADED);
+        let auto_ids: Vec<&Value> = second_msgs.iter().flat_map(|m| m["tool_calls"].as_array().into_iter().flatten()).collect();
+        assert_eq!(auto_ids.len(), 1, "자동 기록은 도구 호출로 보내지 않는다: {:?}", auto_ids);
+
+        // 다음 턴의 대화 기록에도 자동 기록은 도구 호출로 들어가지 않는다(본문은 저장하지 않으므로).
+        let next = build_api_messages("sys", &[history[0].clone(), out.clone(), msg("user", "고마워")], true);
+        let calls: Vec<String> = next.iter().flat_map(|m| m["tool_calls"].as_array().cloned().unwrap_or_default()).map(|c| c["id"].as_str().unwrap_or("").to_string()).collect();
+        assert_eq!(calls, vec!["call_ls".to_string()]);
+        assert!(!next.iter().any(|m| m["content"].as_str().is_some_and(|c| c.contains("보고 양식 버전: W-7"))));
+    }
+
+    #[tokio::test]
+    async fn approval_resume_rebuilds_the_same_skill_injection_only_if_it_was_auto_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let answer = || vec![sse(json!({"choices":[{"delta":{"content":"끝"}}]})), sse_done()];
+        let (url, bodies) = mock_server(vec![answer(), answer()], 0).await;
+        let app = tauri::test::mock_app();
+        let settings = test_settings(url);
+        let project = test_project(dir.path());
+        let user = msg("user", "이번 주 주간 업무 보고서를 만들어 줘");
+        let skill = auto_skill("weekly-report");
+        let mut paused = msg("assistant", "");
+        paused.tool_records = vec![skill.tool_record(), rec("call_w", "write_file", "completed", "저장됨", 0)];
+        paused.round_contents = vec![String::new()];
+        let history = vec![user.clone(), paused.clone()];
+        let run = |cont: ChatMessage, history: Vec<ChatMessage>| {
+            let (app, settings, project, skill) = (app.handle().clone(), settings.clone(), project.clone(), skill.clone());
+            async move {
+                run_exaone_turn(
+                    &app,
+                    TurnRequest { settings: &settings, model_key: "m", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history: &history, compaction: None, continue_from: Some(cont), mode: "project", checkpoint: None, knowledge: "", auto_skill: Some(&skill) },
+                    Arc::new(AtomicBool::new(false)),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let (resumed, _) = run(paused.clone(), history.clone()).await;
+        assert_eq!(resumed.tool_records.iter().filter(|r| r.automatic).count(), 1, "카드를 또 만들지 않는다");
+        // 자동으로 불러온 적이 없는 답변을 이어갈 때는(그사이 설정을 켰거나 Skill이 바뀜) 넣지 않는다.
+        let mut plain = paused.clone();
+        plain.tool_records.remove(0);
+        let (_, _) = run(plain.clone(), vec![user.clone(), plain]).await;
+
+        let b = bodies.lock().unwrap();
+        let has_skill = |i: usize| b[i]["messages"].as_array().unwrap().iter().any(|m| m["content"].as_str() == Some(skill.text.as_str()));
+        assert!(has_skill(0), "같은 Skill을 다시 넣는다");
+        let msgs = b[0]["messages"].as_array().unwrap();
+        let pos = msgs.iter().position(|m| m["content"].as_str() == Some(skill.text.as_str())).unwrap();
+        assert_eq!(msgs[pos + 2]["content"], "이번 주 주간 업무 보고서를 만들어 줘", "원래 질문 바로 앞");
+        assert!(!has_skill(1));
     }
 
     #[tokio::test]
@@ -3463,6 +3617,7 @@ mod tests {
                 mode: "",
                 checkpoint: None,
                 knowledge: "",
+                auto_skill: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -3551,6 +3706,7 @@ mod tests {
                 mode: "",
                 checkpoint: None,
                 knowledge: "",
+                auto_skill: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -3616,6 +3772,7 @@ mod tests {
                 mode: "",
                 checkpoint: None,
                 knowledge: "",
+                auto_skill: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -3641,6 +3798,7 @@ mod tests {
                 mode: "",
                 checkpoint: None,
                 knowledge: "",
+                auto_skill: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -3690,6 +3848,7 @@ mod tests {
                 mode: "",
                 checkpoint: None,
                 knowledge: "",
+                auto_skill: None,
             },
             flag,
         )
@@ -3905,7 +4064,7 @@ mod tests {
         let history = vec![msg("user", "a.txt 읽어 줘")];
         let (out, _) = run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "" },
+            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "", auto_skill: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -3934,7 +4093,7 @@ mod tests {
         let opts = vec!["off".to_string(), "on".to_string()];
         settings.model_prefs.insert("qwen3.5-9b".into(), crate::store::ModelPref { context_length: None, reasoning: Some("off".into()) });
         for o in [&opts[..], &[][..]] {
-            let req = TurnRequest { settings: &settings, model_key: "qwen3.5-9b", model_display_name: "", reasoning_options: o, context_length: 32768, project: None, conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "" };
+            let req = TurnRequest { settings: &settings, model_key: "qwen3.5-9b", model_display_name: "", reasoning_options: o, context_length: 32768, project: None, conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "", auto_skill: None };
             run_exaone_turn(app.handle(), req, Arc::new(AtomicBool::new(false))).await.unwrap();
         }
         let b = bodies.lock().unwrap();
@@ -4116,6 +4275,7 @@ content-length: {}
                 mode: "project",
                 checkpoint: Some(&checkpoint),
                 knowledge: "",
+                auto_skill: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -4150,7 +4310,7 @@ content-length: {}
             async move {
                 run_exaone_turn(
                     app.handle(),
-                    TurnRequest { settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "" },
+                    TurnRequest { settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "", auto_skill: None },
                     Arc::new(AtomicBool::new(false)),
                 )
                 .await
@@ -4225,7 +4385,7 @@ content-length: {}
         let settings = test_settings(url);
         run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: None, conversation_id: "conv-r", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "" },
+            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: None, conversation_id: "conv-r", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "", auto_skill: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -4383,7 +4543,7 @@ content-length: {}
         let history = vec![msg("user", "a.txt 써줘")];
         let (out, _) = run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c-eof", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "" },
+            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c-eof", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "", auto_skill: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -4413,7 +4573,7 @@ content-length: {}
         let history = vec![msg("user", "긴 문서 써줘")];
         let (out, _) = run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c-trunc", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "" },
+            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c-trunc", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "", auto_skill: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await

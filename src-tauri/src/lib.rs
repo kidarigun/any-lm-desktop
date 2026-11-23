@@ -104,6 +104,22 @@ fn without_attachments(content: &str) -> &str {
     content.find(ATTACHMENTS_HEADER).map_or(content, |i| &content[..i])
 }
 
+/// 승인 뒤 이어가기에서 참고 자료·Skill을 다시 고를 때 쓰는 글: 마지막 사용자 메시지에서 첨부 내용을 뺀 본문.
+fn last_user_query(history: &[ChatMessage]) -> String {
+    history
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .map(|m| without_attachments(&m.content).to_string())
+        .unwrap_or_default()
+}
+
+/// 이번 턴에 자동으로 불러올 Skill(설정 "Skill 자동 불러오기"가 꺼져 있으면 None). `message`는 첨부 내용을 뺀 사용자 글.
+fn auto_skill_for_turn(settings: &AppSettings, project: Option<&Project>, message: &str, context_length: u32) -> Option<skills::AutoSkill> {
+    let ctx = project.map(|p| (p.id.as_str(), Path::new(&p.root_path)));
+    skills::auto_for_turn(ctx, message, context_length, settings.skill_auto_load)
+}
+
 /// 첨부 파일들을 읽어 메시지 끝에 붙일 블록을 만든다. 읽지 못한 파일은 이유를 남긴다.
 async fn read_attachments<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -1039,6 +1055,8 @@ async fn send_chat_message(
     let context_length = context_budget::resolve_context(model_info.loaded_context);
     // 지식 폴더: 빠른 갱신 뒤 이번 사용자 메시지(첨부 내용 제외)로 참고 자료를 찾는다. 자동 압축 판단에도 넣는다.
     let knowledge = knowledge::context_for_turn(&app, attach_project.as_ref(), &user_content, context_length).await;
+    // Skill 자동 불러오기: 같은 글(첨부 내용 제외)로 고른다. 참고 자료처럼 자동 압축 판단에도 넣는다.
+    let auto_skill = auto_skill_for_turn(&pre_settings, attach_project.as_ref(), &user_content, context_length);
 
     let (settings, project, history_for_api, turn_mode, mut compaction, model_key, auto_job) = {
         let mut db = state.db.lock().map_err(|e| e.to_string())?;
@@ -1057,7 +1075,7 @@ async fn send_chat_message(
             &db.conversations[conv_idx],
             full_content.chars().count(),
             context_length,
-            knowledge.chars().count(),
+            knowledge.chars().count() + auto_skill.as_ref().map_or(0, |s| s.text.chars().count()),
         );
 
         let user_msg = ChatMessage {
@@ -1124,6 +1142,7 @@ async fn send_chat_message(
             compaction: compaction.as_ref(),
             checkpoint: Some(&checkpoint),
             knowledge: &knowledge,
+            auto_skill: auto_skill.as_ref(),
         },
         cancel_flag,
     )
@@ -1226,6 +1245,7 @@ async fn edit_and_resend_message(
     let model_info = lmstudio::turn_model_info(&settings, &model_key).await;
     let context_length = context_budget::resolve_context(model_info.loaded_context);
     let knowledge = knowledge::context_for_turn(&app, project.as_ref(), &new_content, context_length).await;
+    let auto_skill = auto_skill_for_turn(&settings, project.as_ref(), &new_content, context_length);
     let turn_res = exaone::run_exaone_turn(
         &app,
         TurnRequest {
@@ -1242,6 +1262,7 @@ async fn edit_and_resend_message(
             compaction: compaction.as_ref(),
             checkpoint: Some(&checkpoint),
             knowledge: &knowledge,
+            auto_skill: auto_skill.as_ref(),
         },
         cancel_flag,
     )
@@ -1539,14 +1560,11 @@ async fn resolve_tool_approval(
     let checkpoint = |m: &ChatMessage| save_checkpoint(&state, &conversation_id, m);
     let model_info = lmstudio::turn_model_info(&settings, &model_key).await;
     let context_length = context_budget::resolve_context(model_info.loaded_context);
-    // 승인 뒤 이어가기도 같은 질문(마지막 사용자 메시지, 첨부 내용 제외)으로 참고 자료를 다시 만들어 같은 자리에 넣는다.
-    let last_user = history
-        .iter()
-        .rev()
-        .find(|m| m.role == "user")
-        .map(|m| without_attachments(&m.content).to_string())
-        .unwrap_or_default();
+    // 승인 뒤 이어가기도 같은 질문(마지막 사용자 메시지, 첨부 내용 제외)으로 참고 자료와 Skill을 다시 만들어 같은 자리에 넣는다.
+    // (Skill은 그 답변이 처음에 자동으로 불러온 것과 같을 때만 넣는다: run_exaone_turn이 카드 기록과 맞춰 본다.)
+    let last_user = last_user_query(&history);
     let knowledge = knowledge::context_for_turn(&app, project.as_ref(), &last_user, context_length).await;
+    let auto_skill = auto_skill_for_turn(&settings, project.as_ref(), &last_user, context_length);
     let (updated_msg, new_snapshots) = exaone::run_exaone_turn(
         &app,
         TurnRequest {
@@ -1563,6 +1581,7 @@ async fn resolve_tool_approval(
             compaction: compaction.as_ref(),
             checkpoint: Some(&checkpoint),
             knowledge: &knowledge,
+            auto_skill: auto_skill.as_ref(),
         },
         run.cancel_flag(),
     )
@@ -2590,6 +2609,11 @@ mod tests {
         let stored = format!("ZK-7741 출시일은?{}### a.txt\n첨부 본문", super::ATTACHMENTS_HEADER);
         assert_eq!(super::without_attachments(&stored), "ZK-7741 출시일은?");
         assert_eq!(super::without_attachments("첨부 없음"), "첨부 없음");
+        // 승인 뒤 이어가기는 마지막 사용자 메시지의 본문(첨부 제외)으로 참고 자료·Skill을 다시 고른다.
+        let user = super::ChatMessage { role: "user".into(), content: stored.clone(), ..Default::default() };
+        let answer = super::ChatMessage { role: "assistant".into(), content: "답".into(), ..Default::default() };
+        assert_eq!(super::last_user_query(&[user, answer]), "ZK-7741 출시일은?");
+        assert_eq!(super::last_user_query(&[]), "");
     }
 
     use super::*;

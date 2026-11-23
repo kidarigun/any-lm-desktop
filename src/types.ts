@@ -21,6 +21,8 @@ export interface AppSettings {
   /** 컨텍스트가 차면 자동으로 요약 압축한다 */
   autoCompact: boolean;
   modelPrefs: Record<string, ModelPref>;
+  /** 요청에 맞는 Skill을 앱이 골라 미리 넣는다. 없으면 켜짐 */
+  skillAutoLoad?: boolean;
 }
 
 export interface Project {
@@ -93,6 +95,8 @@ export interface ToolExecutionRecord {
   round?: number;
   /** run_python 실행으로 새로 생기거나 바뀐 파일 */
   producedFiles?: string[];
+  /** 모델이 아니라 앱이 한 일(Skill 자동 불러오기)의 기록 */
+  automatic?: boolean;
 }
 
 /** MCP 서버 설정 (환경 변수·헤더 값은 Windows 자격 증명 관리자에 따로 저장) */

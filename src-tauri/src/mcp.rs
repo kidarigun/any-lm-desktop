@@ -1673,7 +1673,7 @@ fn dedup(items: impl Iterator<Item = String>) -> Vec<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// 내장 검색 항목 id 목록이 화면 쪽 내장 목록(src/catalog/builtin.ts)과 어긋나지 않는다.
@@ -1876,8 +1876,8 @@ rl.on('line', (line) => {
         assert!(install_hint("uvx").contains("uv"));
     }
 
-    /// 응답을 JSON 또는 SSE로 주는 가짜 HTTP MCP 서버
-    async fn http_server(sse: bool) -> String {
+    /// 응답을 JSON 또는 SSE로 주는 가짜 HTTP MCP 서버 (헤더 `Authorization: Bearer tok`가 있어야 답한다. 하니스 테스트도 쓴다)
+    pub(crate) async fn http_server(sse: bool) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

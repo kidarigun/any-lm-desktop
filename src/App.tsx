@@ -59,6 +59,7 @@ import { useFileMention } from "./explorer/FileMention";
 import { fileHistory } from "./diff/history";
 import { PanelResizer } from "./ui/PanelResizer";
 import { SkillsDialog } from "./skills/SkillsDialog";
+import { skillAutoLoadOn, toolBadgeLabel, withSkillAutoLoad } from "./skills/autoLoad";
 import { McpDialog } from "./mcp/McpDialog";
 import { ConnectionDialog } from "./lmstudio/ConnectionDialog";
 import { LoadChoiceDialog, type LoadChoice } from "./lmstudio/LoadChoiceDialog";
@@ -3166,6 +3167,11 @@ export default function App() {
         <SkillsDialog
           projectId={activeMode !== "chat" ? activeProject?.id : undefined}
           projectName={activeMode !== "chat" ? activeProject?.name : undefined}
+          autoLoad={skillAutoLoadOn(settings)}
+          onAutoLoadChange={async (on) => {
+            const saved = await BackendAPI.saveSettings(withSkillAutoLoad(settings, on));
+            setSettings({ ...saved, apiKey: "" });
+          }}
           onClose={() => setShowSkills(false)}
         />
       )}
@@ -3571,7 +3577,7 @@ function ToolCallBox({
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 font-mono">
           <span className="px-1.5 py-0.5 rounded bg-stone-800 dark:bg-stone-700 text-white">
-            {record.toolName}
+            {toolBadgeLabel(record)}
           </span>
           {record.filePath && (
             <button

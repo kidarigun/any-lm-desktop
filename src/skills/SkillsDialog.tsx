@@ -27,11 +27,16 @@ function errorText(e: unknown): string {
 export function SkillsDialog({
   projectId,
   projectName,
+  autoLoad,
+  onAutoLoadChange,
   onClose,
 }: {
   /** 프로젝트·코드 화면이면 그 프로젝트 (프로젝트 Skill도 보여 준다) */
   projectId?: string;
   projectName?: string;
+  /** 설정 "Skill 자동 불러오기" (요청에 맞는 Skill을 앱이 골라 미리 넣는다) */
+  autoLoad: boolean;
+  onAutoLoadChange: (on: boolean) => Promise<void>;
   onClose: () => void;
 }) {
   const [skills, setSkills] = useState<SkillInfo[] | null>(null);
@@ -285,6 +290,33 @@ export function SkillsDialog({
             <RefreshCw className={`w-3.5 h-3.5 ${busy ? "animate-spin" : ""}`} />
           </button>
         </div>
+        )}
+
+        {tab === "installed" && (
+          <div className="mx-5 mb-3 flex items-start gap-2.5 rounded-xl border border-stone-200 dark:border-[#383834] bg-white dark:bg-[#1E1E1C] px-3 py-2.5">
+            <button
+              role="switch"
+              aria-checked={autoLoad}
+              aria-label={`Skill 자동 불러오기 ${autoLoad ? "끄기" : "켜기"}`}
+              onClick={() => run(() => onAutoLoadChange(!autoLoad))}
+              disabled={busy}
+              className={`mt-0.5 shrink-0 w-8 h-[18px] rounded-full relative transition cursor-pointer disabled:opacity-50 ${
+                autoLoad ? "bg-[#A50034]" : "bg-stone-300 dark:bg-[#44443F]"
+              }`}
+            >
+              <span
+                className={`absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white shadow transition-all ${
+                  autoLoad ? "left-[16px]" : "left-[2px]"
+                }`}
+              />
+            </button>
+            <div className="min-w-0">
+              <div className="font-semibold text-stone-900 dark:text-stone-100">Skill 자동 불러오기</div>
+              <p className="mt-0.5 text-[11px] text-stone-600 dark:text-stone-400 leading-relaxed">
+                요청에 Skill 이름(/이름)이 있거나 내용이 Skill 설명과 잘 맞으면, 앱이 그 Skill의 지침을 미리 넣어 보냅니다. 작은 모델이 Skill을 직접 불러오지 않을 때 도움이 됩니다. 답변에 "Skill 자동 불러옴" 카드가 보입니다.
+              </p>
+            </div>
+          </div>
         )}
 
         {tab === "installed" && newName !== null && (

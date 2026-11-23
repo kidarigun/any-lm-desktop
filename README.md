@@ -78,7 +78,17 @@ python ../harness/report.py ../harness/runs/default   # 결과 요약
 | `ANYLM_PAUSE_SEC` | 시나리오 사이 쉬는 시간(초) | `1` |
 | `ANYLM_RERUN` | `1`이면 결과가 있는 시나리오도 다시 실행 | `0` |
 
-결과(`harness/runs/`)와 `harness/scenarios*.json`은 Git에 올라가지 않습니다. 가볍게 연결만 확인하려면 `ANYLM_SCENARIOS=../harness/smoke.json`을 쓰세요.
+결과(`harness/runs/`)와 `harness/scenarios*.json`은 Git에 올라가지 않습니다. 가볍게 연결만 확인하려면 `ANYLM_SCENARIOS=../harness/smoke.json`을 쓰세요. Git에 올린 시나리오: `smoke.json`(연결 확인), `knowledge.json`(지식 폴더), `search.json`(내장 웹 검색 MCP — Exa, 키 없음).
+
+시나리오 항목 중 MCP·Skill 관련:
+
+| 항목 | 뜻 |
+|---|---|
+| `mcpServers` | 연결할 MCP 서버 목록 `[{ "name", "url"?, "headers"?, "command"?, "args"?, "env"?, "catalogId"?, "autoApprove"? }]`. `url`이 있으면 원격, 없으면 `command`를 실행하는 로컬 서버. 앱과 같은 MCP 관리자로 연결해 `[MCP]` 절·도구 이름(`mcp__<서버>__<도구>`)이 앱과 같고, 시나리오가 끝나면 지웁니다. 헤더·환경 변수 값은 메모리에만 둡니다. `catalogId`가 내장 검색 항목(예: `"exa"`)이면 웹 검색 안내 줄이 붙습니다. `autoApprove`(서버의 원래 도구 이름)에 없는 MCP 도구는 앱이라면 승인을 물었을 도구로 기록하고 하니스가 승인합니다. |
+| `skillAutoLoad` | `false`면 Skill 자동 불러오기를 끕니다(기본: 앱과 같이 켜짐). 자동으로 불러온 Skill은 결과 요약의 `autoSkills`에 남습니다. |
+| 검사 `toolCalledContains` | 부른 도구 이름에 `text`가 들어 있으면 통과(MCP 도구 이름은 접두어가 붙으므로). |
+
+예: `$env:ANYLM_SCENARIOS = "../harness/search.json"`
 
 ## 데이터와 보안
 

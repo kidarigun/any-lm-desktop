@@ -1,0 +1,18 @@
+[
+  {
+    "id": "search-exa",
+    "note": "내장 웹 검색 MCP(Exa, 키 없음)를 앱과 같은 MCP 관리자로 연결해, 웹에서만 알 수 있는 최신 사실을 검색으로 찾고 출처 주소를 밝히는지 본다",
+    "mode": "project",
+    "mcpServers": [
+      { "name": "Exa", "url": "https://mcp.exa.ai/mcp", "catalogId": "exa" }
+    ],
+    "turns": [
+      "LM Studio의 최신 버전 번호와 출시일을 웹에서 찾아서 알려 줘. 참고한 페이지 주소도 적어 줘."
+    ],
+    "checks": [
+      { "kind": "toolCalledContains", "text": "web_search_exa" },
+      { "kind": "answerContains", "text": "http" },
+      { "kind": "finished" }
+    ]
+  }
+]

@@ -29,6 +29,8 @@ pub struct AppSettings {
     /// 컨텍스트가 차면 자동으로 요약 압축한다.
     pub auto_compact: bool,
     pub model_prefs: BTreeMap<String, ModelPref>,
+    /// 요청에 맞는 Skill을 앱이 골라 미리 넣는다(결정 0007). 끄면 모델이 load_skill을 직접 불러야 한다.
+    pub skill_auto_load: bool,
 }
 
 impl Default for AppSettings {
@@ -41,6 +43,7 @@ impl Default for AppSettings {
             writing_style: "executive_report".to_string(),
             auto_compact: true,
             model_prefs: BTreeMap::new(),
+            skill_auto_load: true,
         }
     }
 }
@@ -76,7 +79,7 @@ pub struct MemoryItem {
     pub source: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolExecutionRecord {
     pub id: String,
@@ -92,6 +95,10 @@ pub struct ToolExecutionRecord {
     /// run_python 실행으로 새로 생기거나 바뀐 파일 (화면에서 바로 열 수 있게)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub produced_files: Vec<String>,
+    /// 모델이 부른 것이 아니라 앱이 스스로 한 일(Skill 자동 불러오기)을 화면에 보여 주는 기록.
+    /// 다음 요청의 대화 기록(도구 호출)으로는 보내지 않는다.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub automatic: bool,
 }
 
 /// 답변 하나를 만드는 데 든 호출·토큰·시간
@@ -455,6 +462,21 @@ mod tests {
         assert_eq!(back.server_url, "http://localhost:1234");
         assert!(back.auto_compact);
         assert_eq!(back.writing_style, "default");
+        assert!(back.skill_auto_load, "예전 설정 파일에는 없으니 기본으로 켠다");
+    }
+
+    #[test]
+    fn skill_auto_load_setting_and_automatic_records_round_trip() {
+        let s: AppSettings = serde_json::from_str(r#"{"skillAutoLoad":false}"#).unwrap();
+        assert!(!s.skill_auto_load);
+        assert!(serde_json::to_string(&AppSettings::default()).unwrap().contains("\"skillAutoLoad\":true"));
+        // 자동 기록 표시는 저장했다가 다시 열어도 남고, 보통 기록에는 붙지 않는다.
+        let r = ToolExecutionRecord { id: "a".into(), tool_name: "load_skill".into(), automatic: true, ..Default::default() };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"automatic\":true"));
+        assert!(serde_json::from_str::<ToolExecutionRecord>(&json).unwrap().automatic);
+        let plain = serde_json::to_string(&ToolExecutionRecord::default()).unwrap();
+        assert!(!plain.contains("automatic"));
     }
 
     #[test]

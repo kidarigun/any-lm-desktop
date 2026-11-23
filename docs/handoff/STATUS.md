@@ -34,6 +34,7 @@
 - 지식 폴더(스펙 5절): 완료. `knowledge.rs`(훑기·건너뛰기·한도, 조각 1,200자/겹침 200, 토큰 = 영문·숫자 소문자 + 한글 2글자 묶음, BM25 k1 1.2·b 0.75, 색인 `앱 데이터\knowledge\<id>.json`에 파일별 크기·수정 시각, 깨지거나 옛 형식이면 다시 만듦), `Project.knowledge_folders`, 명령 `add_knowledge_folder`·`remove_knowledge_folder`·`reindex_knowledge`·`knowledge_status`(색인은 뒤에서, 이벤트 `anylm-knowledge-status`), 턴 시작(보내기·다시 보내기·승인 뒤 이어가기) 빠른 갱신(5초, 남은 것은 다음으로) + 마지막 사용자 메시지로 `[참고 자료]`(마지막 사용자 메시지 바로 앞의 user+assistant 한 쌍, 저장 안 함, min(12000, 컨텍스트×1.5×0.15)자, 6조각, `### 출처: <경로>`; 줄이기 기준·자동 압축 어림에도 넣음. 턴은 갱신을 최대 1.5초만 기다리고 메모리의 색인으로 찾음), `search_knowledge` 도구(승인 없음, 도구 출력 상한, 지식 폴더 있을 때만 목록에). 화면은 프로젝트 화면 "지식 폴더" 카드(`src/project/KnowledgeCard.tsx`). 세부 결정은 `docs/decisions/0005-knowledge-folders.md`. 하니스 시나리오 `harness/knowledge.json`(knowledgeFiles/knowledgeFolders). 실측: 그때 LM Studio에 로드돼 있던 모델이 qwen3.6-35b-a3b(32768)뿐이어서(9B는 로드 안 됨, 로드·언로드하지 않음) 35B로 확인 — 지식 폴더에만 있는 제품 코드의 출시일과 출처 경로가 답에 나옴(3/3, 4/4). 9B 실측은 아직.
 - 내장 웹 검색 MCP(결정 0006): 완료. `src/catalog/builtin.ts`에 공식 서버 8개(Tavily·Exa·Brave·Perplexity·Firecrawl·Kagi·Jina·Linkup, 분류 "웹 검색"), `mergeCatalogs`(내장 먼저·같은 id는 내장 우선·원격 `official` 무시), 찾아보기는 원격 목록이 없어도 내장 항목과 오류 띠를 보여 주고 카드에 "공식" 표시. 연결된 서버의 `catalogId`가 내장 검색 항목이면 `[MCP]` 절에 최신 정보는 웹 검색으로 찾고 URL을 밝히라는 한 줄(`ToolSpec.catalog_id`). 키 없이 Exa 실측(`cargo test --lib live_exa -- --ignored`): tools/list에 web_search_exa·web_fetch_exa, 검색 결과 본문 반환. 키가 필요한 제공사는 호출해 보지 않았다.
 - 지침 편집기 후속: 프로젝트 설정 창의 [큰 편집기로 열기]는 창의 값이 저장된 값과 같을 때만 쓸 수 있고(다르면 "큰 편집기: 먼저 저장하세요"), 화면의 프로젝트를 바꾸지 않는다. 편집기 Esc는 포커스가 창 밖이어도 듣고(창이 열려 있는 동안만 window 리스너), `role="dialog" aria-modal="true"`.
+- Skill 자동 불러오기 + 하니스 MCP(결정 0007): 완료. 앱이 턴 시작 때 요청에 맞는 Skill 하나를 고르고(`skills::select_for_message`: 이름·`/이름`, 아니면 지식 폴더 토큰으로 요청 쪽 비율 ≥0.25·맞은 토큰 ≥2·2등과 0.05 차) 그 지침을 `[참고 자료]`처럼 질문 바로 앞 한 쌍으로 넣는다(머리 줄 `[Skill: 이름 — …]`, 예산 min(10000, ctx×1.5×0.20), 저장 안 함, 줄이기 기준·자동 압축 어림 포함). 같은 턴 `load_skill` 재호출은 짧은 답, 승인 뒤 이어가기는 같은 Skill을 다시 넣음. 답변 맨 앞 도구 카드 "Skill 자동 불러옴: 이름"(`ToolExecutionRecord.automatic`, 다음 요청 기록에는 안 보냄). 설정 `skillAutoLoad`(기본 켜짐) — Skill 창 "설치됨" 탭 스위치. 하니스: 시나리오 `mcpServers`(앱의 McpManager로 연결, 끝나면 지움, `autoApprove` 밖 MCP 도구는 하니스가 승인하고 기록), `skillAutoLoad`, 검사 `toolCalledContains`, `harness/search.json`(Exa 키 없음). 실측(9B 8192 / 35B 32768, 로드돼 있던 그대로): proj-skill은 두 모델 모두 Skill이 자동으로 들어갔고 35B는 양식 그대로, 9B는 3번 중 2번 양식을 따름(1번은 생각만 하고 빈 답) — 검사 점수는 둘 다 2/5인데 `make_scenarios.py`의 검사 경로 날짜가 `2026-11-15`로 고정돼 있어서다(Skill은 "보고서를 쓰는 날짜"로 저장하라고 함). search-exa: 35B 3/3, 9B 2/3 두 번(검색은 하지만 답을 생각 안에만 쓰고 빈 답으로 끝남).
 
 ## 다음 할 일
 1. **화면 수동 확인**: 아래 "수동 확인 목록"을 사용자와 함께 앱 화면에서 확인한다(`npm run tauri dev`). 문제가 나오면 고치고 목록에서 지운다.
@@ -52,6 +53,8 @@
    - 그 밖에 검토의 "Can stay" 목록(서버 상태는 아무 HTTP 응답이면 켜짐으로 봄 등).
 
 ## 마지막 확인
+2026-11-24, Skill 자동 불러오기 + 하니스 MCP 뒤: `npm test` → 통과 (24 파일, 146 통과, 1 건너뜀) · `npx tsc --noEmit` → 오류 없음 · `cd src-tauri && cargo test --lib` → 240 통과, 0 실패, 10 무시 · `cargo check --all-targets` 경고 없음. 실측은 위 "진행 중"의 Skill 자동 불러오기 줄.
+
 2026-11-24, 지식 폴더 검토 2차 수정 뒤: `npm test` → 통과 (23 파일, 142 통과, 1 건너뜀) · `npx tsc --noEmit` → 오류 없음 · `cd src-tauri && cargo test --lib` → 224 통과, 0 실패, 10 무시 · `cargo check --all-targets` 경고 없음.
 
 2026-11-24, 지식 폴더 검토 1차 수정 뒤: `npm test` → 통과 (23 파일, 133 통과, 1 건너뜀) · `npx tsc --noEmit` → 오류 없음 · `cd src-tauri && cargo test --lib` → 219 통과, 0 실패, 9 무시 · `cargo check --all-targets` 경고 없음. 하니스 `harness/knowledge.json`(qwen3.6-35b-a3b 32768, 로드돼 있던 그대로) 4/4.
@@ -121,11 +124,16 @@
 ## 마지막 작업자
 - 도구: claude-code
 - 모델: Claude Opus 5.5
-- 시각: 2026-11-23
+- 시각: 2026-11-24
 
 ### 프로젝트 화면 · 메모리
 - 모델이 `remember`로 저장하면(예: "이 프로젝트 보고서는 항상 존댓말로 쓴다고 기억해") 대화 중 도구 카드가 뜨고 프로젝트 화면 "프로젝트 메모리" 카드에 [모델] 표시로 바로 보이는지, [추가]로 직접 쓴 항목은 [직접]으로 보이는지, 편집·삭제(삭제 전 확인)가 되는지, 새 대화에서 모델이 그 내용을 아는지 확인.
 - 지침 편집기: 지침 카드 [편집] → [서식 예시]로 4종(보고서·문서 작성/코딩/자료 조사·요약/번역·교정) 넣기(비어 있으면 대체, 있으면 끝에 덧붙임), "n자 · 약 m토큰 · 컨텍스트의 x%"가 입력 중 바뀌고 10% 넘으면 노란색인지, 저장 뒤 새 대화에서 모델이 그 지침을 따르는지(시스템 프롬프트 반영), Esc·취소 때 변경 확인이 뜨는지
+
+### Skill 자동 불러오기
+- Skill 창 "설치됨" 탭 위 "Skill 자동 불러오기" 스위치가 켜져 있고(처음 실행·예전 설정도), 끄고 다시 열면 꺼진 채인지
+- 프로젝트에 `.skills/weekly-report/SKILL.md`(harness/make_scenarios.py의 proj-skill 내용)를 두고 "이번 주 주간 업무 보고서를 만들어 줘" → 답변 맨 위 도구 카드 이름표가 "Skill 자동 불러옴: weekly-report"인지, 대화를 다시 열어도 카드가 남는지, 모델이 load_skill을 또 부르면 그 카드 내용이 "이미 이 턴에 불러온 Skill입니다(위 지침 참고)."인지
+- "안녕"·관계없는 요청에는 카드가 안 뜨는지, `/weekly-report`로 부르면 뜨는지, 스위치를 끄면 안 뜨는지
 
 ### MCP · 웹 검색
 - 사이드바 MCP → 찾아보기 → 분류 "웹 검색": 8개 항목에 "공식" 표시가 보이고, 인터넷을 끈 채 열어도(저장본이 없을 때) 이 항목들과 오류 띠가 보이는지

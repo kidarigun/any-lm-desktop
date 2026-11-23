@@ -22,12 +22,12 @@ Rust (`src-tauri/src/`)
 - `snapshot_diff.rs` — 스냅샷의 이전/이후 내용 텍스트 추출(변경 보기).
 - `html_preview.rs` — HTML 미리보기용 로컬 서버.
 - `mcp.rs` / `mcp_oauth.rs` — MCP 클라이언트 / 원격 MCP OAuth 로그인.
-- `skills.rs` — Skill 찾기·읽기·설치. `catalog.rs` — 원격 Skill·MCP 카탈로그 받기(내장 목록은 프런트 `src/catalog/builtin.ts`).
+- `skills.rs` — Skill 찾기·읽기·설치, 요청에 맞는 Skill 자동 불러오기(`select_for_message`·`auto_for_turn`, 결정 0007). `catalog.rs` — 원격 Skill·MCP 카탈로그 받기(내장 목록은 프런트 `src/catalog/builtin.ts`).
 - `python_runner.rs` — 프로젝트 안 Python 스크립트 실행. `runtime.rs` — 앱 전용 Python/Node/uv 설치·관리.
 - `runs.rs` — 대화별 실행 중복 방지와 중지 플래그.
 - `secrets.rs` — Windows 자격 증명 관리자(LM Studio API 토큰·MCP 비밀 값 보관).
 - `single_instance.rs` — 앱 중복 실행 방지.
-- `harness.rs` — 실제 LM Studio 서버로 에이전트 루프를 돌려 보는 테스트 하니스(`ANYLM_*` 환경 변수).
+- `harness.rs` — 실제 LM Studio 서버로 에이전트 루프를 돌려 보는 테스트 하니스(`ANYLM_*` 환경 변수, 시나리오 `mcpServers`로 앱의 MCP 관리자 연결).
 
 프런트엔드 (`src/`)
 - `App.tsx`, `main.tsx`, `api.ts`, `types.ts`, `styles.css` — 앱 본체, Tauri 명령 호출, 공용 타입·스타일.
@@ -36,7 +36,7 @@ Rust (`src-tauri/src/`)
 - `docs/` — 문서 형식 변환(docx, hwpx, pptx, pdf, xlsx, markdown)과 Rust 다리 구현.
 - `project/` — 프로젝트 메모리 카드(`ProjectMemoryCard`)와 표시 규칙(`memoryFormat`), 지침 전용 편집기(`InstructionsEditor`)와 글자·토큰 계산·서식 예시(`instructionsFormat`), 지식 폴더 카드(`KnowledgeCard`)와 상태 줄·설정 창 비교 규칙(`knowledgeFormat`).
 - `explorer/` — 파일 탐색기·@파일 멘션. `diff/` — 변경 보기와 이력.
-- `mcp/` — MCP 대화상자. `skills/` — Skill 대화상자. `catalog/` — 카탈로그 화면과 규칙(`catalog.ts`), 앱에 내장한 공식 웹 검색 MCP 8개(`builtin.ts`, 원격 목록과 `mergeCatalogs`로 합침. 결정 0006).
+- `mcp/` — MCP 대화상자. `skills/` — Skill 대화상자와 "Skill 자동 불러오기" 스위치·카드 이름표 규칙(`autoLoad`). `catalog/` — 카탈로그 화면과 규칙(`catalog.ts`), 앱에 내장한 공식 웹 검색 MCP 8개(`builtin.ts`, 원격 목록과 `mergeCatalogs`로 합침. 결정 0006).
 - `python/` — Python 실행 대화상자. `runtime/` — 실행 환경 패널.
 - `security/` — HTML 정화. `ui/` — 패널 크기 조절·스크롤바 공용 UI, 화면 문구 브랜드 검사 테스트(`noBrandText`).
 
