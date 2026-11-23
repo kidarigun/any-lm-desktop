@@ -10,7 +10,10 @@ Any LM Desktop은 사용자가 만든 K-EXAONE Desktop 0.4.4(Tauri v2 + React/Ty
 
 Rust (`src-tauri/src/`)
 - `lib.rs` — Tauri 앱 조립과 명령 등록. `main.rs` — 진입점.
-- `exaone.rs` — 모델 호출·에이전트 루프(`run_exaone_turn`)·도구 실행. LM Studio 연결도 여기서 다룬다.
+- `exaone.rs` — 모델 호출·에이전트 루프(`run_exaone_turn`)·도구 실행·스트림 처리·대화 압축 요약(이름은 원본 그대로).
+- `lmstudio.rs` — LM Studio 연결: 서버 주소 검증(`server_urls`, localhost만, 경로는 버림)·인증 헤더·오류 안내, 모델 목록·로드 계획(`plan_load`)·로드/언로드, 서버 상태·`lms server start`, 추론 끄기 필드, 턴 시작 모델 정보(`turn_model_info`).
+- `context_budget.rs` — 로드된 컨텍스트에 맞춘 줄이기 기준·도구 결과 상한·사용 비율(70%, 1토큰 = 1.5자).
+- `testdata/` — 테스트용 LM Studio 응답(`lmstudio_models.json`).
 - `store.rs` — 대화·설정 저장 파일과 스냅샷 자료형.
 - `fs_ops.rs` — 프로젝트 폴더 안의 파일 읽기/쓰기/목록(경로 검증 포함).
 - `doc_bridge.rs` — Rust가 웹뷰의 문서 변환 라이브러리(DOCX/HWPX/PPTX/PDF/XLSX)를 호출하는 다리.
@@ -20,20 +23,21 @@ Rust (`src-tauri/src/`)
 - `skills.rs` — Skill 찾기·읽기·설치. `catalog.rs` — Skill·MCP 카탈로그.
 - `python_runner.rs` — 프로젝트 안 Python 스크립트 실행. `runtime.rs` — 앱 전용 Python/Node/uv 설치·관리.
 - `runs.rs` — 대화별 실행 중복 방지와 중지 플래그.
-- `secrets.rs` — Windows 자격 증명 관리자(API 키 보관).
+- `secrets.rs` — Windows 자격 증명 관리자(LM Studio API 토큰·MCP 비밀 값 보관).
 - `single_instance.rs` — 앱 중복 실행 방지.
-- `harness.rs` — 실제 모델 API로 에이전트 루프를 돌려 보는 테스트 하니스.
+- `harness.rs` — 실제 LM Studio 서버로 에이전트 루프를 돌려 보는 테스트 하니스(`ANYLM_*` 환경 변수).
 
 프런트엔드 (`src/`)
 - `App.tsx`, `main.tsx`, `api.ts`, `types.ts`, `styles.css` — 앱 본체, Tauri 명령 호출, 공용 타입·스타일.
-- `chat/` — 대화별 실행 상태. `canvas/` — 문서 캔버스(편집기·PDF/PPTX/XLSX/HWPX 뷰어).
+- `lmstudio/` — LM Studio 연결 창(`ConnectionDialog`), 모델 선택(`ModelPicker`·"생각하기" 토글), 내리고 로드 선택(`LoadChoiceDialog`), 보내기 전 모델 준비 규칙(`sendFlow`: 로드 계획→다음 단계, 원하는 컨텍스트, 작게 다시 시도 값), [서버 시작] 버튼(`StartServerButton`), 모델 설명 글자(`modelText`).
+- `chat/` — 대화별 실행 상태와 답변 통계 줄(`statsLine`). `canvas/` — 문서 캔버스(편집기·PDF/PPTX/XLSX/HWPX 뷰어).
 - `docs/` — 문서 형식 변환(docx, hwpx, pptx, pdf, xlsx, markdown)과 Rust 다리 구현.
 - `explorer/` — 파일 탐색기·@파일 멘션. `diff/` — 변경 보기와 이력.
 - `mcp/` — MCP 대화상자. `skills/` — Skill 대화상자. `catalog/` — 카탈로그 화면.
 - `python/` — Python 실행 대화상자. `runtime/` — 실행 환경 패널.
-- `security/` — HTML 정화. `ui/` — 패널 크기 조절·스크롤바 공용 UI. `update/` — 업데이트 확인.
+- `security/` — HTML 정화. `ui/` — 패널 크기 조절·스크롤바 공용 UI, 화면 문구 브랜드 검사 테스트(`noBrandText`).
 
-그 밖: `harness/` 실측 시나리오, `scripts/` 릴리스 보조 스크립트, `docs/handoff/` 인계 문서, `docs/decisions/` 결정 기록.
+그 밖: `harness/` 실측 시나리오와 결과 요약 스크립트, `scripts/third_party_notices.py`(THIRD_PARTY_NOTICES 생성), `docs/handoff/` 인계 문서, `docs/decisions/` 결정 기록, `docs/superpowers/` 설계·계획.
 
 ## 3. 빌드·테스트 명령
 

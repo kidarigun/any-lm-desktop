@@ -21,7 +21,7 @@ LM Studio는 채팅만 지원하므로, 이 앱이 문서 작성·캔버스·프
 ## 필요한 것
 
 - Windows 10 / 11 (64비트)
-- [LM Studio](https://lmstudio.ai) 0.4 이상. 서버를 켜 두어야 합니다(앱의 [LM Studio 연결] 창에서 시작할 수도 있습니다). 기본 주소는 `http://localhost:1234`이며 이 PC(localhost, 127.0.0.1, [::1])만 허용합니다.
+- [LM Studio](https://lmstudio.ai) 0.4 이상. 서버를 켜 두어야 합니다(앱의 [LM Studio 연결] 창에서 시작할 수도 있습니다). 기본 주소는 `http://localhost:1234`이며 이 PC(localhost, 127.0.0.1, [::1])만 허용합니다. `http://localhost:1234/v1`처럼 경로를 붙여도 주소와 포트만 씁니다.
 - 모델이 하나 이상 내려받아져 있어야 합니다. 개발 기준 모델은 Qwen3.5-9B, Qwen3.6-35B-A3B입니다.
 
 ## 개발
@@ -65,6 +65,7 @@ python ../harness/report.py ../harness/runs/default   # 결과 요약
 ## 데이터와 보안
 
 - 대화·설정은 `%APPDATA%\io.github.kidarigun.anylm-desktop`, 실행 환경은 `%LOCALAPPDATA%\io.github.kidarigun.anylm-desktop\runtimes`에 저장됩니다.
+- 앱이 이 PC에서 여는 포트: 중복 실행 방지 `45790`, 원격 MCP OAuth 로그인 결과 `45791`(`http://localhost:45791/oauth2callback`). 원본 K-EXAONE Desktop(45788·45789)과 겹치지 않습니다.
 - LM Studio API 토큰(선택), MCP 서버의 비밀 값, OAuth 토큰은 설정 파일이 아니라 **Windows 자격 증명 관리자**에 저장됩니다.
 - 모델이 파일을 지우거나 명령·스크립트를 실행하거나 MCP 도구를 쓸 때는 기본적으로 사용자 승인을 받습니다.
 - 앱이 직접 접속하는 곳: 설정한 LM Studio 서버(이 PC), 사용자가 추가한 MCP 서버, 찾아보기 카탈로그, 실행 환경 공식 배포처(github.com/astral-sh/uv, nodejs.org, PyPI). 앱 자체의 자동 업데이트 확인은 없습니다.
