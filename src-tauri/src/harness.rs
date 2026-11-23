@@ -366,6 +366,7 @@ async fn live() {
                         settings: &settings,
                         model_key: &settings.model,
                         reasoning_options: &[],
+                        context_length: crate::context_budget::FALLBACK_CONTEXT,
                         project: project.as_ref(),
                         conversation_id: &sc.id,
                         history: &history,

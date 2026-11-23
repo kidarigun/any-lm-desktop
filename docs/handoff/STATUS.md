@@ -14,14 +14,15 @@
 - 작업 5(LM Studio 연결 창): 완료. `src/lmstudio/`(modelText, ConnectionDialog)를 추가하고 설정 창을 교체. 사이드바 버튼은 [LM Studio 연결] + 연결 점(열 때·15초마다·저장 후 `serverRunning()` 확인). 창에서 서버 시작, 모델 로드/다시 로드(언로드 후 로드)/언로드, 기본 모델 선택, 모델별 컨텍스트(modelPrefs), 자동 요약 압축을 다룬다. 원본에 문체 선택 UI가 없어 추가하지 않았다.
 - 작업 6(대화별 모델 선택): 완료. 대화마다 `modelKey`를 저장하고(비면 기본 모델) 요청 본문 `"model"`과 답변의 `modelKey`에 쓴다. 입력창 아래 ModelPicker(로드된 모델이 위, `loadedLabel` 표시), 보내기 전 `planLoad`→`nextSendStep` 흐름(바로 보내기 / 로드 중 표시 후 로드 / LoadChoiceDialog / 컨텍스트 작게 로드됨 안내와 [다시 로드] / 모델 없음 / 로드 실패 시 [내리고 로드]). 프로젝트·코드 화면에서 도구 미지원 모델이면 경고만 한다. 답변 아래 통계 줄 앞에 모델 이름. 하니스(harness.rs)는 settings.model만 넘긴다(작업 11에서 정리).
 - 작업 7(추론 켜기/끄기): 완료. 실측 결과 `reasoning_effort: "none"`만 9B·35B 모두 reasoning_tokens 0(결정 0003). `lmstudio::reasoning_fields`/`REASONING_OFF_FIELDS`, 턴 시작 때 모델 목록으로 `TurnRequest.reasoning_options`를 채워 요청 본문에 반영(작업 8이 같은 목록을 재사용할 수 있음), `preserve_thinking` 삭제·`keep_thinking`은 항상 false. ModelPicker 옆 "생각하기" 체크(추론 선택지가 있는 모델에서만, `modelPrefs[key].reasoning` 저장). 실측 후 LM Studio는 qwen3.5-9b(32768)만 로드된 상태.
+- 작업 8(컨텍스트 예산): 완료. `context_budget.rs`(FALLBACK 8192, 0.70, 1.5자/토큰, trim_trigger_chars, tool_output_cap, resolve_context, usage_ratio). 턴 시작 때 `lmstudio::turn_model_info`가 모델 목록을 한 번(3초 제한) 읽어 추론 선택지와 로드된 컨텍스트를 함께 주고, `TurnRequest.context_length`가 줄이기 기준(`COMPACT_TRIGGER_CHARS` 삭제)과 도구 결과 상한을 정한다. 초과 오류는 비스트리밍 HTTP 400, 스트리밍은 HTTP 200 안의 `event: error`(결정 0004). 실측 후 qwen3.5-9b(32768) 1개만 로드된 상태.
 
 ## 마지막 확인
-2026-11-23, 작업 7 완료 시점:
+2026-11-23, 작업 8 완료 시점:
 - `npm test` → 통과 (18 파일, 111 통과, 1 건너뜀)
 - `npx tsc --noEmit` → 통과 (오류 없음)
-- `cd src-tauri && cargo test --lib` → 통과 (141 통과, 0 실패, 8 무시)
+- `cd src-tauri && cargo test --lib` → 통과 (148 통과, 0 실패, 8 무시)
 - `npm run build` → 성공 (GUI 확인은 못 함)
-1. 계획의 작업 8부터 이어서 진행한다(`docs/superpowers/plans/2026-11-23-any-lm-desktop.md`).
+1. 계획의 작업 9부터 이어서 진행한다(`docs/superpowers/plans/2026-11-23-any-lm-desktop.md`).
 2. 작업 1의 단계 6은 사용자가 승인하면 한다: "`kidarigun/any-lm-desktop` 비공개 저장소를 만들고 main을 올릴까요?" → 승인 시 `gh repo create kidarigun/any-lm-desktop --private --source . --remote origin --push`.
 
 ## 결정 필요

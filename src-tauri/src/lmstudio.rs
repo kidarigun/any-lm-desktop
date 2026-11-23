@@ -166,11 +166,32 @@ pub fn reasoning_fields(options: &[String], pref: Option<&str>) -> Map<String, V
     REASONING_OFF_FIELDS.as_object().cloned().unwrap_or_default()
 }
 
-/// 이번 요청에 쓸 모델의 추론 선택지. 목록을 못 가져오면 빈 목록(추론 항목을 보내지 않음)이다.
-pub async fn model_reasoning_options(settings: &AppSettings, key: &str) -> Vec<String> {
-    match list_models(settings).await {
-        Ok(models) => models.into_iter().find(|m| m.key == key).map(|m| m.reasoning_options).unwrap_or_default(),
-        Err(_) => Vec::new(),
+/// 턴 시작 때 한 번의 모델 목록으로 얻는 정보.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TurnModelInfo {
+    /// 그 모델의 추론 선택지. 모르면 빈 목록(추론 항목을 보내지 않음).
+    pub reasoning_options: Vec<String>,
+    /// 로드된 인스턴스 중 가장 큰 컨텍스트 길이. 로드 안 됨·보고 안 됨(0)·목록 실패면 None.
+    pub loaded_context: Option<u32>,
+}
+
+/// 목록에서 한 모델의 턴 정보를 뽑는다.
+pub fn turn_info_from(models: &[LmModel], key: &str) -> TurnModelInfo {
+    let Some(m) = models.iter().find(|m| m.key == key) else { return TurnModelInfo::default() };
+    TurnModelInfo {
+        reasoning_options: m.reasoning_options.clone(),
+        loaded_context: m.loaded.iter().map(|i| i.context_length).max().filter(|&c| c > 0),
+    }
+}
+
+/// 모델 목록 조회가 턴을 오래 붙잡지 않게 하는 제한.
+const TURN_INFO_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// 이번 요청에 쓸 모델의 추론 선택지와 로드된 컨텍스트. 목록을 못 가져오면 기본값(턴을 막지 않는다).
+pub async fn turn_model_info(settings: &AppSettings, key: &str) -> TurnModelInfo {
+    match tokio::time::timeout(TURN_INFO_TIMEOUT, list_models(settings)).await {
+        Ok(Ok(models)) => turn_info_from(&models, key),
+        _ => TurnModelInfo::default(),
     }
 }
 
@@ -366,6 +387,22 @@ mod tests {
 
     fn fixture() -> Vec<LmModel> {
         parse_models(&serde_json::from_str(include_str!("testdata/lmstudio_models.json")).unwrap())
+    }
+
+    #[test]
+    fn turn_info_takes_largest_loaded_context_and_ignores_zero() {
+        let mut m = fixture();
+        let key = m[0].key.clone();
+        m[0].loaded = vec![
+            LoadedInstance { id: "a".into(), context_length: 4096 },
+            LoadedInstance { id: "b".into(), context_length: 32768 },
+        ];
+        assert_eq!(turn_info_from(&m, &key).loaded_context, Some(32768));
+        m[0].loaded = vec![LoadedInstance { id: "a".into(), context_length: 0 }];
+        assert_eq!(turn_info_from(&m, &key).loaded_context, None);
+        m[0].loaded.clear();
+        assert_eq!(turn_info_from(&m, &key).loaded_context, None);
+        assert_eq!(turn_info_from(&m, "없는 모델"), TurnModelInfo::default());
     }
 
     #[test]

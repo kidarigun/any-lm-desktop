@@ -626,7 +626,8 @@ pub fn message_rounds(msg: &ChatMessage) -> Vec<(String, Vec<&ToolExecutionRecor
         .collect()
 }
 
-pub fn tool_result_for_model(rec: &ToolExecutionRecord) -> String {
+/// `cap`은 도구 결과 한 개의 글자 수 상한(`context_budget::tool_output_cap`).
+pub fn tool_result_for_model(rec: &ToolExecutionRecord, cap: usize) -> String {
     let text = match rec.status.as_str() {
         "pending_approval" => {
             "사용자가 이 작업을 승인하지 않아 실행되지 않았습니다.".to_string()
@@ -638,7 +639,7 @@ pub fn tool_result_for_model(rec: &ToolExecutionRecord) -> String {
         "error" => format!("오류: {}", rec.output),
         _ => rec.output.clone(),
     };
-    fs_ops::truncate_for_model(&text, MAX_TOOL_OUTPUT_CHARS)
+    fs_ops::truncate_for_model(&text, cap)
 }
 
 fn tool_call_json(rec: &ToolExecutionRecord) -> Value {
@@ -663,7 +664,7 @@ fn with_reasoning(mut msg: Value, reasoning: Option<&str>) -> Value {
     msg
 }
 
-fn push_tool_round(out: &mut Vec<Value>, content: &str, reasoning: Option<&str>, records: &[&ToolExecutionRecord]) {
+fn push_tool_round(out: &mut Vec<Value>, content: &str, reasoning: Option<&str>, records: &[&ToolExecutionRecord], tool_cap: usize) {
     out.push(with_reasoning(
         json!({
             "role": "assistant",
@@ -676,7 +677,7 @@ fn push_tool_round(out: &mut Vec<Value>, content: &str, reasoning: Option<&str>,
         out.push(json!({
             "role": "tool",
             "tool_call_id": r.id,
-            "content": tool_result_for_model(r)
+            "content": tool_result_for_model(r, tool_cap)
         }));
     }
 }
@@ -694,7 +695,7 @@ pub fn build_api_messages_with(
     include_tools: bool,
     keep_reasoning: bool,
 ) -> Vec<Value> {
-    build_api_messages_with_compaction(sys_prompt, history, None, include_tools, keep_reasoning)
+    build_api_messages_with_compaction(sys_prompt, history, None, include_tools, keep_reasoning, MAX_TOOL_OUTPUT_CHARS)
 }
 
 /// 이전 대화가 `compaction`으로 압축되어 있으면 `history[..covered_messages]`를 요약 쌍으로 대체하고,
@@ -705,6 +706,7 @@ pub fn build_api_messages_with_compaction(
     compaction: Option<&ContextCompaction>,
     include_tools: bool,
     keep_reasoning: bool,
+    tool_cap: usize,
 ) -> Vec<Value> {
     let mut out = vec![json!({ "role": "system", "content": sys_prompt })];
     let skip = match compaction.filter(|c| c.covered_messages > 0 && !c.summary.trim().is_empty()) {
@@ -758,7 +760,7 @@ pub fn build_api_messages_with_compaction(
                             ));
                         }
                     } else {
-                        push_tool_round(&mut out, &content, reasoning_of(round), &records);
+                        push_tool_round(&mut out, &content, reasoning_of(round), &records, tool_cap);
                     }
                 }
             }
@@ -926,6 +928,8 @@ pub struct TurnRequest<'a> {
     pub model_key: &'a str,
     /// 그 모델이 지원하는 추론 선택지(LM Studio 모델 목록의 reasoning allowed_options). 모르면 빈 목록.
     pub reasoning_options: &'a [String],
+    /// 로드된 모델의 컨텍스트 길이(토큰). 줄이기 기준과 도구 출력 상한을 정한다. 모르면 `context_budget::FALLBACK_CONTEXT`.
+    pub context_length: u32,
     /// `Some`이면 프로젝트 도구가 켜진다. 일반 채팅은 `None`.
     pub project: Option<&'a Project>,
     pub conversation_id: &'a str,
@@ -1196,8 +1200,6 @@ fn recovery_delays() -> &'static [u64] {
         &[2, 5, 10, 20, 30]
     }
 }
-/// 요청이 이 글자 수를 넘으면 오래된 도구 결과를 줄여서 보낸다.
-const COMPACT_TRIGGER_CHARS: usize = 120_000;
 /// 이어 쓰기 요청에 붙이는 생각 과정의 끝부분 길이
 const REASONING_TAIL_CHARS: usize = 6_000;
 /// AI 요약 압축 시 모델에 넘기는 대화 발췌 최대 길이
@@ -1212,8 +1214,11 @@ fn total_chars(msgs: &[Value]) -> usize {
 /// 서버 오류가 "보낸 내용이 너무 길다"는 뜻인지
 fn looks_like_context_overflow(err: &str) -> bool {
     let e = err.to_lowercase();
-    (e.contains("400") || e.contains("413"))
-        && ["context", "token", "too long", "maximum", "exceed", "length"].iter().any(|k| e.contains(k))
+    // LM Studio(결정 0004): "request (N tokens) exceeds the available context size (M tokens)" / type exceed_context_size_error.
+    e.contains("exceeds the available context size")
+        || e.contains("exceed_context_size_error")
+        || ((e.contains("400") || e.contains("413"))
+            && ["context", "token", "too long", "maximum", "exceed", "length"].iter().any(|k| e.contains(k)))
 }
 
 fn shorten_middle(text: &str, cap: usize) -> String {
@@ -1724,6 +1729,7 @@ pub async fn run_exaone_turn<R: Runtime>(
     let tools_enabled = tools.is_some();
     let sys_prompt = build_system_prompt(req.project, req.mode, &available_skills, &mcp_tools);
     let tune = tuning();
+    let tool_cap = crate::context_budget::tool_output_cap(req.context_length);
     // 이전 답변의 추론은 다음 요청에 다시 보내지 않는다(LM Studio는 추론을 이어받지 않는다).
     let keep_thinking = false;
     let mut api_messages = build_api_messages_with_compaction(
@@ -1732,6 +1738,7 @@ pub async fn run_exaone_turn<R: Runtime>(
         req.compaction,
         tools_enabled,
         keep_thinking,
+        tool_cap,
     );
 
     let resuming = req.continue_from.is_some();
@@ -1789,7 +1796,7 @@ pub async fn run_exaone_turn<R: Runtime>(
             break;
         }
 
-        let level = compact_level.max(u8::from(total_chars(&api_messages) > COMPACT_TRIGGER_CHARS));
+        let level = compact_level.max(u8::from(total_chars(&api_messages) > crate::context_budget::trim_trigger_chars(req.context_length)));
         let mut body = json!({
             "model": req.model_key,
             "messages": compact_messages(&api_messages, level),
@@ -2208,6 +2215,7 @@ pub async fn run_exaone_turn<R: Runtime>(
             &acc.content,
             Some(acc.reasoning.as_str()).filter(|_| keep_thinking),
             &refs,
+            tool_cap,
         );
         msg.tool_records.extend(round_records);
         // 도구를 실행할 때마다 저장한다 (파일은 이미 바뀌었으니 기록도 남아야 한다).
@@ -3185,7 +3193,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
-                model_key: "k-exaone_v2.5", reasoning_options: &[],
+                model_key: "k-exaone_v2.5", reasoning_options: &[], context_length: 32768,
                 project: None,
                 conversation_id: "conv-busy",
                 history: &history,
@@ -3272,7 +3280,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
-                model_key: "k-exaone_v2.5", reasoning_options: &[],
+                model_key: "k-exaone_v2.5", reasoning_options: &[], context_length: 32768,
                 project: Some(&project),
                 conversation_id: "conv-1",
                 history: &history,
@@ -3336,7 +3344,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
-                model_key: "k-exaone_v2.5", reasoning_options: &[],
+                model_key: "k-exaone_v2.5", reasoning_options: &[], context_length: 32768,
                 project: Some(&project),
                 conversation_id: "conv-2",
                 history: &[user.clone()],
@@ -3360,7 +3368,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
-                model_key: "k-exaone_v2.5", reasoning_options: &[],
+                model_key: "k-exaone_v2.5", reasoning_options: &[], context_length: 32768,
                 project: Some(&project),
                 conversation_id: "conv-2",
                 history: &history,
@@ -3408,7 +3416,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
-                model_key: "k-exaone_v2.5", reasoning_options: &[],
+                model_key: "k-exaone_v2.5", reasoning_options: &[], context_length: 32768,
                 project: None,
                 conversation_id: "conv-3",
                 history: &[msg("user", "길게 말해줘")],
@@ -3587,7 +3595,7 @@ mod tests {
         let history = vec![msg("user", "a.txt 읽어 줘")];
         let (out, _) = run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", reasoning_options: &[], project: Some(&project), conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
+            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -3616,7 +3624,7 @@ mod tests {
         let opts = vec!["off".to_string(), "on".to_string()];
         settings.model_prefs.insert("qwen3.5-9b".into(), crate::store::ModelPref { context_length: None, reasoning: Some("off".into()) });
         for o in [&opts[..], &[][..]] {
-            let req = TurnRequest { settings: &settings, model_key: "qwen3.5-9b", reasoning_options: o, project: None, conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None };
+            let req = TurnRequest { settings: &settings, model_key: "qwen3.5-9b", reasoning_options: o, context_length: 32768, project: None, conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None };
             run_exaone_turn(app.handle(), req, Arc::new(AtomicBool::new(false))).await.unwrap();
         }
         let b = bodies.lock().unwrap();
@@ -3764,7 +3772,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
-                model_key: "k-exaone_v2.5", reasoning_options: &[],
+                model_key: "k-exaone_v2.5", reasoning_options: &[], context_length: 32768,
                 project: Some(&project),
                 conversation_id: "c",
                 history: &history,
@@ -3806,7 +3814,7 @@ mod tests {
             async move {
                 run_exaone_turn(
                     app.handle(),
-                    TurnRequest { settings, model_key: "k-exaone_v2.5", reasoning_options: &[], project: Some(&project), conversation_id: "c", history, compaction: None, continue_from: None, mode: "", checkpoint: None },
+                    TurnRequest { settings, model_key: "k-exaone_v2.5", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history, compaction: None, continue_from: None, mode: "", checkpoint: None },
                     Arc::new(AtomicBool::new(false)),
                 )
                 .await
@@ -3837,6 +3845,27 @@ mod tests {
     }
 
     #[test]
+    fn tool_result_is_capped_by_context() {
+        let r = rec("c1", "read_file", "completed", &"가".repeat(30_000), 0);
+        let small = tool_result_for_model(&r, crate::context_budget::tool_output_cap(4096));
+        let big = tool_result_for_model(&r, crate::context_budget::tool_output_cap(262144));
+        assert!(small.chars().count() <= 4_000 + 100 && small.contains("출력이 너무 길어"), "{}", small.chars().count());
+        assert!(big.chars().count() > 20_000 && big.chars().count() <= 40_000 + 100);
+    }
+
+    #[test]
+    fn detects_lm_studio_overflow() {
+        // 실측(작업 8): 컨텍스트 4096으로 로드한 qwen3.5-9b에 약 13,600토큰을 보냈을 때 비스트리밍은 HTTP 400,
+        // 스트리밍은 HTTP 200 안의 `event: error`로 온다. 본문 문구는 같다.
+        let inner = "Engine protocol predict request returned 400: {\"error\":{\"code\":400,\"message\":\"request (13610 tokens) exceeds the available context size (4096 tokens), try increasing it\",\"type\":\"exceed_context_size_error\",\"n_prompt_tokens\":13610,\"n_ctx\":4096}}";
+        assert!(looks_like_context_overflow(&format!("EXAONE API 응답 오류 (400 Bad Request): {inner}")));
+        assert!(looks_like_context_overflow(&format!("EXAONE API 스트림 오류: {inner}")));
+        // 상태 코드가 문구에서 빠져도 LM Studio의 고유 문구로 알아본다.
+        assert!(looks_like_context_overflow("request (13610 tokens) exceeds the available context size (4096 tokens), try increasing it"));
+        assert!(looks_like_context_overflow("{\"type\":\"exceed_context_size_error\"}"));
+    }
+
+    #[test]
     fn continue_prompt_reuses_reasoning_when_answer_never_started() {
         let p = continue_prompt("", &format!("{}마지막 생각", "앞".repeat(10_000)));
         assert!(p.contains("마지막 생각") && p.contains("다시 생각하지 말고"));
@@ -3849,7 +3878,7 @@ mod tests {
         let settings = test_settings(url);
         run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", reasoning_options: &[], project: None, conversation_id: "conv-r", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
+            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", reasoning_options: &[], context_length: 32768, project: None, conversation_id: "conv-r", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -3985,7 +4014,7 @@ mod tests {
         let history = vec![msg("user", "a.txt 써줘")];
         let (out, _) = run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", reasoning_options: &[], project: Some(&project), conversation_id: "c-eof", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
+            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c-eof", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -4015,7 +4044,7 @@ mod tests {
         let history = vec![msg("user", "긴 문서 써줘")];
         let (out, _) = run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", reasoning_options: &[], project: Some(&project), conversation_id: "c-trunc", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
+            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c-trunc", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -4044,7 +4073,7 @@ mod tests {
             focus: Some("API 설계".into()),
             source_chars: Some(100),
         };
-        let out = build_api_messages_with_compaction("sys", &history, Some(&comp), true, false);
+        let out = build_api_messages_with_compaction("sys", &history, Some(&comp), true, false, MAX_TOOL_OUTPUT_CHARS);
         assert_eq!(out.len(), 4, "system + compaction(user/assistant) + latest user");
         assert_eq!(out[0]["role"], "system");
         assert_eq!(out[1]["role"], "user");

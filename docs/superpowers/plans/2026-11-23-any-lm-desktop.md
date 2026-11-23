@@ -404,9 +404,9 @@ fn reasoning_fields_follow_model_and_pref() {
   - `resolve_context(loaded: Option<u32>) -> u32` — 없으면 `FALLBACK_CONTEXT`
   - `TurnRequest.context_length: u32`
 
-- [ ] **Step 1: LM Studio 초과 오류 문구 수집.** 9B를 `context_length` 4096으로 로드하고 6,000토큰 넘는 메시지를 보내 응답 상태 코드와 본문을 받아 적는다. 실측 뒤 32768로 다시 로드.
+- [x] **Step 1: LM Studio 초과 오류 문구 수집.** 9B를 `context_length` 4096으로 로드하고 6,000토큰 넘는 메시지를 보내 응답 상태 코드와 본문을 받아 적는다. 실측 뒤 32768로 다시 로드.
 
-- [ ] **Step 2: 실패하는 테스트**
+- [x] **Step 2: 실패하는 테스트**
 
 ```rust
 #[test] fn estimate_counts_chars_not_bytes() { assert_eq!(estimate_tokens("가나다라마바".chars().count()), 4); }
@@ -422,9 +422,9 @@ fn reasoning_fields_follow_model_and_pref() {
 
 `exaone.rs`: `detects_lm_studio_overflow` — Step 1에서 받은 실제 오류 문자열로 `looks_like_context_overflow`가 true. 기존 `detects_context_overflow_errors`의 오류 문구 접두어("EXAONE API 응답 오류")는 작업 10에서 바뀌는 문구에 맞춘다.
 
-- [ ] **Step 3: 실패 확인 → 구현.** 1단계 줄이기 조건 `total_chars(...) > COMPACT_TRIGGER_CHARS` → `> context_budget::trim_trigger_chars(req.context_length)`. `tool_result_for_model`의 상한 → `tool_output_cap(req.context_length)`(함수에 인자 추가). `READ_PAGE_CHARS` 같은 상수 기반 페이지 크기는 그대로 둔다. `lib.rs`의 턴 시작부(세 곳: 보내기, 다시 보내기, 승인 후 이어가기)에서 `list_models` → 해당 모델 `loaded[0].context_length` → `resolve_context`.
+- [x] **Step 3: 실패 확인 → 구현.** 1단계 줄이기 조건 `total_chars(...) > COMPACT_TRIGGER_CHARS` → `> context_budget::trim_trigger_chars(req.context_length)`. `tool_result_for_model`의 상한 → `tool_output_cap(req.context_length)`(함수에 인자 추가). `READ_PAGE_CHARS` 같은 상수 기반 페이지 크기는 그대로 둔다. `lib.rs`의 턴 시작부(세 곳: 보내기, 다시 보내기, 승인 후 이어가기)에서 `list_models` → 해당 모델 `loaded[0].context_length` → `resolve_context`.
 
-- [ ] **Step 4: 통과 확인 → 커밋** — `feat: size context trimming and tool output to the loaded LM Studio context`
+- [x] **Step 4: 통과 확인 → 커밋** — `feat: size context trimming and tool output to the loaded LM Studio context`
 
 ---
 
