@@ -273,14 +273,6 @@ function TurnStatsLine({ stats }: { stats?: TurnStats | null }) {
   );
 }
 
-/** K-EXAONE API 키는 발급 30일 뒤 만료된다. 앱에 입력한 지 며칠 됐는지. */
-const KEY_VALID_DAYS = 30;
-function keyAgeDays(savedAt?: string | null): number | null {
-  if (!savedAt) return null;
-  const t = new Date(savedAt).getTime();
-  return Number.isNaN(t) ? null : Math.floor((Date.now() - t) / (24 * 60 * 60 * 1000));
-}
-
 /** 대화 전체를 Markdown 글로 만든다 (내보내기용). */
 function conversationToMarkdown(conv: Conversation): string {
   const lines: string[] = [`# ${conv.title || "대화"}`, ""];
@@ -336,13 +328,6 @@ const AUTO_APPROVE_TOOLS = [
   { tool: "run_command", label: "PowerShell 명령 실행" },
 ];
 
-/** K-EXAONE 2.5가 받는 추론 강도 (공식 문서: low / high / max, 서버 기본값은 max) */
-const REASONING_EFFORTS: { value: AppSettings["reasoningEffort"]; label: string; hint: string }[] = [
-  { value: "low", label: "낮음", hint: "추론을 짧게 합니다. 간단한 질문에 빠르게 답할 때 고르세요." },
-  { value: "high", label: "높음", hint: "더 깊게 추론합니다. 보고서·코드·여러 단계 작업에 알맞습니다." },
-  { value: "max", label: "최대", hint: "가장 길게 추론합니다. 정확도가 중요한 어려운 문제용이며 가장 느립니다." },
-];
-
 export default function App() {
   const [isDark, setIsDark] = useState<boolean>(() => {
     return localStorage.getItem("anylm_theme") === "dark";
@@ -390,10 +375,11 @@ export default function App() {
 
   const [settings, setSettings] = useState<AppSettings>({
     apiKey: "",
-    baseUrl: "https://api.exaone.ai/v1/chat/completions",
-    model: "k-exaone_v2.5",
-    reasoningEffort: "high",
+    serverUrl: "http://localhost:1234",
+    model: "",
     writingStyle: "default",
+    autoCompact: true,
+    modelPrefs: {},
   });
 
   // 3 Core Modes: "chat" | "project" | "code"
@@ -697,9 +683,6 @@ export default function App() {
     })();
   }, []);
 
-  // API 키를 입력한 지 며칠 됐는지 (발급 30일 뒤 만료되므로 가까워지면 알린다)
-  const keyDays = settings.apiKeySet ? keyAgeDays(settings.apiKeySavedAt) : null;
-
   // 서버가 알려 준 호출 한도 (오늘 남은 호출 수 표시용)
   const [rateInfo, setRateInfo] = useState<RateInfo | null>(null);
   useEffect(() => {
@@ -800,18 +783,6 @@ export default function App() {
     const firstConv = conversations.find((c) => c.projectId === targetScope);
     setActiveConvId(firstConv ? firstConv.id : "");
     // 화면에 맞는 지침은 메시지를 보낼 때 화면 이름(mode)으로 고른다.
-  }
-
-  /** 입력란에서 고른 추론 강도를 저장한다. 다음에 보내는 메시지부터 적용된다. */
-  async function changeReasoningEffort(effort: AppSettings["reasoningEffort"]) {
-    if (effort === settings.reasoningEffort) return;
-    setSettings((prev) => ({ ...prev, reasoningEffort: effort }));
-    try {
-      // 키는 보내지 않는다 (비어 있으면 저장된 키를 그대로 둔다).
-      await BackendAPI.saveSettings({ ...settings, apiKey: "", reasoningEffort: effort });
-    } catch (err) {
-      setErrorBanner(String(err));
-    }
   }
 
   async function handleNewChat() {
@@ -1748,23 +1719,9 @@ export default function App() {
           >
             <span className="flex items-center gap-1.5">
               <Settings className="w-3.5 h-3.5 text-stone-500 dark:text-stone-400" />
-              API 및 모델 설정
+              LM Studio 연결 설정
             </span>
-            <span
-              className={`text-xs font-semibold ${
-                settings.apiKeySet && !(keyDays !== null && keyDays >= KEY_VALID_DAYS - 5)
-                  ? "text-emerald-700 dark:text-emerald-400"
-                  : "text-amber-700 dark:text-amber-400"
-              }`}
-            >
-              {!settings.apiKeySet
-                ? "키 입력 필요"
-                : keyDays !== null && keyDays >= KEY_VALID_DAYS
-                  ? "키 만료됐을 수 있음"
-                  : keyDays !== null && keyDays >= KEY_VALID_DAYS - 5
-                    ? `키 만료 ${KEY_VALID_DAYS - keyDays}일 전`
-                    : "연결됨"}
-            </span>
+            <span className="text-xs font-semibold text-emerald-700 dark:text-emerald-400">LM Studio</span>
           </button>
         </div>
       </aside>
@@ -2697,33 +2654,6 @@ export default function App() {
                       <Paperclip className="w-3.5 h-3.5" />
                       <span>파일 첨부</span>
                     </button>
-                    <div
-                      role="radiogroup"
-                      aria-label="추론 강도"
-                      className="flex items-center gap-0.5 pl-1.5 ml-0.5 border-l border-stone-200 dark:border-[#383834]"
-                    >
-                      <span className="px-1 text-[11px] text-stone-400 dark:text-stone-500 select-none">추론</span>
-                      {REASONING_EFFORTS.map((opt) => {
-                        const selected = settings.reasoningEffort === opt.value;
-                        return (
-                          <button
-                            key={opt.value}
-                            type="button"
-                            role="radio"
-                            aria-checked={selected}
-                            title={opt.hint}
-                            onClick={() => changeReasoningEffort(opt.value)}
-                            className={`px-2 py-1 rounded-md text-xs font-medium cursor-pointer transition ${
-                              selected
-                                ? "bg-[#A50034]/10 text-[#A50034] dark:bg-[#FF5C8D]/15 dark:text-[#FF5C8D]"
-                                : "text-stone-500 dark:text-stone-400 hover:bg-stone-100 dark:hover:bg-[#32322F]"
-                            }`}
-                          >
-                            {opt.label}
-                          </button>
-                        );
-                      })}
-                    </div>
                     {activeConversation && activeConversation.messages.length > 0 && (
                       <button
                         type="button"
@@ -2896,7 +2826,7 @@ export default function App() {
           <div className="bg-white dark:bg-[#262624] border border-stone-200 dark:border-[#3A3A36] rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-6 shadow-xl space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-bold text-stone-900 dark:text-stone-100">
-                API 및 모델 설정
+                LM Studio 연결 설정
               </h3>
               <button onClick={closeSettingsModal}>
                 <X className="w-4 h-4 text-stone-400" />
@@ -2906,7 +2836,7 @@ export default function App() {
             <div className="space-y-3 text-xs">
               <div>
                 <label className="font-semibold text-stone-700 dark:text-stone-300 block mb-1">
-                  API Key
+                  LM Studio API 토큰 (선택)
                 </label>
                 <input
                   type="password"
@@ -2917,30 +2847,18 @@ export default function App() {
                   }
                   placeholder={
                     settings.apiKeySet
-                      ? "저장된 키 사용 중 — 바꾸려면 새 키 입력"
-                      : "발급받은 EXAONE API Key 입력"
+                      ? "저장된 토큰 사용 중 — 바꾸려면 새 토큰 입력"
+                      : "LM Studio에서 인증을 켠 경우에만 입력"
                   }
                   className="w-full bg-white dark:bg-[#1E1E1C] border border-stone-300 dark:border-[#3A3A36] rounded-xl px-3 py-2 text-stone-900 dark:text-stone-100 focus:outline-none focus:border-[#A50034]"
                 />
-                {keyDays !== null && (
-                  <div
-                    className={`mt-1 text-[11px] ${
-                      keyDays >= KEY_VALID_DAYS - 5
-                        ? "text-amber-700 dark:text-amber-400 font-semibold"
-                        : "text-stone-500 dark:text-stone-400"
-                    }`}
-                  >
-                    이 키를 입력한 지 {keyDays}일 지났습니다. K-EXAONE API 키는 발급한 날부터 30일 뒤 만료되니,
-                    {keyDays >= KEY_VALID_DAYS - 5 ? " 새 키를 발급받아 바꿔 주세요." : " 그 전에 새 키로 바꿔 주세요."}
-                  </div>
-                )}
                 <div className="mt-1 flex items-center justify-between text-[11px] text-stone-500 dark:text-stone-400">
-                  <span>키는 Windows 자격 증명 관리자에 암호화되어 저장됩니다.</span>
+                  <span>토큰은 Windows 자격 증명 관리자에 암호화되어 저장됩니다.</span>
                   {settings.apiKeySet && (
                     <button
                       type="button"
                       onClick={async () => {
-                        if (!window.confirm("저장된 API 키를 삭제할까요?")) return;
+                        if (!window.confirm("저장된 토큰을 삭제할까요?")) return;
                         try {
                           const saved = await BackendAPI.clearApiKey();
                           setSettings({ ...saved, apiKey: "" });
@@ -2951,20 +2869,20 @@ export default function App() {
                       }}
                       className="text-[#A50034] dark:text-[#FF5C8D] font-semibold hover:underline cursor-pointer"
                     >
-                      저장된 키 삭제
+                      저장된 토큰 삭제
                     </button>
                   )}
                 </div>
               </div>
               <div>
                 <label className="font-semibold text-stone-700 dark:text-stone-300 block mb-1">
-                  엔드포인트 주소
+                  LM Studio 서버 주소
                 </label>
                 <input
                   type="text"
-                  value={settings.baseUrl}
+                  value={settings.serverUrl}
                   onChange={(e) =>
-                    setSettings({ ...settings, baseUrl: e.target.value })
+                    setSettings({ ...settings, serverUrl: e.target.value })
                   }
                   className="w-full bg-white dark:bg-[#1E1E1C] border border-stone-300 dark:border-[#3A3A36] rounded-xl px-3 py-2 font-mono text-stone-900 dark:text-stone-100 focus:outline-none focus:border-[#A50034]"
                 />

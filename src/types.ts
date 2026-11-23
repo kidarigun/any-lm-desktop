@@ -1,19 +1,26 @@
+export interface ModelPref {
+  contextLength?: number;
+  reasoning?: "on" | "off";
+}
+
 export interface AppSettings {
-  /** 화면에서 새 키를 보낼 때만 쓴다. 저장된 키는 화면으로 돌아오지 않는다 (비어 있으면 기존 키 유지). */
+  /** LM Studio API 토큰(선택). 화면에서 새 토큰을 보낼 때만 쓴다. 저장된 토큰은 화면으로 돌아오지 않는다 (비어 있으면 기존 토큰 유지). */
   apiKey: string;
-  /** 저장된 키가 있는지 */
+  /** 저장된 토큰이 있는지 */
   apiKeySet?: boolean;
-  baseUrl: string;
+  /** LM Studio 서버 주소 (localhost / 127.0.0.1 / [::1] 만 허용) */
+  serverUrl: string;
+  /** 기본 모델 key. 비어 있으면 아직 고르지 않은 것 */
   model: string;
-  reasoningEffort: "low" | "high" | "max";
   writingStyle:
     | "executive_report"
     | "technical_doc"
     | "creative_writing"
     | "code_architect"
     | "default";
-  /** API 키를 앱에 입력한 시각 (K-EXAONE 키는 발급 30일 뒤 만료된다) */
-  apiKeySavedAt?: string | null;
+  /** 컨텍스트가 차면 자동으로 요약 압축한다 */
+  autoCompact: boolean;
+  modelPrefs: Record<string, ModelPref>;
 }
 
 export interface Project {

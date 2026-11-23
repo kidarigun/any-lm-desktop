@@ -152,7 +152,7 @@ fn identity_is_any_lm_desktop() {
   - `lmstudio::friendly_error(err: &reqwest::Error) -> String` — 연결 거부·연결 시간 초과면 `"LM Studio 서버가 꺼져 있습니다. LM Studio에서 서버를 켜거나 [서버 시작]을 눌러 주세요."`
   - TS `AppSettings { apiKey, apiKeySet?, serverUrl, model, writingStyle, autoCompact, modelPrefs: Record<string, { contextLength?: number; reasoning?: "on" | "off" }> }`
 
-- [ ] **Step 1: 실패하는 테스트**
+- [x] **Step 1: 실패하는 테스트**
 
 ```rust
 #[test]
@@ -187,13 +187,13 @@ async fn connection_refused_is_friendly() {
 
 `store.rs`: `default_settings_point_to_lm_studio` — `AppSettings::default()`의 `server_url == "http://localhost:1234"`, `model == ""`, `auto_compact == true`, `model_prefs.is_empty()`. 기존 `api_key_is_never_serialized` 테스트는 새 필드로 고친다.
 
-- [ ] **Step 2: 실패 확인** — `cargo test --lib lmstudio::` → FAIL(모듈 없음)
+- [x] **Step 2: 실패 확인** — `cargo test --lib lmstudio::` → FAIL(모듈 없음)
 
-- [ ] **Step 3: 구현.** `exaone.rs`에서 `settings.base_url` → `lmstudio::server_urls(&settings.server_url)?.chat`, `.bearer_auth(...)` → `lmstudio::authorize(..., &settings.api_key)`, "API 키가 설정되지 않았습니다" 검사 두 곳(`run_exaone_turn`, `summarize_for_compaction`) 삭제, 요청 전송 오류는 `friendly_error`로. `validate_base_url`과 그 테스트는 지우고 `server_urls`로 대신한다. `reasoning_effort`를 본문에 넣던 코드는 이 작업에서 지운다(작업 7에서 대체). 설정 저장 형식이 바뀌므로 `store.rs`의 불러오기는 모르는 필드를 무시하고 없는 필드는 기본값으로 채운다(`#[serde(default)]`).
+- [x] **Step 3: 구현.** `exaone.rs`에서 `settings.base_url` → `lmstudio::server_urls(&settings.server_url)?.chat`, `.bearer_auth(...)` → `lmstudio::authorize(..., &settings.api_key)`, "API 키가 설정되지 않았습니다" 검사 두 곳(`run_exaone_turn`, `summarize_for_compaction`) 삭제, 요청 전송 오류는 `friendly_error`로. `validate_base_url`과 그 테스트는 지우고 `server_urls`로 대신한다. `reasoning_effort`를 본문에 넣던 코드는 이 작업에서 지운다(작업 7에서 대체). 설정 저장 형식이 바뀌므로 `store.rs`의 불러오기는 모르는 필드를 무시하고 없는 필드는 기본값으로 채운다(`#[serde(default)]`).
 
-- [ ] **Step 4: 통과 확인** — 세 검증 명령 PASS. TS 쪽 컴파일 오류는 설정 화면에서 지운 필드를 쓰는 곳만 임시로 정리한다(화면 재구성은 작업 5).
+- [x] **Step 4: 통과 확인** — 세 검증 명령 PASS. TS 쪽 컴파일 오류는 설정 화면에서 지운 필드를 쓰는 곳만 임시로 정리한다(화면 재구성은 작업 5).
 
-- [ ] **Step 5: 커밋** — `feat: connect settings to LM Studio server URL with optional token`
+- [x] **Step 5: 커밋** — `feat: connect settings to LM Studio server URL with optional token`
 
 ---
 

@@ -3,6 +3,7 @@ pub mod doc_bridge;
 pub mod exaone;
 pub mod fs_ops;
 pub mod html_preview;
+pub mod lmstudio;
 pub mod mcp;
 pub mod mcp_oauth;
 pub mod python_runner;
@@ -167,23 +168,17 @@ fn get_initial_state(state: State<'_, AppState>) -> Result<AppDatabase, String> 
     Ok(db.clone())
 }
 
-/// 설정 저장. `api_key`가 비어 있으면 기존 키를 그대로 둔다 (키 삭제는 `clear_api_key`).
+/// 설정 저장. `api_key`(LM Studio 토큰)가 비어 있으면 기존 토큰을 그대로 둔다 (키 삭제는 `clear_api_key`).
 #[tauri::command]
 fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> Result<AppSettings, String> {
-    exaone::validate_base_url(&settings.base_url)?;
+    lmstudio::server_urls(&settings.server_url)?;
     let new_key = settings.api_key.trim().to_string();
     if !new_key.is_empty() {
         secrets::store_api_key(&new_key)?;
     }
     let mut db = state.db.lock().map_err(|e| e.to_string())?;
-    // 새 키를 받았을 때만 입력 시각을 새로 적는다 (화면이 보낸 값은 쓰지 않는다).
-    let api_key_saved_at = if new_key.is_empty() {
-        db.settings.api_key_saved_at.clone()
-    } else {
-        Some(chrono::Local::now().to_rfc3339())
-    };
     let api_key = if new_key.is_empty() { db.settings.api_key.clone() } else { new_key };
-    db.settings = AppSettings { api_key_set: !api_key.is_empty(), api_key, api_key_saved_at, ..settings };
+    db.settings = AppSettings { api_key_set: !api_key.is_empty(), api_key, ..settings };
     state.store.save(&db)?;
     // api_key는 직렬화되지 않으므로 화면에는 키가 전달되지 않는다.
     Ok(db.settings.clone())
@@ -195,7 +190,6 @@ fn clear_api_key(state: State<'_, AppState>) -> Result<AppSettings, String> {
     let mut db = state.db.lock().map_err(|e| e.to_string())?;
     db.settings.api_key.clear();
     db.settings.api_key_set = false;
-    db.settings.api_key_saved_at = None;
     state.store.save(&db)?;
     Ok(db.settings.clone())
 }

@@ -1,24 +1,34 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// 모델별 사용자 선택값
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ModelPref {
+    pub context_length: Option<u32>,
+    /// "on" | "off"
+    pub reasoning: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct AppSettings {
-    /// 실제 키는 Windows 자격 증명 관리자에 둔다. 설정 파일에도, 화면(웹뷰)에도 내보내지 않는다.
-    /// 화면에서 받을 때만 쓰며, 비어 있으면 "기존 키 유지"를 뜻한다.
-    #[serde(default, skip_serializing)]
+    /// LM Studio API 토큰(선택). Windows 자격 증명 관리자에 둔다. 설정 파일에도, 화면(웹뷰)에도 내보내지 않는다.
+    /// 화면에서 받을 때만 쓰며, 비어 있으면 "기존 토큰 유지"를 뜻한다.
+    #[serde(skip_serializing)]
     pub api_key: String,
-    /// 저장된 키가 있는지 (화면 표시용)
-    #[serde(default)]
+    /// 저장된 토큰이 있는지 (화면 표시용)
     pub api_key_set: bool,
-    pub base_url: String,
+    /// LM Studio 서버 주소 (localhost / 127.0.0.1 / [::1] 만 허용)
+    pub server_url: String,
+    /// 기본 모델 key. 비어 있으면 아직 고르지 않은 것.
     pub model: String,
-    pub reasoning_effort: String, // "low" | "high" | "max"
-    pub writing_style: String,    // "default" | "executive_report" | "technical_doc" | "creative_essay" | "code_architect"
-    /// API 키를 앱에 입력한 시각. K-EXAONE 키는 발급 30일 뒤 만료되므로 만료가 가까우면 알려 준다.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key_saved_at: Option<String>,
+    pub writing_style: String, // "default" | "executive_report" | "technical_doc" | "creative_essay" | "code_architect"
+    /// 컨텍스트가 차면 자동으로 요약 압축한다.
+    pub auto_compact: bool,
+    pub model_prefs: BTreeMap<String, ModelPref>,
 }
 
 impl Default for AppSettings {
@@ -26,11 +36,11 @@ impl Default for AppSettings {
         Self {
             api_key: String::new(),
             api_key_set: false,
-            base_url: "https://api.exaone.ai/v1/chat/completions".to_string(),
-            model: "k-exaone_v2.5".to_string(),
-            reasoning_effort: "high".to_string(),
+            server_url: "http://localhost:1234".to_string(),
+            model: String::new(),
             writing_style: "executive_report".to_string(),
-            api_key_saved_at: None,
+            auto_compact: true,
+            model_prefs: BTreeMap::new(),
         }
     }
 }
@@ -388,6 +398,47 @@ impl StoreManager {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn default_settings_point_to_lm_studio() {
+        let s = AppSettings::default();
+        assert_eq!(s.server_url, "http://localhost:1234");
+        assert_eq!(s.model, "");
+        assert!(s.auto_compact);
+        assert!(s.model_prefs.is_empty());
+    }
+
+    #[test]
+    fn api_key_is_never_serialized() {
+        let s = AppSettings { api_key: "secret-token".into(), api_key_set: true, ..AppSettings::default() };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("secret-token"));
+        assert!(!json.contains("apiKey\""));
+        assert!(json.contains("\"apiKeySet\":true"));
+        // 화면에서 보낸 토큰은 받을 수 있어야 한다.
+        let back: AppSettings =
+            serde_json::from_str(r#"{"apiKey":"new","serverUrl":"http://localhost:1234","model":"m"}"#).unwrap();
+        assert_eq!(back.api_key, "new");
+    }
+
+    #[test]
+    fn old_settings_file_loads_with_defaults() {
+        let back: AppSettings = serde_json::from_str(
+            r#"{"baseUrl":"https://api.exaone.ai/v1/chat/completions","model":"k-exaone_v2.5","reasoningEffort":"high","writingStyle":"default","checkUpdates":true,"apiKeySavedAt":"x"}"#,
+        )
+        .unwrap();
+        assert_eq!(back.server_url, "http://localhost:1234");
+        assert!(back.auto_compact);
+        assert_eq!(back.writing_style, "default");
+    }
+
+    #[test]
+    fn model_pref_uses_camel_case() {
+        let mut s = AppSettings::default();
+        s.model_prefs.insert("qwen".into(), ModelPref { context_length: Some(32768), reasoning: Some("off".into()) });
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(r#""modelPrefs":{"qwen":{"contextLength":32768,"reasoning":"off"}}"#));
+    }
+
     use super::*;
 
     fn snap(id: &str, before: &str, after: &str, blob: Option<&str>) -> FileSnapshot {

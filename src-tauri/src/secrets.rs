@@ -1,4 +1,4 @@
-//! API 키를 설정 파일(평문 JSON) 대신 Windows 자격 증명 관리자에 보관한다.
+//! LM Studio API 토큰을 설정 파일(평문 JSON) 대신 Windows 자격 증명 관리자에 보관한다.
 
 pub const SERVICE: &str = "io.github.kidarigun.anylm-desktop";
 const ACCOUNT: &str = "exaone-api-key";

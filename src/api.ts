@@ -38,10 +38,11 @@ function loadFallbackDb(): AppDatabase {
   const initial: AppDatabase = {
     settings: {
       apiKey: "",
-      baseUrl: "https://api.exaone.ai/v1/chat/completions",
-      model: "k-exaone_v2.5",
-      reasoningEffort: "high",
+      serverUrl: "http://localhost:1234",
+      model: "",
       writingStyle: "executive_report",
+      autoCompact: true,
+      modelPrefs: {},
     },
     projects: [
       {

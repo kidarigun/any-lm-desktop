@@ -269,9 +269,9 @@ async fn live() {
         .filter_map(|v| v["id"].as_str().map(str::to_string))
         .collect();
 
+    // LM Studio 토큰은 선택이다. 비어 있으면 인증 헤더 없이 보낸다. (하니스 전면 개편은 작업 11)
     let api_key = secrets::load_api_key().expect("자격 증명 관리자를 열 수 없습니다").unwrap_or_default();
-    assert!(!api_key.trim().is_empty(), "저장된 API 키가 없습니다. 앱의 [API 및 모델 설정]에서 먼저 입력하세요.");
-    let base_settings = AppSettings { api_key, api_key_set: true, ..AppSettings::default() };
+    let base_settings = AppSettings { api_key_set: !api_key.trim().is_empty(), api_key, ..AppSettings::default() };
 
     // 앱이 설치해 둔 Python을 쓰고, 사용자 Skill은 섞이지 않게 빈 폴더를 쓴다.
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
@@ -323,11 +323,10 @@ async fn live() {
         });
         let root = project.as_ref().map(|p| PathBuf::from(&p.root_path)).unwrap_or_else(|| work.clone());
 
-        let mut settings = base_settings.clone();
-        settings.reasoning_effort = sc.effort.clone().unwrap_or_else(|| "high".to_string());
+        let settings = base_settings.clone();
         exaone::set_tuning(sc.tuning.clone());
 
-        println!("\n=== {} [{} / 추론 {}] {}", sc.id, sc.mode, settings.reasoning_effort, sc.note);
+        println!("\n=== {} [{}] {}", sc.id, sc.mode, sc.note);
         let started_at = chrono::Local::now().to_rfc3339();
         let sc_start = Instant::now();
         let mut history: Vec<ChatMessage> = Vec::new();
@@ -485,7 +484,7 @@ async fn live() {
             "id": sc.id,
             "startedAt": started_at,
             "mode": sc.mode,
-            "effort": settings.reasoning_effort,
+            "effort": sc.effort,
             "tuning": sc.tuning,
             "incomplete": incomplete,
             "wallMs": sc_start.elapsed().as_millis() as u64,

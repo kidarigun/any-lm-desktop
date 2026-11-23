@@ -8,15 +8,17 @@
 - 작업 1(저장소 만들기와 인계 체계): 단계 1~5 완료. 단계 6(GitHub 비공개 저장소 `kidarigun/any-lm-desktop` 생성·푸시)은 사용자 승인 대기 중이라 아직 하지 않았다.
 - 작업 2(정체성 분리와 업데이트 제거): 완료. 제품명·identifier·버전·크레이트명·자격 증명 서비스명·단일 실행 포트(45789)·미리보기 호스트·대화상자 환경 변수·localStorage 접두어(`anylm_`)·기본 작업 폴더(`문서\AnyLM`)를 바꾸고, 업데이트 기능(`tauri-plugin-updater`, UpdatePanel, `check_update`/`install_update`, `checkUpdates` 설정, `make_latest_json.py`)과 `migrate_old_data_dir`을 삭제했다.
 
+- 작업 3(설정을 LM Studio 연결로 바꾸기): 완료. `lmstudio.rs`(server_urls·authorize·friendly_error) 추가, `AppSettings`를 serverUrl/선택 토큰/autoCompact/modelPrefs로 교체, exaone.rs의 API 키 필수 검사·reasoning_effort 삭제, 추론 강도 선택 UI 삭제(작업 6에서 모델 선택기가 들어갈 자리). 설정 대화상자는 최소 수정만 했다(작업 5에서 재구성).
+
 ## 마지막 확인
-2026-11-23, 작업 2 완료 시점:
+2026-11-23, 작업 3 완료 시점:
 - `npm test` → 통과 (16 파일, 102 통과, 1 건너뜀)
 - `npx tsc --noEmit` → 통과 (오류 없음)
-- `cd src-tauri && cargo test --lib` → 통과 (123 통과, 0 실패, 7 무시)
-- 동시 실행: 원본 앱(포트 45788)과 `npm run tauri dev`(포트 45789)가 함께 떴고, 새 데이터가 `%APPDATA%\io.github.kidarigun.anylm-desktop`에 생겼으며 원본 데이터 폴더 수정 시각은 그대로였다.
+- `cd src-tauri && cargo test --lib` → 통과 (128 통과, 0 실패, 7 무시)
+- LM Studio 실서버 `GET /v1/models` 응답 확인(qwen3.5-9b 등).
 
 ## 다음 할 일
-1. 계획의 작업 3부터 이어서 진행한다(`docs/superpowers/plans/2026-11-23-any-lm-desktop.md`의 작업 3 첫 단계부터).
+1. 계획의 작업 4부터 이어서 진행한다(`docs/superpowers/plans/2026-11-23-any-lm-desktop.md`의 작업 4 첫 단계부터).
 2. 작업 1의 단계 6은 사용자가 승인하면 한다: "`kidarigun/any-lm-desktop` 비공개 저장소를 만들고 main을 올릴까요?" → 승인 시 `gh repo create kidarigun/any-lm-desktop --private --source . --remote origin --push`.
 
 ## 결정 필요

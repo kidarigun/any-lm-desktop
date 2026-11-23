@@ -1,5 +1,6 @@
 use crate::doc_bridge::{self, DocKind};
 use crate::fs_ops;
+use crate::lmstudio;
 use crate::mcp;
 use crate::skills;
 use crate::store::{AppSettings, ChatMessage, ContextCompaction, FileSnapshot, Project, ToolExecutionRecord, TurnStats};
@@ -124,26 +125,6 @@ pub fn tuning() -> Tuning {
     TUNING.read().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_default()
 }
 
-/// API 키가 실려 나가는 주소이므로 https만 허용한다. 내 PC에서 띄운 모델 서버(localhost)는 http도 허용.
-pub fn validate_base_url(raw: &str) -> Result<(), String> {
-    let url = reqwest::Url::parse(raw.trim())
-        .map_err(|_| format!("엔드포인트 주소가 올바르지 않습니다: {}", raw))?;
-    let local = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
-    match url.scheme() {
-        "https" => {}
-        "http" if local => {}
-        _ => {
-            return Err(
-                "API 키 보호를 위해 엔드포인트는 https:// 주소만 쓸 수 있습니다. (localhost는 http 허용)"
-                    .to_string(),
-            )
-        }
-    }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err("엔드포인트 주소에 사용자 이름이나 비밀번호를 넣을 수 없습니다.".to_string());
-    }
-    Ok(())
-}
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// 요청 후 응답 헤더가 올 때까지 기다리는 최대 시간.
 const RESPONSE_HEADER_TIMEOUT: Duration = Duration::from_secs(180);
@@ -1095,11 +1076,12 @@ async fn send_with_retry<R: Runtime>(
     trace: &mut RoundTrace,
 ) -> Result<Option<reqwest::Response>, SendError> {
     let started = Instant::now();
+    let chat_url = lmstudio::server_urls(&settings.server_url)
+        .map_err(|message| SendError { message, recoverable: false })?
+        .chat;
     for attempt in 0..=RETRY_DELAYS_SEC.len() {
         trace.attempts = attempt as u32 + 1;
-        let req = client
-            .post(&settings.base_url)
-            .bearer_auth(settings.api_key.trim())
+        let req = lmstudio::authorize(client.post(&chat_url), &settings.api_key)
             .json(body)
             .send();
 
@@ -1116,7 +1098,7 @@ async fn send_with_retry<R: Runtime>(
             }
             Raced::Done(Err(e)) => {
                 return Err(SendError {
-                    message: format!("EXAONE API 네트워크 연결 오류: {}", e),
+                    message: lmstudio::friendly_error(&e),
                     recoverable: true,
                 })
             }
@@ -1456,10 +1438,7 @@ pub async fn summarize_for_compaction(
     focus: Option<&str>,
     cancel_flag: &AtomicBool,
 ) -> Result<String, String> {
-    if settings.api_key.trim().is_empty() {
-        return Err("EXAONE API 키가 설정되지 않았습니다. '빠른 로컬 압축'을 선택하거나 API 키를 입력해 주세요.".to_string());
-    }
-    validate_base_url(&settings.base_url)?;
+    let chat_url = lmstudio::server_urls(&settings.server_url)?.chat;
 
     let transcript = compaction_source_transcript(prev, messages, focus);
     let focus_line = focus
@@ -1478,7 +1457,7 @@ pub async fn summarize_for_compaction(
         focus_line
     );
 
-    let mut body = json!({
+    let body = json!({
         "model": settings.model,
         "messages": [
             { "role": "system", "content": sys },
@@ -1486,25 +1465,20 @@ pub async fn summarize_for_compaction(
         ],
         "stream": false
     });
-    if !settings.reasoning_effort.is_empty() {
-        body["reasoning_effort"] = json!("low");
-    }
 
     let client = reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .build()
         .map_err(|e| format!("HTTP 클라이언트 생성 실패: {}", e))?;
 
-    let req = client
-        .post(&settings.base_url)
-        .bearer_auth(settings.api_key.trim())
+    let req = lmstudio::authorize(client.post(&chat_url), &settings.api_key)
         .json(&body)
         .send();
 
     let resp = match race_cancel(req, cancel_flag, RESPONSE_HEADER_TIMEOUT).await {
         Raced::Cancelled => return Err("컨텍스트 압축이 취소되었습니다.".to_string()),
         Raced::TimedOut => return Err("EXAONE API 서버 응답 시간이 초과되었습니다. '빠른 로컬 압축'으로 진행할 수 있습니다.".to_string()),
-        Raced::Done(Err(e)) => return Err(format!("EXAONE API 연결 오류 ({}). '빠른 로컬 압축'을 선택해 보세요.", e)),
+        Raced::Done(Err(e)) => return Err(format!("{} '빠른 로컬 압축'을 선택해 보세요.", lmstudio::friendly_error(&e))),
         Raced::Done(Ok(r)) => r,
     };
 
@@ -1736,10 +1710,7 @@ pub async fn run_exaone_turn<R: Runtime>(
     cancel_flag: Arc<AtomicBool>,
 ) -> Result<(ChatMessage, Vec<FileSnapshot>), String> {
     let settings = req.settings;
-    if settings.api_key.trim().is_empty() {
-        return Err("EXAONE API 키가 설정되지 않았습니다. 좌측 하단 [API 설정] 버튼을 눌러 API Key를 입력해 주세요.".to_string());
-    }
-    validate_base_url(&settings.base_url)?;
+    lmstudio::server_urls(&settings.server_url)?;
 
     let project_ctx = req.project.map(|p| (p.id.as_str(), Path::new(&p.root_path)));
     let available_skills = skills::available(project_ctx);
@@ -1834,14 +1805,10 @@ pub async fn run_exaone_turn<R: Runtime>(
             body["tools"] = tools.clone();
             body["tool_choice"] = json!("auto");
         }
-        if !settings.reasoning_effort.is_empty() {
-            // 이어 쓰기에서는 생각을 짧게 해 다시 끊기지 않게 한다.
-            body["reasoning_effort"] = json!(if continuing { "low" } else { settings.reasoning_effort.as_str() });
-        }
 
         let round_started = Instant::now();
         let mut trace = RoundTrace {
-            effort: body["reasoning_effort"].as_str().unwrap_or("").to_string(),
+            effort: String::new(),
             message_count: body["messages"].as_array().map_or(0, Vec::len),
             request_chars: body["messages"].as_array().map_or(0, |m| total_chars(m)),
             tool_count: body["tools"].as_array().map_or(0, Vec::len),
@@ -2980,33 +2947,6 @@ mod tests {
         assert!(!names(tools_for(true, false, &[]).unwrap()).contains(&"load_skill".to_string()));
     }
 
-    #[test]
-    fn base_url_must_be_https_unless_local() {
-        assert!(validate_base_url("https://api.exaone.ai/v1/chat/completions").is_ok());
-        assert!(validate_base_url("http://localhost:8000/v1/chat/completions").is_ok());
-        assert!(validate_base_url("http://127.0.0.1:8000/v1").is_ok());
-        assert!(validate_base_url("http://api.exaone.ai/v1").is_err());
-        assert!(validate_base_url("http://localhost.evil.com/v1").is_err());
-        assert!(validate_base_url("https://user:pw@api.exaone.ai/v1").is_err());
-        assert!(validate_base_url("file:///C:/x").is_err());
-        assert!(validate_base_url("not a url").is_err());
-    }
-
-    #[test]
-    fn api_key_is_never_serialized() {
-        let s = test_settings("https://x".into());
-        let json = serde_json::to_string(&s).unwrap();
-        assert!(!json.contains("test-key"));
-        assert!(!json.contains("apiKey\""));
-        assert!(json.contains("\"apiKeySet\":true"));
-        // 화면에서 보낸 키는 받을 수 있어야 한다.
-        let back: AppSettings = serde_json::from_str(
-            r#"{"apiKey":"new","baseUrl":"https://x","model":"m","reasoningEffort":"high","writingStyle":"default"}"#,
-        )
-        .unwrap();
-        assert_eq!(back.api_key, "new");
-    }
-
     /// 프론트엔드 문서 변환기를 흉내 내는 응답기를 붙인 모의 앱
     fn app_with_fake_converter() -> tauri::App<tauri::test::MockRuntime> {
         use base64::Engine;
@@ -3150,7 +3090,7 @@ mod tests {
         chunk_delay_ms: u64,
     ) -> (String, Arc<StdMutex<Vec<Value>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/v1/chat/completions", listener.local_addr().unwrap());
+        let url = format!("http://{}", listener.local_addr().unwrap());
         let bodies = Arc::new(StdMutex::new(Vec::new()));
         let bodies_c = bodies.clone();
         tokio::spawn(async move {
@@ -3205,11 +3145,10 @@ mod tests {
         AppSettings {
             api_key: "test-key".into(),
             api_key_set: true,
-            base_url: url,
+            server_url: url,
             model: "k-exaone_v2.5".into(),
-            reasoning_effort: "high".into(),
             writing_style: "default".into(),
-            api_key_saved_at: None,
+            ..AppSettings::default()
         }
     }
 
@@ -3362,7 +3301,7 @@ mod tests {
         let tools = bodies[0]["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 8);
         assert!(tools.iter().any(|t| t["function"]["name"] == "run_python"));
-        assert_eq!(bodies[0]["reasoning_effort"], "high");
+        assert!(bodies[0].get("reasoning_effort").is_none());
         let msgs = bodies[1]["messages"].as_array().unwrap();
         let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
         assert_eq!(roles, vec!["system", "user", "assistant", "tool"]);
@@ -4149,7 +4088,7 @@ mod tests {
         assert!(summary.contains("src/App.tsx"));
         let b = bodies.lock().unwrap();
         assert_eq!(b[0]["stream"], false);
-        assert_eq!(b[0]["reasoning_effort"], "low");
+        assert!(b[0].get("reasoning_effort").is_none());
         assert!(b[0]["messages"][0]["content"].as_str().unwrap().contains("UI 변경점"));
     }
 }
