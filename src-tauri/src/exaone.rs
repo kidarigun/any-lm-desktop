@@ -104,14 +104,11 @@ fn rate_limit_headers(headers: &reqwest::header::HeaderMap) -> Vec<(String, Stri
 pub struct Tuning {
     /// 요청에 넣을 max_tokens (없으면 서버 기본값에 맡긴다)
     pub max_tokens: Option<u64>,
-    /// 이전 추론을 다음 요청에 돌려보내고 `chat_template_kwargs.preserve_thinking`을 켠다.
-    /// 공식 문서가 에이전트·멀티턴에 권장하는 설정이라 기본으로 켠다 (K-EXAONE 모델에만 보낸다).
-    pub preserve_thinking: bool,
 }
 
 impl Default for Tuning {
     fn default() -> Self {
-        Self { max_tokens: None, preserve_thinking: true }
+        Self { max_tokens: None }
     }
 }
 
@@ -927,6 +924,8 @@ pub struct TurnRequest<'a> {
     pub settings: &'a AppSettings,
     /// 이번 요청에 쓸 모델 key(요청 본문 "model"과 새 답변의 model_key). 대화 모델 → 기본 모델 순으로 정한다.
     pub model_key: &'a str,
+    /// 그 모델이 지원하는 추론 선택지(LM Studio 모델 목록의 reasoning allowed_options). 모르면 빈 목록.
+    pub reasoning_options: &'a [String],
     /// `Some`이면 프로젝트 도구가 켜진다. 일반 채팅은 `None`.
     pub project: Option<&'a Project>,
     pub conversation_id: &'a str,
@@ -1725,8 +1724,8 @@ pub async fn run_exaone_turn<R: Runtime>(
     let tools_enabled = tools.is_some();
     let sys_prompt = build_system_prompt(req.project, req.mode, &available_skills, &mcp_tools);
     let tune = tuning();
-    // 다른 OpenAI 호환 서버는 모르는 항목을 거부할 수 있어 K-EXAONE 모델에만 쓴다.
-    let keep_thinking = tune.preserve_thinking && req.model_key.to_lowercase().contains("exaone");
+    // 이전 답변의 추론은 다음 요청에 다시 보내지 않는다(LM Studio는 추론을 이어받지 않는다).
+    let keep_thinking = false;
     let mut api_messages = build_api_messages_with_compaction(
         &sys_prompt,
         req.history,
@@ -1801,8 +1800,9 @@ pub async fn run_exaone_turn<R: Runtime>(
         if let Some(n) = tune.max_tokens {
             body["max_tokens"] = json!(n);
         }
-        if keep_thinking {
-            body["chat_template_kwargs"] = json!({ "preserve_thinking": true });
+        let pref = req.settings.model_prefs.get(req.model_key).and_then(|p| p.reasoning.as_deref());
+        for (k, v) in crate::lmstudio::reasoning_fields(req.reasoning_options, pref) {
+            body[k] = v;
         }
         if let Some(tools) = &tools {
             body["tools"] = tools.clone();
@@ -3185,7 +3185,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
-                model_key: "k-exaone_v2.5",
+                model_key: "k-exaone_v2.5", reasoning_options: &[],
                 project: None,
                 conversation_id: "conv-busy",
                 history: &history,
@@ -3272,7 +3272,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
-                model_key: "k-exaone_v2.5",
+                model_key: "k-exaone_v2.5", reasoning_options: &[],
                 project: Some(&project),
                 conversation_id: "conv-1",
                 history: &history,
@@ -3336,7 +3336,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
-                model_key: "k-exaone_v2.5",
+                model_key: "k-exaone_v2.5", reasoning_options: &[],
                 project: Some(&project),
                 conversation_id: "conv-2",
                 history: &[user.clone()],
@@ -3360,7 +3360,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
-                model_key: "k-exaone_v2.5",
+                model_key: "k-exaone_v2.5", reasoning_options: &[],
                 project: Some(&project),
                 conversation_id: "conv-2",
                 history: &history,
@@ -3408,7 +3408,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
-                model_key: "k-exaone_v2.5",
+                model_key: "k-exaone_v2.5", reasoning_options: &[],
                 project: None,
                 conversation_id: "conv-3",
                 history: &[msg("user", "길게 말해줘")],
@@ -3571,7 +3571,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn thinking_is_sent_back_within_a_tool_loop() {
+    async fn thinking_is_kept_but_not_sent_back() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "내용").unwrap();
         let r1 = vec![
@@ -3587,7 +3587,7 @@ mod tests {
         let history = vec![msg("user", "a.txt 읽어 줘")];
         let (out, _) = run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", project: Some(&project), conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
+            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", reasoning_options: &[], project: Some(&project), conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -3595,14 +3595,33 @@ mod tests {
         assert_eq!(out.round_reasoning(0), Some("파일을 먼저 읽자"));
         assert_eq!(out.stats.as_ref().map(|s| s.api_calls), Some(2));
         let b = bodies.lock().unwrap();
-        assert_eq!(b[0]["chat_template_kwargs"]["preserve_thinking"], true);
+        assert!(b[0].get("chat_template_kwargs").is_none());
+        assert!(b[0].get("reasoning_effort").is_none());
         assert_eq!(b[0]["stream_options"]["include_usage"], true);
         let assistant = b[1]["messages"].as_array().unwrap().iter().find(|m| m["role"] == "assistant").unwrap().clone();
-        assert_eq!(assistant["reasoning_content"], "파일을 먼저 읽자");
-        // 다음 질문 때도 저장된 추론을 함께 보낸다.
+        assert!(assistant.get("reasoning_content").is_none());
+        // 헬퍼에 요청하면 보낼 수는 있다(원본 cherry-pick 호환).
         let replay = build_api_messages_with("sys", &[msg("user", "q"), out.clone()], true, true);
         assert_eq!(replay[2]["reasoning_content"], "파일을 먼저 읽자");
         assert!(build_api_messages("sys", &[msg("user", "q"), out], true)[2].get("reasoning_content").is_none());
+    }
+
+    #[tokio::test]
+    async fn reasoning_off_pref_adds_reasoning_effort_to_body() {
+        let r = vec![sse(json!({"choices":[{"delta":{"content":"네"}}]})), sse_done()];
+        let (url, bodies) = mock_server(vec![r.clone(), r], 0).await;
+        let app = tauri::test::mock_app();
+        let mut settings = test_settings(url);
+        let history = vec![msg("user", "안녕")];
+        let opts = vec!["off".to_string(), "on".to_string()];
+        settings.model_prefs.insert("qwen3.5-9b".into(), crate::store::ModelPref { context_length: None, reasoning: Some("off".into()) });
+        for o in [&opts[..], &[][..]] {
+            let req = TurnRequest { settings: &settings, model_key: "qwen3.5-9b", reasoning_options: o, project: None, conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None };
+            run_exaone_turn(app.handle(), req, Arc::new(AtomicBool::new(false))).await.unwrap();
+        }
+        let b = bodies.lock().unwrap();
+        assert_eq!(b[0]["reasoning_effort"], "none");
+        assert!(b[1].get("reasoning_effort").is_none());
     }
 
     #[test]
@@ -3745,7 +3764,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
-                model_key: "k-exaone_v2.5",
+                model_key: "k-exaone_v2.5", reasoning_options: &[],
                 project: Some(&project),
                 conversation_id: "c",
                 history: &history,
@@ -3787,7 +3806,7 @@ mod tests {
             async move {
                 run_exaone_turn(
                     app.handle(),
-                    TurnRequest { settings, model_key: "k-exaone_v2.5", project: Some(&project), conversation_id: "c", history, compaction: None, continue_from: None, mode: "", checkpoint: None },
+                    TurnRequest { settings, model_key: "k-exaone_v2.5", reasoning_options: &[], project: Some(&project), conversation_id: "c", history, compaction: None, continue_from: None, mode: "", checkpoint: None },
                     Arc::new(AtomicBool::new(false)),
                 )
                 .await
@@ -3830,7 +3849,7 @@ mod tests {
         let settings = test_settings(url);
         run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", project: None, conversation_id: "conv-r", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
+            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", reasoning_options: &[], project: None, conversation_id: "conv-r", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -3966,7 +3985,7 @@ mod tests {
         let history = vec![msg("user", "a.txt 써줘")];
         let (out, _) = run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", project: Some(&project), conversation_id: "c-eof", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
+            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", reasoning_options: &[], project: Some(&project), conversation_id: "c-eof", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -3996,7 +4015,7 @@ mod tests {
         let history = vec![msg("user", "긴 문서 써줘")];
         let (out, _) = run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", project: Some(&project), conversation_id: "c-trunc", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
+            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", reasoning_options: &[], project: Some(&project), conversation_id: "c-trunc", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await

@@ -774,11 +774,13 @@ async fn send_chat_message(
     };
     let checkpoint = |m: &ChatMessage| save_checkpoint(&state, &conversation_id, m);
 
+    let reasoning_options = lmstudio::model_reasoning_options(&settings, &model_key).await;
     let turn_res = exaone::run_exaone_turn(
         &app,
         TurnRequest {
             settings: &settings,
             model_key: &model_key,
+            reasoning_options: &reasoning_options,
             project: project.as_ref(),
             conversation_id: &conversation_id,
             history: &history_for_api,
@@ -885,11 +887,13 @@ async fn edit_and_resend_message(
     };
     let checkpoint = |m: &ChatMessage| save_checkpoint(&state, &conversation_id, m);
 
+    let reasoning_options = lmstudio::model_reasoning_options(&settings, &model_key).await;
     let turn_res = exaone::run_exaone_turn(
         &app,
         TurnRequest {
             settings: &settings,
             model_key: &model_key,
+            reasoning_options: &reasoning_options,
             project: project.as_ref(),
             conversation_id: &conversation_id,
             history: &history_for_api,
@@ -1198,11 +1202,13 @@ async fn resolve_tool_approval(
     // 4) 도구 결과를 모델에 전달해 같은 메시지에 이어서 답변을 받는다.
     let (model_key, settings, history, assistant_msg, turn_mode, compaction) = continuation;
     let checkpoint = |m: &ChatMessage| save_checkpoint(&state, &conversation_id, m);
+    let reasoning_options = lmstudio::model_reasoning_options(&settings, &model_key).await;
     let (updated_msg, new_snapshots) = exaone::run_exaone_turn(
         &app,
         TurnRequest {
             settings: &settings,
             model_key: &model_key,
+            reasoning_options: &reasoning_options,
             project: project.as_ref(),
             conversation_id: &conversation_id,
             history: &history,

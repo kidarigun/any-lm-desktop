@@ -2,7 +2,8 @@
 
 use crate::store::AppSettings;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Map, Value};
+use std::sync::LazyLock;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -152,6 +153,27 @@ pub fn parse_models(v: &Value) -> Vec<LmModel> {
         })
         .collect()
 }
+
+/// 추론을 끌 때 요청 본문에 더할 항목(결정 0003: `reasoning_effort: "none"`만 9B·35B 모두에서 reasoning_tokens 0을 실측).
+pub static REASONING_OFF_FIELDS: LazyLock<Value> = LazyLock::new(|| json!({ "reasoning_effort": "none" }));
+
+/// 모델의 추론 선택지(`options`)와 사용자의 선택(`pref`)에서 요청 본문에 더할 항목을 만든다.
+/// 추론을 지원하지 않는 모델이거나 "끄기"가 아니면 아무것도 보내지 않아 모델 기본값에 맡긴다.
+pub fn reasoning_fields(options: &[String], pref: Option<&str>) -> Map<String, Value> {
+    if options.is_empty() || pref != Some("off") {
+        return Map::new();
+    }
+    REASONING_OFF_FIELDS.as_object().cloned().unwrap_or_default()
+}
+
+/// 이번 요청에 쓸 모델의 추론 선택지. 목록을 못 가져오면 빈 목록(추론 항목을 보내지 않음)이다.
+pub async fn model_reasoning_options(settings: &AppSettings, key: &str) -> Vec<String> {
+    match list_models(settings).await {
+        Ok(models) => models.into_iter().find(|m| m.key == key).map(|m| m.reasoning_options).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
 
 /// 요청 전에 모델이 원하는 컨텍스트로 쓸 수 있는지 판단한다. 같은 모델의 두 번째 인스턴스는 만들지 않는다.
 pub fn plan_load(models: &[LmModel], key: &str, wanted: u32) -> LoadPlan {
@@ -454,5 +476,14 @@ mod tests {
             println!("{} loaded={:?}", x.key, x.loaded);
         }
         assert!(!m.is_empty());
+    }
+
+    #[test]
+    fn reasoning_fields_follow_model_and_pref() {
+        let on_off = vec!["off".to_string(), "on".to_string()];
+        assert!(reasoning_fields(&[], Some("off")).is_empty());
+        assert!(reasoning_fields(&on_off, None).is_empty());
+        assert!(reasoning_fields(&on_off, Some("on")).is_empty());
+        assert_eq!(serde_json::Value::Object(reasoning_fields(&on_off, Some("off"))), REASONING_OFF_FIELDS.clone());
     }
 }

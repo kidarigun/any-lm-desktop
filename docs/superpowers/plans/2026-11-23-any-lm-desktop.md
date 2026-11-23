@@ -363,9 +363,9 @@ it("maps load plans to the next step", () => {
 - Consumes: 작업 4 `LmModel.reasoning_options`, 작업 3 `ModelPref.reasoning`.
 - Produces: `lmstudio::reasoning_fields(options: &[String], pref: Option<&str>) -> serde_json::Map<String, Value>`; `const REASONING_OFF_FIELDS`(결정 0003의 값).
 
-- [ ] **Step 1: 끄는 방법 실측.** 9B에 같은 질문을 후보 요청(`"reasoning_effort": "none"`, `"reasoning": {"effort": "none"}`, `"chat_template_kwargs": {"enable_thinking": false}`, LM Studio 문서에 있는 방식)으로 보내 `usage.completion_tokens_details.reasoning_tokens`가 0이 되는 것을 찾는다. 35B에서도 같은지 확인. 결과·근거를 결정 0003에 남긴다.
+- [x] **Step 1: 끄는 방법 실측.** 9B에 같은 질문을 후보 요청(`"reasoning_effort": "none"`, `"reasoning": {"effort": "none"}`, `"chat_template_kwargs": {"enable_thinking": false}`, LM Studio 문서에 있는 방식)으로 보내 `usage.completion_tokens_details.reasoning_tokens`가 0이 되는 것을 찾는다. 35B에서도 같은지 확인. 결과·근거를 결정 0003에 남긴다.
 
-- [ ] **Step 2: 실패하는 테스트**
+- [x] **Step 2: 실패하는 테스트**
 
 ```rust
 #[test]
@@ -380,9 +380,9 @@ fn reasoning_fields_follow_model_and_pref() {
 
 (`REASONING_OFF_FIELDS`는 `LazyLock<Value>`로 결정 0003의 값을 담는다.)
 
-- [ ] **Step 3: 실패 확인 → 구현 → 통과 확인.** 대화 상단 "생각하기" 토글은 선택한 모델의 `reasoningOptions`가 있을 때만 보이고, 바꾸면 `modelPrefs[key].reasoning`에 저장한다. 이전 답변의 추론은 다음 요청에 다시 보내지 않는다(`build_api_messages_with_compaction`의 `keep_thinking` 인자는 항상 false로 넘기거나 인자를 없앤다 — 원본 cherry-pick을 고려해 인자는 두고 false를 넘긴다).
+- [x] **Step 3: 실패 확인 → 구현 → 통과 확인.** 대화 상단 "생각하기" 토글은 선택한 모델의 `reasoningOptions`가 있을 때만 보이고, 바꾸면 `modelPrefs[key].reasoning`에 저장한다. 이전 답변의 추론은 다음 요청에 다시 보내지 않는다(`build_api_messages_with_compaction`의 `keep_thinking` 인자는 항상 false로 넘기거나 인자를 없앤다 — 원본 cherry-pick을 고려해 인자는 두고 false를 넘긴다).
 
-- [ ] **Step 4: 커밋** — `feat: per-model reasoning toggle for LM Studio`
+- [x] **Step 4: 커밋** — `feat: per-model reasoning toggle for LM Studio`
 
 ---
 

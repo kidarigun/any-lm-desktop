@@ -1,4 +1,4 @@
-import type { LmModel } from "../types";
+import type { LmModel, ModelPref } from "../types";
 
 /** "9B · Q4_K_M · 6.1GB" 형태의 한 줄 설명 */
 export function describeModel(m: LmModel): string {
@@ -32,4 +32,18 @@ export function normalizeContext(raw: string, max: number): number | null {
   const n = Math.floor(Number(raw.trim()));
   if (raw.trim() === "" || !Number.isFinite(n) || n < MIN_CONTEXT) return null;
   return max > 0 ? Math.min(n, max) : n;
+}
+
+/** "생각하기" 토글 상태. 저장된 값이 없으면 모델 기본(켜짐)이다. */
+export function reasoningEnabled(pref: ModelPref | undefined): boolean {
+  return pref?.reasoning !== "off";
+}
+
+/** 모델별 설정에 추론 켜기/끄기를 저장한 새 값을 만든다(다른 설정은 그대로). */
+export function withReasoning(
+  prefs: Record<string, ModelPref>,
+  key: string,
+  value: "on" | "off",
+): Record<string, ModelPref> {
+  return { ...prefs, [key]: { ...prefs[key], reasoning: value } };
 }

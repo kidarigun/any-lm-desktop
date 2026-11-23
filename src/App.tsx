@@ -56,7 +56,8 @@ import { SkillsDialog } from "./skills/SkillsDialog";
 import { McpDialog } from "./mcp/McpDialog";
 import { ConnectionDialog } from "./lmstudio/ConnectionDialog";
 import { LoadChoiceDialog, type LoadChoice } from "./lmstudio/LoadChoiceDialog";
-import { ModelPicker } from "./lmstudio/ModelPicker";
+import { ModelPicker, ReasoningToggle } from "./lmstudio/ModelPicker";
+import { reasoningEnabled, withReasoning } from "./lmstudio/modelText";
 import { MODEL_MISSING_TEXT, nextSendStep, wantedContext } from "./lmstudio/sendFlow";
 import { RuntimePanel } from "./runtime/RuntimePanel";
 import {
@@ -581,6 +582,21 @@ export default function App() {
     : pendingModelKey || settings.model;
   const modelName = (key: string) => models.find((m) => m.key === key)?.displayName ?? key;
   const kLabel = (n: number) => `${Math.round(n / 1024)}K`;
+
+  /** "생각하기" 토글: 모델별 설정에 저장한다. 다음 요청부터 적용된다. */
+  async function changeReasoning(key: string, value: "on" | "off") {
+    if (!key) return;
+    try {
+      const saved = await BackendAPI.saveSettings({
+        ...settings,
+        apiKey: "",
+        modelPrefs: withReasoning(settings.modelPrefs ?? {}, key, value),
+      });
+      setSettings({ ...saved, apiKey: "" });
+    } catch (e) {
+      setSettingsError(String(e));
+    }
+  }
 
   async function changeConversationModel(key: string) {
     setReloadHint(null);
@@ -2885,6 +2901,12 @@ export default function App() {
                       onOpen={() => void refreshModels()}
                       disabled={isStreaming || !!modelNotice || !!loadChoice}
                       needsTools={activeMode !== "chat"}
+                    />
+                    <ReasoningToggle
+                      model={models.find((m) => m.key === effectiveModelKey)}
+                      enabled={reasoningEnabled(settings.modelPrefs?.[effectiveModelKey])}
+                      disabled={isStreaming}
+                      onChange={(v) => void changeReasoning(effectiveModelKey, v)}
                     />
                     {activeConversation && activeConversation.messages.length > 0 && (
                       <button

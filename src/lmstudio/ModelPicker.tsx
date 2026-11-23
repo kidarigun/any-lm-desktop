@@ -59,3 +59,30 @@ export function ModelPicker({ models, value, onChange, disabled, needsTools, onO
     </div>
   );
 }
+
+interface ToggleProps {
+  model: LmModel | undefined;
+  enabled: boolean;
+  onChange: (value: "on" | "off") => void;
+  disabled?: boolean;
+}
+
+/** 모델 선택 옆의 "생각하기" 켜기/끄기. 추론 선택지가 있는 모델에서만 보인다. */
+export function ReasoningToggle({ model, enabled, onChange, disabled }: ToggleProps) {
+  if (!model || model.reasoningOptions.length === 0) return null;
+  return (
+    <label
+      title="끄면 답변 전에 길게 생각하지 않아 더 빨리 답합니다"
+      className="flex items-center gap-1 pl-1.5 text-[11px] text-stone-500 dark:text-stone-400 cursor-pointer select-none"
+    >
+      <input
+        type="checkbox"
+        checked={enabled}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.checked ? "on" : "off")}
+        className="accent-stone-600"
+      />
+      생각하기
+    </label>
+  );
+}

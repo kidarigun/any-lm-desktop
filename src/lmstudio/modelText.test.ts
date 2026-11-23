@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { LmModel } from "../types";
-import { capabilityBadges, describeModel, loadedLabel, normalizeContext } from "./modelText";
+import { capabilityBadges, describeModel, loadedLabel, normalizeContext, reasoningEnabled, withReasoning } from "./modelText";
 
 // src-tauri/src/testdata/lmstudio_models.json 과 같은 값
 const qwen9b: LmModel = {
@@ -51,5 +51,16 @@ describe("modelText", () => {
     expect(normalizeContext("512", 262144)).toBeNull();
     expect(normalizeContext("4096", 262144)).toBe(4096);
     expect(normalizeContext("999999", 262144)).toBe(262144);
+  });
+  it("shows the reasoning toggle only for models with options, default on", () => {
+    expect(reasoningEnabled(undefined)).toBe(true);
+    expect(reasoningEnabled({ reasoning: "off" })).toBe(false);
+    expect(reasoningEnabled({ reasoning: "on" })).toBe(true);
+  });
+  it("saves reasoning into modelPrefs without touching other prefs", () => {
+    const prefs = { a: { contextLength: 8192 } };
+    expect(withReasoning(prefs, "a", "off")).toEqual({ a: { contextLength: 8192, reasoning: "off" } });
+    expect(withReasoning(prefs, "b", "on")).toEqual({ a: { contextLength: 8192 }, b: { reasoning: "on" } });
+    expect(prefs).toEqual({ a: { contextLength: 8192 } });
   });
 });
