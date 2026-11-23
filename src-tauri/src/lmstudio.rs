@@ -20,6 +20,10 @@ pub const SERVER_OFF_MESSAGE: &str =
     "LM Studio 서버가 꺼져 있습니다. LM Studio에서 서버를 켜거나 [서버 시작]을 눌러 주세요.";
 
 /// 이 PC의 LM Studio 서버(`http://localhost`, `127.0.0.1`, `[::1]`)만 허용한다.
+///
+/// 요청 주소는 scheme·호스트·포트만으로 만든다. 사용자가 OpenAI SDK 예시처럼
+/// `http://localhost:1234/v1`이나 `.../v1/chat/completions?x=1`을 붙여 넣어도 경로·질의·조각은 버린다
+/// (그대로 붙이면 `/v1/v1/...`이 되어 모든 요청이 실패한다).
 pub fn server_urls(server_url: &str) -> Result<ServerUrls, String> {
     let raw = server_url.trim();
     let url = reqwest::Url::parse(raw)
@@ -33,7 +37,11 @@ pub fn server_urls(server_url: &str) -> Result<ServerUrls, String> {
     if !url.username().is_empty() || url.password().is_some() {
         return Err("서버 주소에 사용자 이름이나 비밀번호를 넣을 수 없습니다.".to_string());
     }
-    let base = raw.trim_end_matches('/');
+    let host = url.host_str().unwrap_or("localhost");
+    let base = match url.port() {
+        Some(port) => format!("http://{host}:{port}"),
+        None => format!("http://{host}"),
+    };
     Ok(ServerUrls {
         chat: format!("{base}/v1/chat/completions"),
         models: format!("{base}/api/v1/models"),
@@ -318,6 +326,8 @@ pub async fn unload_instance(settings: &AppSettings, instance_id: &str) -> Resul
 }
 
 /// 서버가 응답하면 true. 주소가 잘못됐거나 연결이 안 되면 false.
+/// HTTP 상태 코드는 보지 않는다("그 주소에 무언가 답한다" = 연결 가능). 그 서버가 정말 LM Studio인지는
+/// 모델 목록(`list_models`)이 확인한다 — 남겨 둔 사소한 점(최종 검토 T4).
 pub async fn server_running(settings: &AppSettings) -> bool {
     let Ok(urls) = server_urls(&settings.server_url) else { return false };
     let Ok(c) = client(Duration::from_secs(3)) else { return false };
@@ -368,6 +378,25 @@ mod tests {
         assert!(server_urls("https://localhost.evil.com").is_err());
         assert!(server_urls("http://user:pw@localhost:1234").is_err());
         assert!(server_urls("not a url").is_err());
+    }
+
+    #[test]
+    fn server_urls_drop_path_query_and_fragment() {
+        let want = |base: &str, u: &ServerUrls| {
+            assert_eq!(u.chat, format!("{base}/v1/chat/completions"));
+            assert_eq!(u.models, format!("{base}/api/v1/models"));
+            assert_eq!(u.load, format!("{base}/api/v1/models/load"));
+            assert_eq!(u.unload, format!("{base}/api/v1/models/unload"));
+        };
+        want("http://localhost:1234", &server_urls("http://localhost:1234/v1").unwrap());
+        want("http://localhost:1234", &server_urls("http://localhost:1234/v1/").unwrap());
+        want("http://127.0.0.1:1234", &server_urls("http://127.0.0.1:1234/").unwrap());
+        want("http://localhost:1234", &server_urls("http://localhost:1234/v1/chat/completions?x=1").unwrap());
+        want("http://localhost:1234", &server_urls("  http://localhost:1234#frag  ").unwrap());
+        want("http://[::1]:1234", &server_urls("http://[::1]:1234/v1").unwrap());
+        want("http://localhost", &server_urls("http://localhost/").unwrap());
+        // 경로가 있어도 localhost 규칙은 그대로
+        assert!(server_urls("http://example.com:1234/v1").is_err());
     }
 
     #[test]
