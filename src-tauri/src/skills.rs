@@ -384,19 +384,42 @@ pub fn load_for_model(skill: &SkillInfo, can_run_python: bool) -> Result<String,
 // Skill 자동 불러오기 (결정 0007)
 // ---------------------------------------------------------------------------
 
-/// 설명으로 고를 때 맞아야 하는 서로 다른 토큰 수의 최소값
+/// 설명으로 고를 때 맞아야 하는 서로 다른(의미 있는) 토큰 수의 최소값
 pub const SKILL_AUTO_MIN_HITS: usize = 2;
-/// 설명으로 고를 때 필요한 비율: (Skill 이름·설명에 든 요청 토큰 수) / (요청의 서로 다른 토큰 수)
+/// 설명으로 고를 때 필요한 비율: (Skill 이름·설명에 든 요청 토큰 수) / (요청의 의미 있는 토큰 수)
 pub const SKILL_AUTO_MIN_COVERAGE: f64 = 0.25;
-/// 1등이 2등보다 이만큼은 앞서야 고른다(비슷하면 고르지 않는다).
-pub const SKILL_AUTO_MIN_MARGIN: f64 = 0.05;
+/// 맞은 토큰의 IDF 합이 이 값 이상이어야 고른다. Skill이 하나뿐이어도 IDF는 ln(1+2)=1.10이라 맞은 토큰이 둘은 있어야 한다.
+pub const SKILL_AUTO_MIN_WEIGHT: f64 = 2.0;
+/// 1등의 IDF 합이 2등보다 이만큼은 앞서야 고른다(비슷하면 고르지 않는다).
+pub const SKILL_AUTO_MIN_MARGIN: f64 = 0.5;
+/// IDF를 셀 때 설치된 Skill 수에 더하는 "아무 Skill에도 해당하지 않는 일반 요청" 가상 문서 수.
+/// Skill이 하나뿐일 때도 모든 토큰의 IDF가 같아지지 않고, 여러 Skill에 흔한 토큰은 덜 친다.
+pub const SKILL_AUTO_GENERIC_DOCS: f64 = 1.0;
+/// 앞 턴에 자동으로 불러온 Skill을 다음 요청에도 이어서 넣는 최대 턴 수(다른 Skill을 고르거나 설정을 끄면 멈춤)
+pub const SKILL_STICKY_TURNS: usize = 3;
 /// 자동으로 넣는 Skill 지침의 최대 글자 수와 컨텍스트(글자) 대비 비율
 const SKILL_AUTO_BUDGET_CAP: usize = 10_000;
 const SKILL_AUTO_BUDGET_RATIO: f64 = 0.20;
 /// 머리 줄 `[Skill: <이름> — ...]`의 이름 뒤 부분
 pub const AUTO_HEADER_TAIL: &str = "앱이 이 요청에 맞는 Skill로 판단해 미리 불러왔습니다. 아래 지침을 그대로 따르세요. 맞지 않으면 무시하세요.";
-/// 자동으로 불러온 Skill을 모델이 같은 턴에 다시 load_skill로 부를 때 돌려주는 답
-pub const ALREADY_LOADED: &str = "이미 이 턴에 불러온 Skill입니다(위 지침 참고).";
+/// 자동으로 불러온 Skill을 모델이 같은 턴에 다시 load_skill로 부를 때(첫 번째만) 돌려주는 답.
+/// 저장되어 다음 턴에도 보이므로 "위에 있다"고 하지 않는다.
+pub const ALREADY_LOADED: &str = "앱이 이 턴에 미리 넣었던 Skill입니다. 지침이 필요하면 load_skill로 다시 읽으세요.";
+
+/// 어느 Skill에나 흔한 요청 낱말·조사·어미 묶음(한글 2글자)과 영어 일반 낱말. 맞은 토큰으로 치지 않는다.
+const STOPWORDS: &[&str] = &[
+    // 한글: 일반 동사·명사
+    "사용", "용자", "자가", "자의", "자를", "요청", "청할", "청하", "청을", "작성", "성한", "성해", "성을", "정리", "리한", "리해", "리를",
+    "만들", "만든", "든다", "들어", "드는", "이번", "번주", "으로", "한다", "쓴다", "하는", "해주", "주세", "세요", "해서", "하고", "에서",
+    "에게", "니다", "합니", "습니", "있는", "없는", "경우", "같은", "대한", "관련", "위한", "위해", "하면", "하기", "할때", "때는", "다음",
+    "그리", "리고", "또는", "이나", "거나", "하거", "주는", "주고", "알려", "려줘", "보여", "여줘", "해줘", "도와", "와줘", "필요", "요한",
+    // 영어
+    "the", "to", "a", "an", "of", "for", "and", "or", "use", "uses", "using", "used", "this", "that", "these", "those", "when",
+    "whenever", "user", "users", "skill", "skills", "wants", "want", "do", "does", "anything", "something", "with", "how", "i",
+    "is", "are", "be", "it", "its", "in", "on", "at", "by", "from", "as", "can", "you", "your", "me", "my", "please", "what",
+    "which", "any", "all", "into", "about", "include", "includes", "including", "like", "such", "should", "will", "would",
+    "also", "if", "then", "than", "so", "not", "no", "get", "make", "create", "help", "need", "needs", "read", "write", "edit",
+];
 
 /// Skill을 고른 이유
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -405,6 +428,25 @@ pub enum SelectReason {
     Explicit,
     /// 요청 내용이 Skill 이름·설명과 맞는다.
     Implicit,
+    /// 이번 요청으로는 고르지 못했지만 바로 앞 답변에서 자동으로 불러온 Skill을 이어 쓴다("계속" 등).
+    Sticky,
+}
+
+impl SelectReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            SelectReason::Explicit => "explicit",
+            SelectReason::Implicit => "implicit",
+            SelectReason::Sticky => "sticky",
+        }
+    }
+    fn parse(s: &str) -> Self {
+        match s {
+            "explicit" => SelectReason::Explicit,
+            "sticky" => SelectReason::Sticky,
+            _ => SelectReason::Implicit,
+        }
+    }
 }
 
 /// 이번 턴에 앱이 미리 불러온 Skill
@@ -422,53 +464,83 @@ fn usable(s: &SkillInfo) -> bool {
     s.enabled && s.error.is_none() && !s.shadowed
 }
 
-fn is_name_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '-' || c == '_'
+/// 이름의 앞뒤 경계로 보지 않는 글자. 영문 이름은 영문·숫자·`-`·`_`(그래서 "weekly-report로"처럼 한글 조사가 붙어도 맞는다),
+/// 한글 등이 든 이름은 모든 글자(그래서 "요약"이 "요약하지" 안에서는 맞지 않는다).
+fn is_name_char(c: char, ascii_name: bool) -> bool {
+    c == '-' || c == '_' || if ascii_name { c.is_ascii_alphanumeric() } else { c.is_alphanumeric() }
 }
 
 /// `name`이 `text` 안에 낱말 하나로(앞뒤가 이름 글자가 아님) 들어 있는지. 둘 다 소문자로 준다.
 fn contains_whole_name(text: &str, name: &str) -> bool {
-    if name.is_empty() {
+    let core = name.trim_start_matches('/');
+    if core.is_empty() {
         return false;
     }
+    let ascii = core.is_ascii();
     text.match_indices(name).any(|(i, m)| {
         let before = text[..i].chars().next_back();
         let after = text[i + m.len()..].chars().next();
-        !before.is_some_and(is_name_char) && !after.is_some_and(is_name_char)
+        !before.is_some_and(|c| is_name_char(c, ascii)) && !after.is_some_and(|c| is_name_char(c, ascii))
     })
 }
 
+/// 이름만(슬래시 없이) 써도 부른 것으로 볼 이름인지: 영문 이름이고 `-`가 있거나 4글자 이상. 한글 이름은 `/이름`으로만 부른다.
+fn bare_name_ok(name: &str) -> bool {
+    name.is_ascii() && (name.contains('-') || name.chars().count() >= 4)
+}
+
+/// 고르기에 쓰는 토큰: `knowledge::tokenize`에서 한 글자 토큰과 흔한 낱말(STOPWORDS)을 뺀 것
+fn meaningful_tokens(text: &str) -> BTreeSet<String> {
+    crate::knowledge::tokenize(text)
+        .into_iter()
+        .filter(|t| t.chars().count() >= 2 && !STOPWORDS.contains(&t.as_str()))
+        .collect()
+}
+
 /// 사용자 메시지에 맞는 Skill을 하나 고른다(없으면 None). 켜져 있고 문제없고 가려지지 않은 Skill만 본다.
-/// - 이름을 부르면(`/weekly-report`, `weekly-report`) 그것(여럿이면 긴 이름).
-/// - 아니면 요청 토큰(지식 폴더와 같은 `knowledge::tokenize`)이 이름·설명에 얼마나 들어 있는지로 고른다.
+/// - 이름을 부르면(`/weekly-report`, 또는 `bare_name_ok`인 이름 그대로) 그것(여럿이면 긴 이름).
+/// - 아니면 의미 있는 요청 토큰이 이름·설명에 얼마나 들어 있는지와, 설치된 Skill 사이의 IDF로 고른다.
 pub fn select_for_message(skills: &[SkillInfo], message: &str) -> Option<(SkillInfo, SelectReason)> {
     let candidates: Vec<&SkillInfo> = skills.iter().filter(|s| usable(s)).collect();
     let lower = message.to_lowercase();
     if let Some(s) = candidates
         .iter()
-        .filter(|s| contains_whole_name(&lower, &s.name.trim().to_lowercase()))
+        .filter(|s| {
+            let name = s.name.trim().to_lowercase();
+            contains_whole_name(&lower, &format!("/{}", name)) || (bare_name_ok(&name) && contains_whole_name(&lower, &name))
+        })
         .max_by_key(|s| s.name.chars().count())
     {
         return Some(((*s).clone(), SelectReason::Explicit));
     }
 
-    let query: BTreeSet<String> = crate::knowledge::tokenize(message).into_iter().collect();
-    if query.is_empty() {
+    let query = meaningful_tokens(message);
+    if query.is_empty() || candidates.is_empty() {
         return None;
     }
+    let owns: Vec<BTreeSet<String>> = candidates.iter().map(|s| meaningful_tokens(&format!("{} {}", s.name, s.description))).collect();
+    let docs = candidates.len() as f64 + SKILL_AUTO_GENERIC_DOCS;
+    let idf = |t: &String| {
+        let df = owns.iter().filter(|o| o.contains(t)).count().max(1) as f64;
+        (1.0 + docs / df).ln()
+    };
+    // (IDF 합, 맞은 수, Skill)
     let mut scored: Vec<(f64, usize, &SkillInfo)> = candidates
         .iter()
-        .map(|s| {
-            let own: HashSet<String> =
-                crate::knowledge::tokenize(&format!("{} {}", s.name, s.description)).into_iter().collect();
-            let hits = query.iter().filter(|t| own.contains(*t)).count();
-            (hits as f64 / query.len() as f64, hits, *s)
+        .zip(owns.iter())
+        .map(|(s, own)| {
+            let hits: Vec<&String> = query.iter().filter(|t| own.contains(*t)).collect();
+            (hits.iter().map(|t| idf(t)).sum(), hits.len(), *s)
         })
         .collect();
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    let (best, hits, skill) = *scored.first()?;
+    let (weight, hits, skill) = *scored.first()?;
     let runner_up = scored.get(1).map_or(0.0, |r| r.0);
-    (hits >= SKILL_AUTO_MIN_HITS && best >= SKILL_AUTO_MIN_COVERAGE && best - runner_up >= SKILL_AUTO_MIN_MARGIN)
+    let coverage = hits as f64 / query.len() as f64;
+    (hits >= SKILL_AUTO_MIN_HITS
+        && coverage >= SKILL_AUTO_MIN_COVERAGE
+        && weight >= SKILL_AUTO_MIN_WEIGHT
+        && weight - runner_up >= SKILL_AUTO_MIN_MARGIN)
         .then(|| (skill.clone(), SelectReason::Implicit))
 }
 
@@ -496,18 +568,66 @@ pub fn build_auto_skill(skill: &SkillInfo, reason: SelectReason, context_length:
     Ok(AutoSkill { name: skill.name.clone(), reason, text, truncated: true })
 }
 
+/// 답변의 자동 불러오기 기록에서 (Skill 이름, 이유)
+pub fn auto_record_skill(r: &crate::store::ToolExecutionRecord) -> Option<(String, SelectReason)> {
+    if !r.automatic || r.tool_name != "load_skill" {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(&r.arguments_json).ok()?;
+    let name = v.get("name")?.as_str()?.to_string();
+    Some((name, SelectReason::parse(v.get("reason").and_then(|x| x.as_str()).unwrap_or(""))))
+}
+
+fn message_auto_skill(m: &crate::store::ChatMessage) -> Option<(String, SelectReason)> {
+    m.tool_records.iter().find_map(auto_record_skill)
+}
+
+/// 이어 쓸 Skill: 바로 앞 답변이 자동으로 불러온 Skill이 있고, 그 Skill을 이어 쓴(Sticky) 턴이 `SKILL_STICKY_TURNS`보다 적으면 그 이름.
+/// `history`는 이번 사용자 메시지를 넣기 전이든 뒤든 된다(끝의 사용자 메시지는 건너뛴다).
+pub fn sticky_from_history(history: &[crate::store::ChatMessage]) -> Option<String> {
+    let mut answers = history.iter().rev().filter(|m| m.role == "assistant");
+    let (name, reason) = message_auto_skill(answers.next()?)?;
+    let mut streak = usize::from(reason == SelectReason::Sticky);
+    for m in answers {
+        match message_auto_skill(m) {
+            Some((n, SelectReason::Sticky)) if n.eq_ignore_ascii_case(&name) => streak += 1,
+            _ => break,
+        }
+    }
+    (streak < SKILL_STICKY_TURNS).then_some(name)
+}
+
 /// 턴 시작 때 부른다: 켜져 있으면 쓸 수 있는 Skill 중 이번 메시지에 맞는 것을 골라 지침을 만든다.
-/// `message`는 첨부 파일 내용을 뺀 사용자 글. 프로젝트가 있으면 Skill 스크립트 실행 안내도 넣는다.
-pub fn auto_for_turn(project: Option<(&str, &Path)>, message: &str, context_length: u32, enabled: bool) -> Option<AutoSkill> {
+/// 맞는 것이 없으면 바로 앞 답변에서 자동으로 불러온 Skill을 이어 쓴다(`sticky_from_history`).
+/// `message`는 첨부 파일 내용을 뺀 사용자 글, `history`는 대화 기록. 프로젝트가 있으면 Skill 스크립트 실행 안내도 넣는다.
+pub fn auto_for_turn(
+    project: Option<(&str, &Path)>,
+    message: &str,
+    history: &[crate::store::ChatMessage],
+    context_length: u32,
+    enabled: bool,
+) -> Option<AutoSkill> {
     if !enabled || message.trim().is_empty() {
         return None;
     }
     let skills = available(project);
-    let (skill, reason) = select_for_message(&skills, message)?;
+    let (skill, reason) = select_for_message(&skills, message).or_else(|| {
+        let name = sticky_from_history(history)?;
+        let s = skills.iter().find(|s| s.name.eq_ignore_ascii_case(&name))?.clone();
+        Some((s, SelectReason::Sticky))
+    })?;
+    build_auto_skill(&skill, reason, context_length, project.is_some()).ok()
+}
+
+/// 승인 뒤 이어가기: 멈췄던 답변의 자동 불러오기 기록에 적힌 Skill을 그대로 다시 넣는다(다시 고르지 않는다).
+pub fn auto_for_resume(project: Option<(&str, &Path)>, paused: &crate::store::ChatMessage, context_length: u32) -> Option<AutoSkill> {
+    let (name, reason) = message_auto_skill(paused)?;
+    let skill = find_available(project, &name)?;
     build_auto_skill(&skill, reason, context_length, project.is_some()).ok()
 }
 
 /// 자동으로 불러온 Skill을 모델이 다시 load_skill로 부르면 짧은 답을 준다(지침을 잘라 넣었으면 None: 전체를 읽게 둔다).
+/// 한 턴에 한 번만 쓴다(그 뒤에 또 부르면 전문을 준다) — 부르는 쪽이 지킨다.
 pub fn already_loaded_reply(auto: Option<&AutoSkill>, tool: &str, args: &serde_json::Value) -> Option<String> {
     let auto = auto.filter(|a| !a.truncated)?;
     let want = args.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
@@ -520,12 +640,13 @@ impl AutoSkill {
         let why = match self.reason {
             SelectReason::Explicit => "요청에 Skill 이름이 있어",
             SelectReason::Implicit => "요청 내용이 Skill 설명과 맞아",
+            SelectReason::Sticky => "앞 요청에서 쓰던 Skill이라 이어서",
         };
         let cut = if self.truncated { ", 길어서 앞부분만" } else { "" };
         crate::store::ToolExecutionRecord {
             id: format!("auto-skill-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]),
             tool_name: "load_skill".to_string(),
-            arguments_json: serde_json::json!({ "name": self.name }).to_string(),
+            arguments_json: serde_json::json!({ "name": self.name, "reason": self.reason.as_str() }).to_string(),
             status: "completed".to_string(),
             output: format!("Skill 자동 불러옴: {} ({} 앱이 미리 넣음{})", self.name, why, cut),
             automatic: true,
@@ -535,12 +656,7 @@ impl AutoSkill {
 
     /// 이 Skill을 자동으로 불러온 기록인지 (승인 뒤 이어갈 때 같은 Skill을 다시 넣을지 판단)
     pub fn matches_record(&self, r: &crate::store::ToolExecutionRecord) -> bool {
-        r.automatic
-            && r.tool_name == "load_skill"
-            && serde_json::from_str::<serde_json::Value>(&r.arguments_json)
-                .ok()
-                .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(|n| n.eq_ignore_ascii_case(&self.name)))
-                .unwrap_or(false)
+        auto_record_skill(r).is_some_and(|(n, _)| n.eq_ignore_ascii_case(&self.name))
     }
 }
 
@@ -1204,6 +1320,98 @@ mod tests {
         assert!(auto.matches_record(&r));
         let other = AutoSkill { name: "meeting-minutes".into(), ..auto.clone() };
         assert!(!other.matches_record(&r));
+    }
+
+    const PDF_DESC: &str = "Use this skill whenever the user wants to do anything with PDF files. This includes reading or extracting text from PDFs.";
+    const DOCX_DESC: &str = "Use this skill when the user wants to create, read, or edit Word documents (.docx).";
+
+    #[test]
+    fn everyday_requests_do_not_pick_a_skill_even_when_it_is_the_only_one() {
+        let three = sample_skills();
+        let alone = vec![info("weekly-report", WEEKLY_DESC)];
+        for q in [
+            "이번 주 날씨 알려 줘",
+            "이번 주 일정 정리해 줘",
+            "사용자 요청을 처리하는 코드를 작성해 줘",
+            "회사 소개 글 작성해 줘",
+            "사용자 목록 요청하는 API 만들어 줘",
+            "파이썬으로 엑셀 파일 정리해 줘",
+            "안녕",
+            "엑셀 차트 그려 줘",
+        ] {
+            assert_eq!(picked(&three, q), None, "세 Skill: {}", q);
+            assert_eq!(picked(&alone, q), None, "Skill 하나: {}", q);
+        }
+        let english = vec![info("pdf", PDF_DESC), info("docx", DOCX_DESC)];
+        let pdf_alone = vec![info("pdf", PDF_DESC)];
+        for q in ["explain this code to the user", "how do I use the git rebase command", "what is the capital of France"] {
+            assert_eq!(picked(&english, q), None, "{}", q);
+            assert_eq!(picked(&pdf_alone, q), None, "PDF 하나: {}", q);
+        }
+        // 맞는 요청은 여전히 고른다.
+        assert_eq!(picked(&pdf_alone, "extract the text from this pdf"), Some(("pdf".into(), SelectReason::Implicit)));
+        assert_eq!(picked(&alone, "이번 주 주간 업무 보고서를 만들어 줘"), Some(("weekly-report".into(), SelectReason::Implicit)));
+    }
+
+    #[test]
+    fn bare_names_need_a_dash_or_four_letters_and_korean_names_need_a_slash() {
+        let skills = vec![info("pdf", PDF_DESC), info("요약", "긴 글을 세 줄로 줄인다."), info("docx", DOCX_DESC)];
+        assert_eq!(picked(&skills, "/pdf 이거 봐 줘"), Some(("pdf".into(), SelectReason::Explicit)));
+        assert_ne!(picked(&skills, "pdf 이거 봐 줘").map(|p| p.1), Some(SelectReason::Explicit), "세 글자 영문 이름만으로는 부르지 않는다");
+        assert_eq!(picked(&skills, "/요약 해 줘"), Some(("요약".into(), SelectReason::Explicit)));
+        assert_ne!(picked(&skills, "요약 해 줘").map(|p| p.1), Some(SelectReason::Explicit), "한글 이름은 /로만");
+        assert_eq!(picked(&skills, "/요약하지 말고 그대로"), None, "한글도 이름 글자라 '요약하지' 안에서는 맞지 않는다");
+        let long = vec![info("translate", "번역")];
+        assert_eq!(picked(&long, "translate this"), Some(("translate".into(), SelectReason::Explicit)));
+    }
+
+    fn answer_with(records: Vec<crate::store::ToolExecutionRecord>) -> crate::store::ChatMessage {
+        crate::store::ChatMessage { role: "assistant".into(), tool_records: records, ..Default::default() }
+    }
+
+    fn user(text: &str) -> crate::store::ChatMessage {
+        crate::store::ChatMessage { role: "user".into(), content: text.into(), ..Default::default() }
+    }
+
+    fn auto(name: &str, reason: SelectReason) -> AutoSkill {
+        AutoSkill { name: name.into(), reason, text: "x".into(), truncated: false }
+    }
+
+    #[test]
+    fn follow_ups_keep_the_auto_loaded_skill_for_three_turns() {
+        let first = answer_with(vec![auto("weekly-report", SelectReason::Implicit).tool_record()]);
+        let sticky = || answer_with(vec![auto("weekly-report", SelectReason::Sticky).tool_record()]);
+        let mut h = vec![user("주간 보고서"), first];
+        assert_eq!(sticky_from_history(&h).as_deref(), Some("weekly-report"));
+        h.push(user("계속"));
+        assert_eq!(sticky_from_history(&h).as_deref(), Some("weekly-report"), "끝의 사용자 메시지는 건너뛴다");
+        for n in 1..=3 {
+            h.push(sticky());
+            h.push(user("계속"));
+            assert_eq!(sticky_from_history(&h).is_some(), n < SKILL_STICKY_TURNS, "이어 쓴 턴 {}", n);
+        }
+        // 바로 앞 답변에 자동 기록이 없으면 이어 쓰지 않는다.
+        assert_eq!(sticky_from_history(&[user("a"), answer_with(vec![]), user("b")]), None);
+        assert_eq!(sticky_from_history(&[]), None);
+    }
+
+    #[test]
+    fn auto_for_turn_uses_selection_then_sticky_and_resume_uses_the_card() {
+        let root = tempfile::tempdir().unwrap();
+        write(&root.path().join(".skills/sticky-weekly/SKILL.md"), &format!("---\nname: sticky-weekly\ndescription: {}\n---\n\n본문 W-7", WEEKLY_DESC));
+        let ctx = Some(("p-sticky", root.path()));
+        let first = auto_for_turn(ctx, "/sticky-weekly 써 줘", &[], 32768, true).unwrap();
+        assert_eq!((first.name.as_str(), first.reason), ("sticky-weekly", SelectReason::Explicit));
+        let history = vec![user("/sticky-weekly 써 줘"), answer_with(vec![first.tool_record()])];
+        let next = auto_for_turn(ctx, "계속", &history, 32768, true).unwrap();
+        assert_eq!((next.name.as_str(), next.reason), ("sticky-weekly", SelectReason::Sticky));
+        assert!(next.text.contains("본문 W-7"));
+        assert!(auto_for_turn(ctx, "계속", &history, 32768, false).is_none(), "설정을 끄면 이어 쓰지 않는다");
+        // 승인 뒤 이어가기: 카드에 적힌 Skill 이름·이유 그대로
+        let paused = answer_with(vec![next.tool_record()]);
+        let resumed = auto_for_resume(ctx, &paused, 32768).unwrap();
+        assert_eq!((resumed.name.as_str(), resumed.reason), ("sticky-weekly", SelectReason::Sticky));
+        assert!(auto_for_resume(ctx, &answer_with(vec![]), 32768).is_none());
     }
 
     #[test]

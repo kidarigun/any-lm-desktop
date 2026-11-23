@@ -414,6 +414,51 @@ pub fn knowledge_prompt_section(hits: &[Hit], context_length: u32) -> String {
     )
 }
 
+/// 참고 자료와 자동으로 불러온 Skill 지침을 합친 최대 비율(컨텍스트 글자 대비). 8K처럼 작은 컨텍스트에서 둘이 질문 자리를 다 먹지 않게.
+pub const TURN_CONTEXT_RATIO: f64 = 0.25;
+
+/// 참고 자료 + Skill 지침 합계 상한(글자) = 컨텍스트 × 1.5 × 0.25
+pub fn turn_context_cap(context_length: u32) -> usize {
+    (context_length as f64 * crate::context_budget::CHARS_PER_TOKEN * TURN_CONTEXT_RATIO) as usize
+}
+
+/// Skill 지침(`skill_chars`자)과 함께 넣을 때 합계가 `turn_context_cap`을 넘으면 참고 자료를 먼저 줄인다(Skill이 우선).
+/// 조각 단위로 뒤에서부터 빼고, 한 조각도 들어가지 않으면 첫 조각을 잘라 넣거나(50자 이상 남을 때) 참고 자료를 뺀다.
+pub fn fit_beside_skill(section: &str, skill_chars: usize, context_length: u32) -> String {
+    let cap = turn_context_cap(context_length);
+    if section.is_empty() || skill_chars == 0 || section.chars().count() + skill_chars <= cap {
+        return section.to_string();
+    }
+    let room = cap.saturating_sub(skill_chars);
+    const SEP: &str = "\n\n### 출처: ";
+    let mut parts = section.split(SEP);
+    let mut out = parts.next().unwrap_or("").to_string();
+    let mut chunks = 0usize;
+    for chunk in parts {
+        let piece = format!("{}{}", SEP, chunk);
+        let used = out.chars().count();
+        if used + piece.chars().count() <= room {
+            out.push_str(&piece);
+            chunks += 1;
+            continue;
+        }
+        if chunks == 0 {
+            let keep = room.saturating_sub(used + 1);
+            if keep >= SEP.chars().count() + 50 {
+                out.push_str(&take_chars(&piece, keep));
+                out.push('…');
+                chunks += 1;
+            }
+        }
+        break;
+    }
+    if chunks == 0 {
+        String::new()
+    } else {
+        out
+    }
+}
+
 /// `search_knowledge` 도구 결과. 도구 출력 상한(`cap`) 안에 조각 단위로 담고, 못 담은 개수를 적는다.
 pub fn search_tool_output(query: &str, hits: &[Hit], cap: usize) -> String {
     let q = query.trim();

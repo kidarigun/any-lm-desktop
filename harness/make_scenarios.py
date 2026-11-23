@@ -154,7 +154,7 @@ scenarios = [
     },
     {
         "id": "proj-skill",
-        "note": "Skill을 스스로 찾아 읽고 양식을 따르는지 (이전 추론 유지 설정)",
+        "note": "앱이 Skill을 미리 넣고 모델이 그 양식을 따르는지 (이전 추론 유지 설정). 파일 이름 날짜는 실행한 날({today}), 양식 검사는 날짜와 따로(*)",
         "mode": "project",
         "effort": "high",
         "tuning": {"preserveThinking": True},
@@ -162,10 +162,10 @@ scenarios = [
         "skills": {"weekly-report": WEEKLY_SKILL},
         "turns": ["notes/week.md 메모를 바탕으로 이번 주 주간 업무 보고서를 만들어 줘."],
         "checks": [
-            {"kind": "toolCalled", "text": "load_skill"},
-            {"kind": "fileExists", "path": "reports/주간보고_2026-11-15.md"},
-            {"kind": "fileContains", "path": "reports/주간보고_2026-11-15.md", "text": "보고 양식 버전: W-7"},
-            {"kind": "fileContains", "path": "reports/주간보고_2026-11-15.md", "text": "## 3. 요청·이슈"},
+            {"kind": "skillAutoLoaded", "text": "weekly-report"},
+            {"kind": "fileExists", "path": "reports/주간보고_{today}.md"},
+            {"kind": "fileContains", "path": "reports/주간보고_*.md", "text": "보고 양식 버전: W-7"},
+            {"kind": "fileContains", "path": "reports/주간보고_*.md", "text": "## 3. 요청·이슈"},
             {"kind": "finished"},
         ],
     },

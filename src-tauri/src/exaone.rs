@@ -1227,6 +1227,19 @@ fn insert_skill_message(msgs: &mut Vec<Value>, skill_text: &str) {
     );
 }
 
+/// 보이는 답 없이 끝난 라운드 뒤에 붙이는 요청(저장하지 않고 화면에도 사용자 말풍선으로 보이지 않는다)
+pub const EMPTY_ANSWER_NUDGE: &str = "도구 결과를 바탕으로 이제 사용자에게 보일 최종 답을 한국어로 써 주세요.";
+
+/// 마지막이 사용자 메시지면 그 끝에 덧붙이고(사용자 메시지가 연달아 오지 않게), 아니면(도구 결과 뒤) 사용자 메시지로 넣는다.
+fn push_empty_answer_nudge(msgs: &mut Vec<Value>) {
+    if let Some(last) = msgs.last_mut().filter(|m| m.get("role").and_then(Value::as_str) == Some("user")) {
+        let text = last.get("content").and_then(Value::as_str).unwrap_or("").to_string();
+        last["content"] = json!(format!("{}\n\n{}", text, EMPTY_ANSWER_NUDGE));
+        return;
+    }
+    msgs.push(json!({ "role": "user", "content": EMPTY_ANSWER_NUDGE }));
+}
+
 fn total_chars(msgs: &[Value]) -> usize {
     msgs.iter()
         .map(|m| m.get("content").and_then(|c| c.as_str()).map_or(0, |s| s.chars().count()))
@@ -1362,10 +1375,12 @@ fn compaction_source_transcript(
             }
             "assistant" => {
                 let mut block = format!("### 턴 {} [어시스턴트]\n", idx + 1);
-                if !m.tool_records.is_empty() {
+                // 앱이 스스로 넣은 Skill 카드(automatic)는 모델이 한 작업이 아니라서 요약에 넣지 않는다.
+                if m.tool_records.iter().any(|r| !r.automatic) {
                     let tools: Vec<String> = m
                         .tool_records
                         .iter()
+                        .filter(|tr| !tr.automatic)
                         .map(|tr| {
                             let target = tr.file_path.as_deref().unwrap_or("");
                             let out_short = shorten_middle(tr.output.trim(), 280).replace('\n', " ");
@@ -1431,14 +1446,15 @@ pub fn build_local_compaction_summary(
     let mut digest: Vec<String> = Vec::new();
     for (i, m) in messages.iter().enumerate() {
         let text = m.content.trim();
-        if text.is_empty() && m.tool_records.is_empty() {
+        let model_tools = m.tool_records.iter().filter(|r| !r.automatic).count();
+        if text.is_empty() && model_tools == 0 {
             continue;
         }
         match m.role.as_str() {
             "user" => digest.push(format!("- **요청 #{}**: {}", i + 1, shorten_middle(text, 500).replace('\n', " "))),
             "assistant" => {
                 let body = if text.is_empty() {
-                    format!("도구 {}개 실행", m.tool_records.len())
+                    format!("도구 {}개 실행", model_tools)
                 } else {
                     shorten_middle(text, 700).replace('\n', " ")
                 };
@@ -1839,6 +1855,10 @@ pub async fn run_exaone_turn<R: Runtime>(
     let mut length_cut = false;
     // 보낼 메시지 줄이기 단계 (컨텍스트 초과 오류를 받으면 2단계로 올린다)
     let mut compact_level = 0u8;
+    // 자동으로 넣은 Skill을 모델이 다시 load_skill로 부를 때 짧은 답은 한 턴에 한 번만 준다(또 부르면 전문).
+    let mut short_reply_used = false;
+    // 생각만 하고 보이는 답 없이 끝난 라운드를 한 턴에 한 번만 다시 시킨다(작은 모델에서 잦음).
+    let mut empty_nudged = false;
 
     loop {
         if cancel_flag.load(Ordering::Relaxed) {
@@ -2122,6 +2142,17 @@ pub async fn run_exaone_turn<R: Runtime>(
             break;
         }
         if calls.is_empty() {
+            // 보이는 답 없이 끝났다(생각만 하고 멈춤): 한 번만 최종 답을 쓰라고 다시 요청한다. 이 요청은 저장하지 않는다.
+            if !empty_nudged
+                && acc.finish_reason.as_deref() == Some("stop")
+                && acc.content.trim().is_empty()
+                && tool_rounds_used < MAX_TOOL_ROUNDS
+            {
+                empty_nudged = true;
+                tool_rounds_used += 1;
+                push_empty_answer_nudge(&mut api_messages);
+                continue;
+            }
             break;
         }
         if !tools_enabled {
@@ -2191,7 +2222,8 @@ pub async fn run_exaone_turn<R: Runtime>(
                             ),
                         }
                     }
-                    Ok(args) if skills::already_loaded_reply(auto_skill, &call.name, &args).is_some() => {
+                    Ok(args) if !short_reply_used && skills::already_loaded_reply(auto_skill, &call.name, &args).is_some() => {
+                        short_reply_used = true;
                         let output = skills::already_loaded_reply(auto_skill, &call.name, &args).unwrap_or_default();
                         let args_json = serde_json::to_string(&args).unwrap_or_default();
                         (tool_record(&call_id, &call.name, args_json, "completed", output, None, None), None, false)
@@ -3486,6 +3518,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let first = vec![
             sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_ls","function":{"name":"load_skill","arguments":"{\"name\":\"weekly-report\"}"}}]}}]})),
+            sse(json!({"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_ls2","function":{"name":"load_skill","arguments":"{\"name\":\"weekly-report\"}"}}]}}]})),
             sse_done(),
         ];
         let second = vec![sse(json!({"choices":[{"delta":{"content":"보고서를 썼습니다."}}]})), sse_done()];
@@ -3504,11 +3537,13 @@ mod tests {
         .unwrap();
 
         // 화면 카드: 맨 앞의 자동 기록, 그다음 모델이 부른 load_skill은 짧은 답
-        assert_eq!(out.tool_records.len(), 2);
+        assert_eq!(out.tool_records.len(), 3);
         assert!(out.tool_records[0].automatic && out.tool_records[0].tool_name == "load_skill");
         assert!(skill.matches_record(&out.tool_records[0]));
         assert!(!out.tool_records[1].automatic);
         assert_eq!(out.tool_records[1].output, skills::ALREADY_LOADED);
+        // 같은 턴에 또 부르면 짧은 답을 되풀이하지 않고 실제로 읽는다(여기서는 Skill 파일이 없어 오류).
+        assert_ne!(out.tool_records[2].output, skills::ALREADY_LOADED);
         assert_eq!(out.tool_records[1].round, 0, "자동 기록이 라운드 번호를 밀지 않는다");
         assert_eq!(out.content, "보고서를 썼습니다.");
 
@@ -3520,16 +3555,15 @@ mod tests {
         assert_eq!(msgs[3]["content"], skill.text.as_str());
         assert_eq!(msgs[5]["content"], "이번 주 주간 업무 보고서를 만들어 줘");
         let second_msgs = b[1]["messages"].as_array().unwrap();
-        let last = second_msgs.last().unwrap();
-        assert_eq!((last["role"].as_str(), last["tool_call_id"].as_str()), (Some("tool"), Some("call_ls")));
-        assert_eq!(last["content"], skills::ALREADY_LOADED);
+        let first_result = second_msgs.iter().find(|m| m["tool_call_id"] == "call_ls").unwrap();
+        assert_eq!(first_result["content"], skills::ALREADY_LOADED);
         let auto_ids: Vec<&Value> = second_msgs.iter().flat_map(|m| m["tool_calls"].as_array().into_iter().flatten()).collect();
-        assert_eq!(auto_ids.len(), 1, "자동 기록은 도구 호출로 보내지 않는다: {:?}", auto_ids);
+        assert_eq!(auto_ids.len(), 2, "자동 기록은 도구 호출로 보내지 않는다: {:?}", auto_ids);
 
         // 다음 턴의 대화 기록에도 자동 기록은 도구 호출로 들어가지 않는다(본문은 저장하지 않으므로).
         let next = build_api_messages("sys", &[history[0].clone(), out.clone(), msg("user", "고마워")], true);
         let calls: Vec<String> = next.iter().flat_map(|m| m["tool_calls"].as_array().cloned().unwrap_or_default()).map(|c| c["id"].as_str().unwrap_or("").to_string()).collect();
-        assert_eq!(calls, vec!["call_ls".to_string()]);
+        assert_eq!(calls, vec!["call_ls".to_string(), "call_ls2".to_string()]);
         assert!(!next.iter().any(|m| m["content"].as_str().is_some_and(|c| c.contains("보고 양식 버전: W-7"))));
     }
 
@@ -3573,6 +3607,67 @@ mod tests {
         let pos = msgs.iter().position(|m| m["content"].as_str() == Some(skill.text.as_str())).unwrap();
         assert_eq!(msgs[pos + 2]["content"], "이번 주 주간 업무 보고서를 만들어 줘", "원래 질문 바로 앞");
         assert!(!has_skill(1));
+    }
+
+    fn turn_req<'a>(settings: &'a AppSettings, project: Option<&'a Project>, history: &'a [ChatMessage]) -> TurnRequest<'a> {
+        TurnRequest { settings, model_key: "m", model_display_name: "", reasoning_options: &[], context_length: 32768, project, conversation_id: "c", history, compaction: None, continue_from: None, mode: "project", checkpoint: None, knowledge: "", auto_skill: None }
+    }
+
+    #[test]
+    fn compaction_summaries_leave_out_automatic_skill_cards() {
+        let skill = auto_skill("weekly-report");
+        let mut a = msg("assistant", "");
+        a.tool_records = vec![skill.tool_record(), rec("c1", "read_file", "completed", "본문", 0)];
+        let only_auto = { let mut m = msg("assistant", ""); m.tool_records = vec![skill.tool_record()]; m };
+        let msgs = vec![msg("user", "보고서"), a, msg("user", "계속"), only_auto];
+        let local = build_local_compaction_summary(None, &msgs, None);
+        assert!(local.contains("도구 1개 실행"), "{}", local);
+        assert!(!local.contains("응답 #4"), "자동 카드만 있는 답변은 건너뛴다: {}", local);
+        let transcript = compaction_source_transcript(None, &msgs, None);
+        assert!(transcript.contains("read_file"));
+        assert!(!transcript.contains("load_skill"), "{}", transcript);
+    }
+
+    #[tokio::test]
+    async fn empty_answer_after_a_tool_round_is_nudged_once() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "메모").unwrap();
+        let tool = vec![
+            sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_r","function":{"name":"read_file","arguments":"{\"relative_path\":\"a.md\"}"}}]}}]})),
+            sse_done(),
+        ];
+        let thinking_only = vec![sse(json!({"choices":[{"delta":{"reasoning_content":"답을 정리하자"},"finish_reason":"stop"}]})), sse_done()];
+        let answer = vec![sse(json!({"choices":[{"delta":{"content":"최종 답입니다."},"finish_reason":"stop"}]})), sse_done()];
+        let (url, bodies) = mock_server(vec![tool, thinking_only, answer], 0).await;
+        let app = tauri::test::mock_app();
+        let settings = test_settings(url);
+        let project = test_project(dir.path());
+        let history = vec![msg("user", "메모 요약해 줘")];
+        let (out, _) = run_exaone_turn(app.handle(), turn_req(&settings, Some(&project), &history), Arc::new(AtomicBool::new(false))).await.unwrap();
+        assert_eq!(out.content, "최종 답입니다.");
+        let b = bodies.lock().unwrap();
+        assert_eq!(b.len(), 3);
+        let last = b[2]["messages"].as_array().unwrap().last().unwrap().clone();
+        assert_eq!((last["role"].as_str(), last["content"].as_str()), (Some("user"), Some(EMPTY_ANSWER_NUDGE)));
+        assert!(!out.content.contains(EMPTY_ANSWER_NUDGE), "요청 글은 답에 남지 않는다");
+    }
+
+    #[tokio::test]
+    async fn empty_answer_is_nudged_at_most_once_and_the_question_is_not_changed() {
+        let thinking_only = || vec![sse(json!({"choices":[{"delta":{"reasoning_content":"음"},"finish_reason":"stop"}]})), sse_done()];
+        let (url, bodies) = mock_server(vec![thinking_only(), thinking_only(), thinking_only()], 0).await;
+        let app = tauri::test::mock_app();
+        let settings = test_settings(url);
+        let history = vec![msg("user", "질문")];
+        let (out, _) = run_exaone_turn(app.handle(), turn_req(&settings, None, &history), Arc::new(AtomicBool::new(false))).await.unwrap();
+        assert!(out.content.trim().is_empty());
+        let b = bodies.lock().unwrap();
+        assert_eq!(b.len(), 2, "다시 시키는 것은 한 번뿐");
+        let msgs = b[1]["messages"].as_array().unwrap();
+        let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, vec!["system", "user"], "사용자 메시지가 연달아 오지 않게 마지막 질문 끝에 붙인다");
+        assert_eq!(msgs[1]["content"].as_str().unwrap(), format!("질문\n\n{}", EMPTY_ANSWER_NUDGE));
+        assert_eq!(history[0].content, "질문");
     }
 
     #[tokio::test]

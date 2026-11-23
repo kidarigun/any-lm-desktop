@@ -40,7 +40,9 @@ use std::time::{Duration, Instant};
 #[serde(rename_all = "camelCase", default)]
 struct Check {
     /// fileExists | fileMissing | fileContains | fileNotContains | toolCalled | toolCalledContains | toolNotCalled
-    /// | answerContains | answerNotContains | answerMinChars | answerMaxChars | noToolErrors | finished
+    /// | skillAutoLoaded | answerContains | answerNotContains | answerMinChars | answerMaxChars | noToolErrors | finished
+    /// path·text 안의 `{today}`는 시나리오를 시작한 날짜(YYYY-MM-DD)로 바뀐다.
+    /// path의 파일 이름에 `*`가 있으면 맞는 파일 중 가장 최근에 바뀐 하나를 본다(예: `reports/주간보고_*.md`).
     kind: String,
     path: String,
     text: String,
@@ -306,15 +308,61 @@ fn list_files(root: &Path) -> Vec<(String, u64)> {
     out
 }
 
-fn run_check(c: &Check, root: &Path, turns: &[TurnLog]) -> (bool, String) {
+/// 검사 안의 `{today}`를 시나리오 시작 날짜로 바꾼다 (날짜가 들어간 파일 이름을 검사할 때).
+fn expand_today(c: &Check, today: &str) -> Check {
+    Check { path: c.path.replace("{today}", today), text: c.text.replace("{today}", today), ..c.clone() }
+}
+
+/// `*`(아무 글자나 0개 이상)만 아는 이름 맞추기
+fn wildcard_match(pattern: &str, name: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return pattern == name;
+    }
+    let (first, last) = (parts[0], parts[parts.len() - 1]);
+    if !name.starts_with(first) || name.len() < first.len() + last.len() || !name.ends_with(last) {
+        return false;
+    }
+    let mut rest = &name[first.len()..name.len() - last.len()];
+    for mid in &parts[1..parts.len() - 1] {
+        match rest.find(mid) {
+            Some(i) => rest = &rest[i + mid.len()..],
+            None => return false,
+        }
+    }
+    true
+}
+
+/// 검사할 파일: 이름에 `*`가 있으면 그 폴더에서 맞는 파일 중 가장 최근에 바뀐 것(없으면 원래 경로).
+fn check_file_path(root: &Path, rel: &str) -> PathBuf {
+    let direct = root.join(rel);
+    let Some(name) = Path::new(rel).file_name().and_then(|n| n.to_str()).filter(|n| n.contains('*')) else {
+        return direct;
+    };
+    let dir = direct.parent().map(Path::to_path_buf).unwrap_or_else(|| root.to_path_buf());
+    std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_file() && e.file_name().to_str().is_some_and(|n| wildcard_match(name, n)))
+        .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())
+        .map(|e| e.path())
+        .unwrap_or(direct)
+}
+
+fn run_check(c: &Check, root: &Path, turns: &[TurnLog], today: &str) -> (bool, String) {
+    let c = &expand_today(c, today);
     let last = turns.iter().rev().find_map(|t| t.message.as_ref());
     let answer = last.map(|m| m.content.clone()).unwrap_or_default();
-    let all_tools: Vec<&crate::store::ToolExecutionRecord> =
+    let all_records: Vec<&crate::store::ToolExecutionRecord> =
         turns.iter().filter_map(|t| t.message.as_ref()).flat_map(|m| m.tool_records.iter()).collect();
-    let file = || std::fs::read_to_string(root.join(&c.path)).unwrap_or_default();
+    // 앱이 미리 넣은 Skill 카드(automatic)는 모델이 부른 도구가 아니므로 도구 검사에서 뺀다.
+    let all_tools: Vec<&crate::store::ToolExecutionRecord> = all_records.iter().copied().filter(|t| !t.automatic).collect();
+    let target = check_file_path(root, &c.path);
+    let file = || std::fs::read_to_string(&target).unwrap_or_default();
     let ok = match c.kind.as_str() {
-        "fileExists" => root.join(&c.path).is_file(),
-        "fileMissing" => !root.join(&c.path).exists(),
+        "fileExists" => target.is_file(),
+        "fileMissing" => !target.exists(),
         "fileContains" => file().contains(&c.text),
         // text를 '|'로 나눈 것 중 하나라도 있으면 통과 (숫자 표기가 여러 가지일 때)
         "fileContainsAny" => c.text.split('|').any(|t| file().contains(t)),
@@ -322,11 +370,15 @@ fn run_check(c: &Check, root: &Path, turns: &[TurnLog]) -> (bool, String) {
         "fileMinChars" => file().chars().count() >= c.n,
         // 이 시나리오에서 쓴 API 호출 수가 n회 이하인지 (호출을 아끼는지 보는 검사)
         "maxCalls" => turns.iter().map(|t| t.traces.len()).sum::<usize>() <= c.n,
-        "fileNotContains" => root.join(&c.path).is_file() && !file().contains(&c.text),
+        "fileNotContains" => target.is_file() && !file().contains(&c.text),
         "toolCalled" => all_tools.iter().any(|t| t.tool_name == c.text),
         // MCP 도구는 모델에 mcp__<서버>__<도구>로 보이므로 이름의 일부로 찾는다.
         "toolCalledContains" => all_tools.iter().any(|t| t.tool_name.contains(&c.text)),
         "toolNotCalled" => !all_tools.iter().any(|t| t.tool_name == c.text),
+        // 앱이 이 Skill을 자동으로 미리 넣었는지 (text = Skill 이름)
+        "skillAutoLoaded" => all_records
+            .iter()
+            .any(|t| skills::auto_record_skill(t).is_some_and(|(name, _)| name == c.text)),
         "answerContains" => answer.contains(&c.text),
         "answerNotContains" => !answer.contains(&c.text),
         "answerMinChars" => answer.chars().count() >= c.n,
@@ -481,6 +533,7 @@ async fn live() {
         let mcp_conn = connect_mcp_servers(&mcp_manager, &sc.mcp_servers).await;
         let mut auto_skills: Vec<String> = Vec::new();
         let started_at = chrono::Local::now().to_rfc3339();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let sc_start = Instant::now();
         let mut history: Vec<ChatMessage> = Vec::new();
         let mut turns: Vec<TurnLog> = Vec::new();
@@ -514,7 +567,12 @@ async fn live() {
             }
             // 앱의 턴 시작과 같다: 이번 메시지에 맞는 Skill을 골라 미리 넣는다(설정이 켜져 있을 때).
             let project_ctx = project.as_ref().map(|p| (p.id.as_str(), Path::new(&p.root_path)));
-            let auto_skill = skills::auto_for_turn(project_ctx, prompt, config.context_length, settings.skill_auto_load);
+            let auto_skill = skills::auto_for_turn(project_ctx, prompt, &history, config.context_length, settings.skill_auto_load);
+            // 앱과 같다: 참고 자료와 Skill을 함께 넣을 때 둘을 합쳐 맥락의 25% 안으로 (참고 자료가 먼저 줄어든다).
+            let knowledge_section = match &auto_skill {
+                Some(s) => knowledge::fit_beside_skill(&knowledge_section, s.text.chars().count(), config.context_length),
+                None => knowledge_section,
+            };
             if let Some(s) = &auto_skill {
                 println!("  · Skill 자동 불러옴: {} ({:?}, {}자{})", s.name, s.reason, s.text.chars().count(), if s.truncated { ", 잘림" } else { "" });
                 auto_skills.push(s.name.clone());
@@ -635,7 +693,7 @@ async fn live() {
             .checks
             .iter()
             .map(|c| {
-                let (ok, label) = run_check(c, &root, &turns);
+                let (ok, label) = run_check(c, &root, &turns, &today);
                 println!("  [{}] {}", if ok { "통과" } else { "실패" }, label);
                 json!({ "ok": ok, "check": label })
             })
@@ -790,11 +848,47 @@ fn tool_called_contains_matches_prefixed_mcp_names() {
     let mut m = ChatMessage { role: "assistant".into(), content: "https://lmstudio.ai 참고".into(), ..Default::default() };
     m.tool_records.push(crate::store::ToolExecutionRecord { tool_name: "mcp__exa__web_search_exa".into(), status: "completed".into(), ..Default::default() });
     let turns = vec![TurnLog { prompt: "q".into(), error: None, message: Some(m), approvals: vec![], traces: vec![], wall_ms: 0 }];
-    let check = |kind: &str, text: &str| run_check(&Check { kind: kind.into(), text: text.into(), ..Default::default() }, Path::new("."), &turns).0;
+    let check = |kind: &str, text: &str| run_check(&Check { kind: kind.into(), text: text.into(), ..Default::default() }, Path::new("."), &turns, "2026-01-02").0;
     assert!(check("toolCalledContains", "web_search_exa"));
     assert!(!check("toolCalled", "web_search_exa"), "toolCalled는 이름 전체가 같아야 한다");
     assert!(!check("toolCalledContains", "crawling_exa"));
     assert!(check("answerContains", "http"));
+}
+
+#[test]
+fn tool_checks_ignore_the_app_skill_card_and_skill_auto_loaded_reads_it() {
+    let mut m = ChatMessage { role: "assistant".into(), content: "완료".into(), ..Default::default() };
+    m.tool_records.push(crate::store::ToolExecutionRecord {
+        tool_name: "load_skill".into(),
+        arguments_json: json!({ "name": "weekly-report", "reason": "implicit" }).to_string(),
+        status: "completed".into(),
+        automatic: true,
+        ..Default::default()
+    });
+    let turns = vec![TurnLog { prompt: "q".into(), error: None, message: Some(m), approvals: vec![], traces: vec![], wall_ms: 0 }];
+    let check = |kind: &str, text: &str| run_check(&Check { kind: kind.into(), text: text.into(), ..Default::default() }, Path::new("."), &turns, "2026-01-02").0;
+    assert!(!check("toolCalled", "load_skill"), "앱이 넣은 카드는 모델이 부른 도구가 아니다");
+    assert!(check("toolNotCalled", "load_skill"));
+    assert!(check("skillAutoLoaded", "weekly-report"));
+    assert!(!check("skillAutoLoaded", "pdf"));
+}
+
+#[test]
+fn checks_expand_today_in_path_and_text() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("reports")).unwrap();
+    std::fs::write(dir.path().join("reports/주간보고_2026-01-02.md"), "# 주간보고 (2026-01-02)").unwrap();
+    let c = |kind: &str, path: &str, text: &str| Check { kind: kind.into(), path: path.into(), text: text.into(), ..Default::default() };
+    let (ok, label) = run_check(&c("fileExists", "reports/주간보고_{today}.md", ""), dir.path(), &[], "2026-01-02");
+    assert!(ok);
+    assert_eq!(label, "fileExists reports/주간보고_2026-01-02.md");
+    assert!(run_check(&c("fileContains", "reports/주간보고_{today}.md", "({today})"), dir.path(), &[], "2026-01-02").0);
+    assert!(!run_check(&c("fileExists", "reports/주간보고_{today}.md", ""), dir.path(), &[], "2026-01-03").0);
+    // 파일 이름의 *: 날짜가 달라도 양식은 따로 본다
+    assert!(run_check(&c("fileContains", "reports/주간보고_*.md", "주간보고"), dir.path(), &[], "2026-01-03").0);
+    assert!(!run_check(&c("fileExists", "reports/회의록_*.md", ""), dir.path(), &[], "2026-01-03").0);
+    assert!(wildcard_match("a*b*c", "a12b34c") && !wildcard_match("a*b", "ab_c") && wildcard_match("*.md", "x.md"));
+    assert!(!wildcard_match("ab*ba", "aba"), "앞뒤가 겹치면 안 된다");
 }
 
 #[tokio::test]

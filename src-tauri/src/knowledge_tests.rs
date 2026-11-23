@@ -172,6 +172,29 @@ fn prompt_section_lists_sources_within_budget_and_max_six() {
 }
 
 #[test]
+fn knowledge_shrinks_first_when_a_skill_is_injected_too() {
+    assert_eq!(turn_context_cap(8_192), 3_072);
+    let hits: Vec<Hit> = (0..3).map(|i| hit(&format!(r"C:\kb\f{i}.md"), &"내".repeat(500), 10.0 - i as f64)).collect();
+    let s = knowledge_prompt_section(&hits, 8_192);
+    let n = s.chars().count();
+    // Skill이 없거나 합쳐도 상한 안이면 그대로
+    assert_eq!(fit_beside_skill(&s, 0, 8_192), s);
+    assert_eq!(fit_beside_skill(&s, 3_072 - n, 8_192), s);
+    // 넘으면 뒤 조각부터 빼서 합계가 상한 안
+    let skill = 1_800;
+    let fit = fit_beside_skill(&s, skill, 8_192);
+    assert!(fit.chars().count() + skill <= 3_072, "{}", fit.chars().count());
+    assert!(fit.starts_with("[참고 자료]\n"));
+    assert_eq!(fit.matches("\n\n### 출처: ").count(), 2, "{fit}");
+    // 한 조각도 못 넣을 만큼 좁으면 첫 조각을 잘라 넣고, 그마저 안 되면 뺀다
+    let fit = fit_beside_skill(&s, 2_457, 8_192);
+    assert!(fit.chars().count() + 2_457 <= 3_072, "{}", fit.chars().count());
+    assert_eq!(fit.matches("\n\n### 출처: ").count(), 1, "{fit}");
+    assert!(fit.ends_with('…'));
+    assert_eq!(fit_beside_skill(&s, 3_000, 8_192), "");
+}
+
+#[test]
 fn tool_output_lists_hits_with_paths_and_respects_cap() {
     let hits = vec![hit(r"C:\kb\a.md", "첫 조각", 3.25), hit(r"C:\kb\b.md", "둘째 조각", 1.5)];
     let out = search_tool_output("출시일", &hits, 10_000);

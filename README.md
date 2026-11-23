@@ -86,7 +86,9 @@ python ../harness/report.py ../harness/runs/default   # 결과 요약
 |---|---|
 | `mcpServers` | 연결할 MCP 서버 목록 `[{ "name", "url"?, "headers"?, "command"?, "args"?, "env"?, "catalogId"?, "autoApprove"? }]`. `url`이 있으면 원격, 없으면 `command`를 실행하는 로컬 서버. 앱과 같은 MCP 관리자로 연결해 `[MCP]` 절·도구 이름(`mcp__<서버>__<도구>`)이 앱과 같고, 시나리오가 끝나면 지웁니다. 헤더·환경 변수 값은 메모리에만 둡니다. `catalogId`가 내장 검색 항목(예: `"exa"`)이면 웹 검색 안내 줄이 붙습니다. `autoApprove`(서버의 원래 도구 이름)에 없는 MCP 도구는 앱이라면 승인을 물었을 도구로 기록하고 하니스가 승인합니다. |
 | `skillAutoLoad` | `false`면 Skill 자동 불러오기를 끕니다(기본: 앱과 같이 켜짐). 자동으로 불러온 Skill은 결과 요약의 `autoSkills`에 남습니다. |
-| 검사 `toolCalledContains` | 부른 도구 이름에 `text`가 들어 있으면 통과(MCP 도구 이름은 접두어가 붙으므로). |
+| 검사 `toolCalledContains` | 부른 도구 이름에 `text`가 들어 있으면 통과(MCP 도구 이름은 접두어가 붙으므로). `toolCalled`·`toolNotCalled`와 마찬가지로 앱이 미리 넣은 Skill 카드는 세지 않습니다. |
+| 검사 `skillAutoLoaded` | 앱이 `text` 이름의 Skill을 자동으로 미리 넣었으면 통과. |
+| `{today}`, `*` | 검사의 `path`·`text` 안 `{today}`는 시나리오를 시작한 날짜(YYYY-MM-DD)로 바뀝니다(예: `reports/주간보고_{today}.md`). `path`의 파일 이름에 `*`가 있으면 맞는 파일 중 가장 최근에 바뀐 하나를 봅니다(예: `reports/주간보고_*.md`). |
 
 예: `$env:ANYLM_SCENARIOS = "../harness/search.json"`
 
