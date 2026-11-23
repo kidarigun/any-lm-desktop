@@ -9,7 +9,7 @@ export const CHAT_MIN_WIDTH = 400;
 /** 왼쪽 사이드바 폭 (App의 `w-64`) */
 export const SIDEBAR_WIDTH = 256;
 
-const STORAGE_KEY = "exaone_canvas_width";
+const STORAGE_KEY = "anylm_canvas_width";
 
 /** 사이드바를 뺀, 채팅창과 캔버스가 나눠 쓰는 폭 */
 export function availableWidth(windowWidth: number, sidebarCollapsed = false): number {

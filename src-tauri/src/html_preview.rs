@@ -48,7 +48,7 @@ pub struct PreviewServer {
 impl PreviewServer {
     pub fn start() -> std::io::Result<Self> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-        let authority = format!("exaone-preview.localhost:{}", listener.local_addr()?.port());
+        let authority = format!("anylm-preview.localhost:{}", listener.local_addr()?.port());
         let origin = format!("http://{authority}");
         listener.set_nonblocking(true)?;
         let entries = Arc::new(PreviewRegistry::default());
@@ -271,7 +271,7 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
-    const ORIGIN: &str = "http://exaone-preview.localhost:12345";
+    const ORIGIN: &str = "http://anylm-preview.localhost:12345";
 
     #[test]
     fn serves_unsaved_entry_and_relative_project_assets() {

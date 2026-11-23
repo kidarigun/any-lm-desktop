@@ -1,8 +1,8 @@
 {
-  "name": "desktop-app-for-lg-k-exaone",
+  "name": "any-lm-desktop",
   "private": true,
   "license": "Apache-2.0",
-  "version": "0.4.4",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",

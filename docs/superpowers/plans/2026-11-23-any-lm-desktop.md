@@ -103,7 +103,7 @@ Expected: `git remote -v`에 origin(새 저장소)과 upstream(push DISABLED)이
 **Interfaces:**
 - Produces: `secrets::SERVICE = "io.github.kidarigun.anylm-desktop"`, `single_instance::PORT = 45789`, 미리보기 호스트 `anylm-preview.localhost`, 대화상자 환경 변수 `ANYLM_DLG_INIT|NAME|FILTER`, localStorage 접두어 `anylm_`, 기본 작업 폴더 `문서\AnyLM`.
 
-- [ ] **Step 1: 실패하는 테스트**
+- [x] **Step 1: 실패하는 테스트**
 
 `lib.rs` tests에 추가:
 
@@ -123,15 +123,15 @@ fn identity_is_any_lm_desktop() {
 
 `single_instance.rs` tests에 `assert_eq!(PORT, 45789); assert_eq!(HELLO, b"ANYLM-DESKTOP-SHOW\n");`. 기존 미리보기 주소 테스트(`lib.rs`의 `exaone-preview.localhost` 단언)는 `anylm-preview.localhost`로 고친다.
 
-- [ ] **Step 2: 실패 확인** — `cd src-tauri; cargo test --lib identity_is_any_lm_desktop` → FAIL
+- [x] **Step 2: 실패 확인** — `cd src-tauri; cargo test --lib identity_is_any_lm_desktop` → FAIL
 
-- [ ] **Step 3: 스펙 6.2 표대로 바꾼다.** 설치 파일 문구: `shortDescription` "LM Studio 로컬 모델용 작업 앱", `copyright` "© 2026 김기군", `longDescription` "LM Studio의 로컬 모델로 문서를 쓰고, 프로젝트 파일을 다루고, Skill과 MCP로 기능을 넓히는 데스크톱 앱입니다.". CSP `frame-src`도 새 호스트로. 업데이트 관련 화면(App.tsx의 UpdatePanel 사용처, 설정의 "새 버전 확인" 토글)과 `checkUpdates` 설정을 지운다. `migrate_old_data_dir` 호출과 함수를 지운다. 기본 작업 폴더 `.join("AnyLM")`, 임시 폴더 이름 `any-lm-desktop-data`.
+- [x] **Step 3: 스펙 6.2 표대로 바꾼다.** 설치 파일 문구: `shortDescription` "LM Studio 로컬 모델용 작업 앱", `copyright` "© 2026 김기군", `longDescription` "LM Studio의 로컬 모델로 문서를 쓰고, 프로젝트 파일을 다루고, Skill과 MCP로 기능을 넓히는 데스크톱 앱입니다.". CSP `frame-src`도 새 호스트로. 업데이트 관련 화면(App.tsx의 UpdatePanel 사용처, 설정의 "새 버전 확인" 토글)과 `checkUpdates` 설정을 지운다. `migrate_old_data_dir` 호출과 함수를 지운다. 기본 작업 폴더 `.join("AnyLM")`, 임시 폴더 이름 `any-lm-desktop-data`.
 
-- [ ] **Step 4: 통과 확인** — 세 검증 명령 모두 PASS. 추가로 `git grep -n -i "exaone" -- src-tauri/tauri.conf.json package.json src-tauri/Cargo.toml index.html` 결과 없음.
+- [x] **Step 4: 통과 확인** — 세 검증 명령 모두 PASS. 추가로 `git grep -n -i "exaone" -- src-tauri/tauri.conf.json package.json src-tauri/Cargo.toml index.html` 결과 없음.
 
-- [ ] **Step 5: 동시 실행 확인** — 설치된 원본 앱을 켠 채 `npm run tauri dev`. Expected: 두 창이 모두 뜨고 새 앱 데이터가 `%APPDATA%\io.github.kidarigun.anylm-desktop`에 생긴다. 원본 데이터 폴더의 수정 시각이 바뀌지 않는다.
+- [x] **Step 5: 동시 실행 확인** — 설치된 원본 앱을 켠 채 `npm run tauri dev`. Expected: 두 창이 모두 뜨고 새 앱 데이터가 `%APPDATA%\io.github.kidarigun.anylm-desktop`에 생긴다. 원본 데이터 폴더의 수정 시각이 바뀌지 않는다.
 
-- [ ] **Step 6: 커밋** — `chore: separate app identity from K-EXAONE Desktop and drop updater`
+- [x] **Step 6: 커밋** — `chore: separate app identity from K-EXAONE Desktop and drop updater`
 
 ---
 

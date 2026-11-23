@@ -19,13 +19,6 @@ pub struct AppSettings {
     /// API 키를 앱에 입력한 시각. K-EXAONE 키는 발급 30일 뒤 만료되므로 만료가 가까우면 알려 준다.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_saved_at: Option<String>,
-    /// 앱을 켤 때 새 버전이 있는지 확인할지 (확인만 하고, 설치는 사용자가 누를 때 한다)
-    #[serde(default = "default_true")]
-    pub check_updates: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 impl Default for AppSettings {
@@ -38,7 +31,6 @@ impl Default for AppSettings {
             reasoning_effort: "high".to_string(),
             writing_style: "executive_report".to_string(),
             api_key_saved_at: None,
-            check_updates: true,
         }
     }
 }

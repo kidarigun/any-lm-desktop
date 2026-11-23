@@ -18,14 +18,13 @@ import {
   SkillInfo,
   StreamChunkPayload,
   RateInfo,
-  UpdateInfo,
 } from "./types";
 
 export const isTauri = () =>
   typeof window !== "undefined" &&
   ("__TAURI_INTERNALS__" in window || "__TAURI__" in window);
 
-const FALLBACK_STORAGE_KEY = "exaone_desktop_fallback_db_v1";
+const FALLBACK_STORAGE_KEY = "anylm_desktop_fallback_db_v1";
 
 function loadFallbackDb(): AppDatabase {
   const raw = localStorage.getItem(FALLBACK_STORAGE_KEY);
@@ -735,26 +734,6 @@ export const BackendAPI = {
   /** 지금 실행 중인 앱의 버전 (브라우저 미리보기에서는 빈 문자열) */
   async appVersion(): Promise<string> {
     return isTauri() ? await invoke<string>("app_version") : "";
-  },
-
-  /** 새 버전이 있으면 그 정보를, 최신이면 null을 돌려준다. */
-  async checkUpdate(): Promise<UpdateInfo | null> {
-    return isTauri() ? await invoke<UpdateInfo | null>("check_update") : null;
-  },
-
-  /** 새 버전을 내려받아 설치한다. 성공하면 앱이 닫히고 새 버전으로 다시 열린다. */
-  async installUpdate(): Promise<void> {
-    if (!isTauri()) throw new Error("Tauri 데스크톱 창에서 실행해 주세요.");
-    await invoke("install_update");
-  },
-
-  async onUpdateProgress(
-    handler: (p: { downloaded: number; total: number | null }) => void
-  ): Promise<UnlistenFn> {
-    if (isTauri()) {
-      return await listen<{ downloaded: number; total: number | null }>("update-progress", (e) => handler(e.payload));
-    }
-    return () => {};
   },
 
   /** 프로젝트에서 묻지 않고 실행할 도구("run_python" | "run_command")를 켜거나 끈다. */

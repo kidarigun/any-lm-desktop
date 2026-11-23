@@ -1,5 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    exaone_desktop_lib::run()
+    any_lm_desktop_lib::run()
 }

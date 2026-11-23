@@ -6,7 +6,7 @@ import { collapseContext, computeDiff, toSplitRows, type DiffResult, type DiffRo
 import { formatWhen, sourceLabel } from "./history";
 
 type Mode = "unified" | "split";
-const MODE_KEY = "exaone_diff_mode";
+const MODE_KEY = "anylm_diff_mode";
 
 type Entry =
   | { status: "loading" }

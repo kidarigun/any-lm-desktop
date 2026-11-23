@@ -3210,7 +3210,6 @@ mod tests {
             reasoning_effort: "high".into(),
             writing_style: "default".into(),
             api_key_saved_at: None,
-            check_updates: true,
         }
     }
 

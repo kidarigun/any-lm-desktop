@@ -288,7 +288,7 @@ async fn pick_folder_dialog(initial_dir: Option<String>) -> Result<Option<String
                 $dlg.Description = '프로젝트 폴더를 선택하세요'
                 $dlg.UseDescriptionForTitle = $true
                 $dlg.AutoUpgradeEnabled = $true
-                $init = $env:EXAONE_DLG_INIT
+                $init = $env:ANYLM_DLG_INIT
                 if ($init -and (Test-Path -LiteralPath $init)) { $dlg.SelectedPath = $init }
                 if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -296,7 +296,7 @@ async fn pick_folder_dialog(initial_dir: Option<String>) -> Result<Option<String
                 }
             "#;
             let init = initial_dir.unwrap_or_default();
-            let path = run_dialog_script(SCRIPT, &[("EXAONE_DLG_INIT", &init)])?.trim().to_string();
+            let path = run_dialog_script(SCRIPT, &[("ANYLM_DLG_INIT", &init)])?.trim().to_string();
             Ok(if path.is_empty() { None } else { Some(path) })
         }
         #[cfg(not(target_os = "windows"))]
@@ -323,7 +323,7 @@ async fn pick_files_dialog(
                 $dlg = New-Object System.Windows.Forms.OpenFileDialog
                 $dlg.Title = '파일을 선택하세요'
                 $dlg.Multiselect = $true
-                $init = $env:EXAONE_DLG_INIT
+                $init = $env:ANYLM_DLG_INIT
                 if ($init -and (Test-Path -LiteralPath $init)) { $dlg.InitialDirectory = $init }
                 if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -331,7 +331,7 @@ async fn pick_files_dialog(
                 }
             "#;
             let init = initial_dir.unwrap_or_default();
-            Ok(run_dialog_script(SCRIPT, &[("EXAONE_DLG_INIT", &init)])?
+            Ok(run_dialog_script(SCRIPT, &[("ANYLM_DLG_INIT", &init)])?
                 .lines()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
@@ -958,102 +958,10 @@ pub(crate) async fn run_approved_tool<R: tauri::Runtime>(
     ApprovedRun { status, output, snapshot: new_snap, produced }
 }
 
-// ---------------------------------------------------------------------------
-// 자동 업데이트
-// 깃허브 릴리스의 latest.json을 읽어 새 버전이 있으면 알려 주고, 사용자가 누르면 내려받아 설치한다.
-// 설치 파일은 이 앱의 서명 키로 서명된 것만 받아들인다 (tauri.conf.json의 plugins.updater.pubkey).
-// ---------------------------------------------------------------------------
-
-pub const UPDATE_PROGRESS_EVENT: &str = "update-progress";
-
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct UpdateInfo {
-    current_version: String,
-    version: String,
-    /// 릴리스 노트
-    notes: Option<String>,
-    date: Option<String>,
-}
-
 /// 지금 실행 중인 앱의 버전
 #[tauri::command]
 fn app_version(app: AppHandle) -> String {
     app.package_info().version.to_string()
-}
-
-async fn find_update(app: &AppHandle) -> Result<Option<tauri_plugin_updater::Update>, String> {
-    use tauri_plugin_updater::UpdaterExt;
-    let before_exit = app.clone();
-    let updater = app
-        .updater_builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .on_before_exit(move || {
-            if let Some(s) = before_exit.try_state::<AppState>() {
-                s.runs.cancel_all();
-            }
-            if let Some(m) = before_exit.try_state::<Arc<mcp::McpManager>>() {
-                m.shutdown_all();
-            }
-            if let Some(g) = before_exit.try_state::<single_instance::ListenerGuard>() {
-                g.shutdown();
-            }
-            before_exit.cleanup_before_exit();
-        })
-        .build()
-        .map_err(|e| format!("업데이트 확인을 준비하지 못했습니다: {}", e))?;
-    updater
-        .check()
-        .await
-        .map_err(|e| format!("새 버전이 있는지 확인하지 못했습니다: {}", e))
-}
-
-/// 새 버전이 있으면 그 정보를, 최신이면 null을 돌려준다.
-#[tauri::command]
-async fn check_update(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
-    Ok(find_update(&app).await?.map(|u| UpdateInfo {
-        current_version: u.current_version.clone(),
-        version: u.version.clone(),
-        notes: u.body.clone(),
-        date: u.date.map(|d| d.to_string()),
-    }))
-}
-
-/// 새 버전을 내려받아 설치한다. 설치가 시작되면 앱이 닫히고, 설치가 끝나면 새 버전이 다시 열린다.
-#[tauri::command]
-async fn install_update(app: AppHandle) -> Result<(), String> {
-    let mut update = find_update(&app)
-        .await?
-        .ok_or_else(|| "이미 최신 버전입니다.".to_string())?;
-    update.timeout = Some(std::time::Duration::from_secs(180));
-    use tauri::Emitter;
-    let progress = app.clone();
-    let mut downloaded: u64 = 0;
-    let bytes = update
-        .download(
-            move |chunk, total| {
-                downloaded += chunk as u64;
-                let _ = progress.emit(UPDATE_PROGRESS_EVENT, serde_json::json!({ "downloaded": downloaded, "total": total }));
-            },
-            || {},
-        )
-        .await
-        .map_err(|e| format!("새 버전을 내려받지 못했습니다: {}", e))?;
-    // 설치 프로그램이 앱을 닫기 전에 진행 중인 작업·로컬 MCP 서버·단일 인스턴스 포트를 먼저 정리한다.
-    if let Some(s) = app.try_state::<AppState>() {
-        s.runs.cancel_all();
-    }
-    if let Some(m) = app.try_state::<Arc<mcp::McpManager>>() {
-        m.shutdown_all();
-    }
-    if let Some(g) = app.try_state::<single_instance::ListenerGuard>() {
-        g.shutdown();
-    }
-    update
-        .install(bytes)
-        .map_err(|e| format!("새 버전을 설치하지 못했습니다: {}", e))?;
-    // Windows에서는 설치 프로그램이 앱을 닫고 다시 연다. 그렇지 않은 환경에서는 직접 다시 시작한다.
-    app.restart();
 }
 
 /// 프로젝트에서 묻지 않고 실행할 도구를 켜거나 끈다.
@@ -1542,11 +1450,11 @@ async fn pick_save_path_dialog(
                 Add-Type -AssemblyName System.Windows.Forms
                 $dlg = New-Object System.Windows.Forms.SaveFileDialog
                 $dlg.Title = '다른 이름으로 저장'
-                $dlg.FileName = $env:EXAONE_DLG_NAME
-                try { $dlg.Filter = $env:EXAONE_DLG_FILTER } catch { $dlg.Filter = '모든 파일 (*.*)|*.*' }
+                $dlg.FileName = $env:ANYLM_DLG_NAME
+                try { $dlg.Filter = $env:ANYLM_DLG_FILTER } catch { $dlg.Filter = '모든 파일 (*.*)|*.*' }
                 $dlg.OverwritePrompt = $true
                 $dlg.AddExtension = $true
-                $init = $env:EXAONE_DLG_INIT
+                $init = $env:ANYLM_DLG_INIT
                 if ($init -and (Test-Path -LiteralPath $init)) { $dlg.InitialDirectory = $init }
                 if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -1557,9 +1465,9 @@ async fn pick_save_path_dialog(
             let path = run_dialog_script(
                 SCRIPT,
                 &[
-                    ("EXAONE_DLG_INIT", &init),
-                    ("EXAONE_DLG_NAME", &default_name),
-                    ("EXAONE_DLG_FILTER", &filter),
+                    ("ANYLM_DLG_INIT", &init),
+                    ("ANYLM_DLG_NAME", &default_name),
+                    ("ANYLM_DLG_FILTER", &filter),
                 ],
             )?
             .trim()
@@ -2080,26 +1988,6 @@ fn doc_bridge_respond(
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-/// 예전 앱 ID의 데이터 폴더를 새 폴더로 옮긴다. 새 폴더가 이미 있으면 건드리지 않는다.
-fn migrate_old_data_dir(new_dir: &Path) {
-    const OLD_ID: &str = "ai.exaone.desktop";
-    let Some(parent) = new_dir.parent() else { return };
-    let old = parent.join(OLD_ID);
-    if new_dir.exists() || !old.is_dir() || old == new_dir {
-        return;
-    }
-    if let Err(e) = std::fs::rename(&old, new_dir) {
-        eprintln!("이전 데이터 폴더를 옮기지 못했습니다 ({}): {}", old.display(), e);
-        return;
-    }
-    // 앱 전용 Python 가상환경은 기반 Python의 절대 경로를 적어 두므로 새 경로로 고친다.
-    let cfg = new_dir.join("runtimes").join("pyenv").join("pyvenv.cfg");
-    if let Ok(text) = std::fs::read_to_string(&cfg) {
-        let fixed = text.replace(&old.to_string_lossy().to_string(), &new_dir.to_string_lossy());
-        let _ = std::fs::write(&cfg, fixed);
-    }
-}
-
 pub fn run() {
     // 이미 실행 중이면 새로 띄우지 않고 기존 창을 앞으로 가져온다 (저장 파일·로그인 포트 충돌 방지).
     let mut instance = match single_instance::acquire() {
@@ -2109,7 +1997,6 @@ pub fn run() {
     };
     tauri::Builder::default()
         .plugin(navigation_guard())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             if let Some(listener) = instance.take() {
                 let handle = app.handle().clone();
@@ -2125,12 +2012,7 @@ pub fn run() {
             let app_data_dir = app
                 .path()
                 .app_data_dir()
-                .unwrap_or_else(|_| std::env::temp_dir().join("k-exaone-desktop-data"));
-            // 앱 ID를 바꾸기 전(ai.exaone.desktop) 폴더에 있던 대화·설정·실행 환경을 한 번 옮겨 온다.
-            migrate_old_data_dir(&app_data_dir);
-            if let Ok(local) = app.path().app_local_data_dir() {
-                migrate_old_data_dir(&local);
-            }
+                .unwrap_or_else(|_| std::env::temp_dir().join("any-lm-desktop-data"));
             fs_ops::set_blob_dir(app_data_dir.join("blobs"));
             skills::set_user_dir(app_data_dir.join("skills"));
             // 실행 환경(Python·Node.js·uv)은 크므로 로밍되지 않는 로컬 앱 데이터에 둔다.
@@ -2143,11 +2025,11 @@ pub fn run() {
             let mcp_manager = mcp::McpManager::new(app_data_dir.join("mcp_servers.json"), Box::new(mcp::KeyringSecrets));
             mcp_manager.start_all();
             app.manage(mcp_manager);
-            // 처음 실행할 때 만드는 기본 작업 폴더: 문서\EXAONE (설치 폴더는 쓸 수 없는 곳일 수 있다)
+            // 처음 실행할 때 만드는 기본 작업 폴더: 문서\AnyLM (설치 폴더는 쓸 수 없는 곳일 수 있다)
             let default_workspace = app
                 .path()
                 .document_dir()
-                .map(|d| d.join("EXAONE"))
+                .map(|d| d.join("AnyLM"))
                 .unwrap_or_else(|_| app_data_dir.join("workspace"));
             let store = StoreManager::new(&app_data_dir).with_default_workspace(default_workspace);
             let mut initial_db = store.load();
@@ -2199,8 +2081,6 @@ pub fn run() {
             rate_info,
             set_project_auto_approve,
             app_version,
-            check_update,
-            install_update,
             runtime_status,
             runtime_install,
             runtime_remove,
@@ -2243,7 +2123,7 @@ pub fn run() {
             reveal_saved_path,
         ])
         .build(tauri::generate_context!())
-        .expect("error while running Desktop App for LG K-EXAONE")
+        .expect("error while running Any LM Desktop")
         .run(|app, event| {
             // 앱을 끝낼 때 진행 중인 작업·로컬 MCP 서버·단일 인스턴스 포트를 정리한다.
             if let tauri::RunEvent::Exit = event {
@@ -2265,6 +2145,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn identity_is_any_lm_desktop() {
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(conf["productName"], "Any LM Desktop");
+        assert_eq!(conf["identifier"], "io.github.kidarigun.anylm-desktop");
+        assert_eq!(conf["version"], "0.1.0");
+        assert!(conf["plugins"].get("updater").is_none());
+        assert_eq!(conf["bundle"]["createUpdaterArtifacts"], serde_json::Value::Null);
+        let text = include_str!("../tauri.conf.json");
+        assert!(!text.contains("EXAONE") && !text.contains("exaone"));
+    }
+
+    #[test]
     fn only_documents_open_with_the_default_app() {
         for ok in ["out/report.xlsx", "a.CSV", "chart.png", "보고서.docx"] {
             assert!(is_openable_with_default_app(Path::new(ok)), "{}", ok);
@@ -2279,7 +2171,7 @@ mod tests {
         let ok = |u: &str| is_app_url(&tauri::Url::parse(u).unwrap());
         assert!(ok("tauri://localhost/index.html"));
         assert!(ok("http://tauri.localhost/"));
-        assert!(!ok("http://exaone-preview.localhost:12345/token/site/index.html"));
+        assert!(!ok("http://anylm-preview.localhost:12345/token/site/index.html"));
         assert!(!ok("https://evil.example.com/"));
         assert!(!ok("http://tauri.localhost.evil.com/"));
         assert!(!ok("file:///C:/Windows/win.ini"));

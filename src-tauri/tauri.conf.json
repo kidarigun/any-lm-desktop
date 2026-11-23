@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Desktop App for LG K-EXAONE",
-  "version": "0.4.4",
-  "identifier": "io.github.kidarigun.kexaone-desktop",
+  "productName": "Any LM Desktop",
+  "version": "0.1.0",
+  "identifier": "io.github.kidarigun.anylm-desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Desktop App for LG K-EXAONE",
+        "title": "Any LM Desktop",
         "width": 1440,
         "height": 900,
         "minWidth": 1024,
@@ -33,7 +33,7 @@
         "worker-src": "'self' blob:",
         "connect-src": "'self' ipc: http://ipc.localhost blob: data:",
         "object-src": "'none'",
-        "frame-src": "http://exaone-preview.localhost:*",
+        "frame-src": "http://anylm-preview.localhost:*",
         "child-src": "'self' blob:",
         "base-uri": "'none'",
         "form-action": "'none'"
@@ -48,7 +48,7 @@
         "worker-src": "'self' blob:",
         "connect-src": "'self' ipc: http://ipc.localhost blob: data: ws://localhost:1420 http://localhost:1420",
         "object-src": "'none'",
-        "frame-src": "http://exaone-preview.localhost:*",
+        "frame-src": "http://anylm-preview.localhost:*",
         "child-src": "'self' blob:",
         "base-uri": "'none'",
         "form-action": "'none'"
@@ -65,10 +65,10 @@
       "nsis"
     ],
     "publisher": "kidarigun",
-    "copyright": "© 2026 김기군. LG AI연구원의 공식 제품이 아닙니다.",
+    "copyright": "© 2026 김기군",
     "category": "Productivity",
-    "shortDescription": "LG K-EXAONE용 비공식 데스크톱 앱",
-    "longDescription": "LG AI연구원의 K-EXAONE 모델 API로 보고서·문서를 쓰고, 프로젝트 파일을 다루고, Skill과 MCP로 기능을 넓히는 비공식 오픈소스 데스크톱 앱입니다. LG AI연구원이 만들거나 보증하지 않았습니다.",
+    "shortDescription": "LM Studio 로컬 모델용 작업 앱",
+    "longDescription": "LM Studio의 로컬 모델로 문서를 쓰고, 프로젝트 파일을 다루고, Skill과 MCP로 기능을 넓히는 데스크톱 앱입니다.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -88,18 +88,6 @@
         ],
         "displayLanguageSelector": false,
         "installerIcon": "icons/icon.ico"
-      }
-    },
-    "createUpdaterArtifacts": true
-  },
-  "plugins": {
-    "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc2QTAxNTk2MEU4QUFGM0MKUldROHI0b09saFdnZHFQUDhkRzdqVXgzWktxTE1XSS9XMEdNVzd6R1E4WlZBelFiZTNzNXV1VGcK",
-      "endpoints": [
-        "https://github.com/kidarigun/k-exaone-desktop/releases/latest/download/latest.json"
-      ],
-      "windows": {
-        "installMode": "passive"
       }
     }
   }

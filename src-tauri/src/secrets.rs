@@ -1,6 +1,6 @@
 //! API 키를 설정 파일(평문 JSON) 대신 Windows 자격 증명 관리자에 보관한다.
 
-const SERVICE: &str = "ai.exaone.desktop";
+pub const SERVICE: &str = "io.github.kidarigun.anylm-desktop";
 const ACCOUNT: &str = "exaone-api-key";
 
 fn entry() -> Result<keyring::Entry, String> {

@@ -11,9 +11,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-const PORT: u16 = 45788;
-const HELLO: &[u8] = b"EXAONE-DESKTOP-SHOW\n";
-const ACK: &[u8] = b"EXAONE-DESKTOP-OK\n";
+pub const PORT: u16 = 45789;
+const HELLO: &[u8] = b"ANYLM-DESKTOP-SHOW\n";
+const ACK: &[u8] = b"ANYLM-DESKTOP-OK\n";
 
 pub enum Instance {
     /// 처음 실행된 앱: 다른 실행의 요청을 받는다
@@ -52,7 +52,7 @@ pub struct ListenerGuard {
 }
 
 impl ListenerGuard {
-    /// 업데이트 설치·재시작 전에 리스너를 멈추고 포트 점유를 즉시 해제한다.
+    /// 종료 전에 리스너를 멈추고 포트 점유를 즉시 해제한다.
     pub fn shutdown(&self) {
         if !self.stopped.swap(true, Ordering::SeqCst) {
             if let Some(addr) = self.addr {
@@ -103,6 +103,13 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn identity_constants_differ_from_the_original_app() {
+        assert_eq!(PORT, 45789);
+        assert_eq!(HELLO, b"ANYLM-DESKTOP-SHOW
+");
+    }
+
+    #[test]
     fn second_launch_wakes_the_first() {
         // 테스트용 빈 포트
         let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
@@ -116,7 +123,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(shown.load(Ordering::SeqCst), 1);
 
-        // 업데이트 전 shutdown 시 포트를 즉시 재바인딩할 수 있어야 한다.
+        // 종료 전 shutdown 시 포트를 즉시 재바인딩할 수 있어야 한다.
         guard.shutdown();
         let rebound = TcpListener::bind(("127.0.0.1", port));
         assert!(rebound.is_ok(), "shutdown 후 포트가 해제되어야 함");

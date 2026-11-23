@@ -14,16 +14,6 @@ export interface AppSettings {
     | "default";
   /** API 키를 앱에 입력한 시각 (K-EXAONE 키는 발급 30일 뒤 만료된다) */
   apiKeySavedAt?: string | null;
-  /** 앱을 켤 때 새 버전이 있는지 확인할지 (없으면 아직 설정을 읽지 못한 것) */
-  checkUpdates?: boolean;
-}
-
-/** 설치할 수 있는 새 버전 */
-export interface UpdateInfo {
-  currentVersion: string;
-  version: string;
-  notes?: string | null;
-  date?: string | null;
 }
 
 export interface Project {

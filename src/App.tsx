@@ -55,7 +55,6 @@ import { PanelResizer } from "./ui/PanelResizer";
 import { SkillsDialog } from "./skills/SkillsDialog";
 import { McpDialog } from "./mcp/McpDialog";
 import { RuntimePanel } from "./runtime/RuntimePanel";
-import { UpdateBanner, UpdateSettings, useUpdater } from "./update/UpdatePanel";
 import {
   CANVAS_DEFAULT_WIDTH,
   CANVAS_MIN_WIDTH,
@@ -346,11 +345,11 @@ const REASONING_EFFORTS: { value: AppSettings["reasoningEffort"]; label: string;
 
 export default function App() {
   const [isDark, setIsDark] = useState<boolean>(() => {
-    return localStorage.getItem("exaone_theme") === "dark";
+    return localStorage.getItem("anylm_theme") === "dark";
   });
 
   useEffect(() => {
-    localStorage.setItem("exaone_theme", isDark ? "dark" : "light");
+    localStorage.setItem("anylm_theme", isDark ? "dark" : "light");
     if (isDark) {
       document.documentElement.classList.add("dark");
     } else {
@@ -360,7 +359,7 @@ export default function App() {
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
     try {
-      return localStorage.getItem("exaone_sidebar_collapsed") === "true";
+      return localStorage.getItem("anylm_sidebar_collapsed") === "true";
     } catch {
       return false;
     }
@@ -368,7 +367,7 @@ export default function App() {
 
   useEffect(() => {
     try {
-      localStorage.setItem("exaone_sidebar_collapsed", sidebarCollapsed ? "true" : "false");
+      localStorage.setItem("anylm_sidebar_collapsed", sidebarCollapsed ? "true" : "false");
     } catch {
       // 저장하지 못해도 이번 실행에서는 그대로 동작한다.
     }
@@ -697,9 +696,6 @@ export default function App() {
       }
     })();
   }, []);
-
-  // 새 버전 확인과 설치 (설정을 읽은 뒤, 켜져 있으면 한 번 조용히 확인한다)
-  const updater = useUpdater(settings.checkUpdates);
 
   // API 키를 입력한 지 며칠 됐는지 (발급 30일 뒤 만료되므로 가까워지면 알린다)
   const keyDays = settings.apiKeySet ? keyAgeDays(settings.apiKeySavedAt) : null;
@@ -1319,7 +1315,7 @@ export default function App() {
       .slice(0, msgIndex)
       .reverse()
       .find((m) => m.role === "user")?.content;
-    const dirKey = `exaone_answer_save_dir:${currentScopeId || "general-chat"}`;
+    const dirKey = `anylm_answer_save_dir:${currentScopeId || "general-chat"}`;
     try {
       const { ANSWER_FORMATS, exportAnswer, parentDir, suggestAnswerFileName } = await import("./docs/answerExport");
       const spec = ANSWER_FORMATS[format];
@@ -1732,7 +1728,6 @@ export default function App() {
 
         {/* Bottom Settings Button */}
         <div className="p-3 border-t border-[#E2E0D8] dark:border-[#2C2C29] space-y-1.5">
-          <UpdateBanner updater={updater} runningCount={Object.keys(runs).length} />
           <button
             onClick={() => setShowSkills(true)}
             className="w-full py-2 px-3 rounded-xl bg-white dark:bg-[#242421] hover:bg-stone-100 dark:hover:bg-[#2E2E2A] border border-stone-300/80 dark:border-[#383834] text-xs font-medium text-stone-700 dark:text-stone-200 flex items-center gap-1.5 cursor-pointer transition"
@@ -2992,24 +2987,6 @@ export default function App() {
             <div className="pt-3 border-t border-stone-200 dark:border-[#34342F] text-xs space-y-2">
               <h4 className="font-bold text-stone-900 dark:text-stone-100">실행 환경</h4>
               <RuntimePanel />
-            </div>
-
-            <div className="pt-3 border-t border-stone-200 dark:border-[#34342F] text-xs space-y-2">
-              <h4 className="font-bold text-stone-900 dark:text-stone-100">업데이트</h4>
-              <UpdateSettings
-                updater={updater}
-                runningCount={Object.keys(runs).length}
-                autoCheck={settings.checkUpdates !== false}
-                onAutoCheckChange={async (value) => {
-                  setSettings((prev) => ({ ...prev, checkUpdates: value }));
-                  try {
-                    // 키는 보내지 않는다 (비어 있으면 저장된 키를 그대로 둔다).
-                    await BackendAPI.saveSettings({ ...settings, apiKey: "", checkUpdates: value });
-                  } catch (err) {
-                    setSettingsError(String(err));
-                  }
-                }}
-              />
             </div>
 
             {settingsError && (

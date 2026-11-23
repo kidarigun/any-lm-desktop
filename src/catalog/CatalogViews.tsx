@@ -18,7 +18,7 @@ import {
 import { joinArgs } from "../mcp/importConfig";
 import { RuntimeInstallButton } from "../runtime/RuntimePanel";
 
-const URL_KEY = "exaone_catalog_url";
+const URL_KEY = "anylm_catalog_url";
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 function savedUrl(): string {
