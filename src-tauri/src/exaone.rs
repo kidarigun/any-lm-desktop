@@ -1227,17 +1227,20 @@ fn insert_skill_message(msgs: &mut Vec<Value>, skill_text: &str) {
     );
 }
 
-/// 보이는 답 없이 끝난 라운드 뒤에 붙이는 요청(저장하지 않고 화면에도 사용자 말풍선으로 보이지 않는다)
+/// 보이는 답 없이 끝난 라운드 뒤에 붙이는 요청(저장하지 않고 화면에도 사용자 말풍선으로 보이지 않는다). 이 답변에서 도구를 실행했을 때.
 pub const EMPTY_ANSWER_NUDGE: &str = "도구 결과를 바탕으로 이제 사용자에게 보일 최종 답을 한국어로 써 주세요.";
+/// 같은 요청인데 도구를 하나도 실행하지 않았을 때(일반 대화 첫 라운드 등)
+pub const EMPTY_ANSWER_NUDGE_PLAIN: &str = "이제 사용자에게 보일 최종 답을 한국어로 써 주세요.";
 
 /// 마지막이 사용자 메시지면 그 끝에 덧붙이고(사용자 메시지가 연달아 오지 않게), 아니면(도구 결과 뒤) 사용자 메시지로 넣는다.
-fn push_empty_answer_nudge(msgs: &mut Vec<Value>) {
+fn push_empty_answer_nudge(msgs: &mut Vec<Value>, after_tools: bool) {
+    let nudge = if after_tools { EMPTY_ANSWER_NUDGE } else { EMPTY_ANSWER_NUDGE_PLAIN };
     if let Some(last) = msgs.last_mut().filter(|m| m.get("role").and_then(Value::as_str) == Some("user")) {
         let text = last.get("content").and_then(Value::as_str).unwrap_or("").to_string();
-        last["content"] = json!(format!("{}\n\n{}", text, EMPTY_ANSWER_NUDGE));
+        last["content"] = json!(format!("{}\n\n{}", text, nudge));
         return;
     }
-    msgs.push(json!({ "role": "user", "content": EMPTY_ANSWER_NUDGE }));
+    msgs.push(json!({ "role": "user", "content": nudge }));
 }
 
 fn total_chars(msgs: &[Value]) -> usize {
@@ -2150,7 +2153,8 @@ pub async fn run_exaone_turn<R: Runtime>(
             {
                 empty_nudged = true;
                 tool_rounds_used += 1;
-                push_empty_answer_nudge(&mut api_messages);
+                // 앱이 넣은 자동 Skill 카드는 모델이 실행한 도구가 아니다.
+                push_empty_answer_nudge(&mut api_messages, msg.tool_records.iter().any(|r| !r.automatic));
                 continue;
             }
             break;
@@ -3666,7 +3670,7 @@ mod tests {
         let msgs = b[1]["messages"].as_array().unwrap();
         let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
         assert_eq!(roles, vec!["system", "user"], "사용자 메시지가 연달아 오지 않게 마지막 질문 끝에 붙인다");
-        assert_eq!(msgs[1]["content"].as_str().unwrap(), format!("질문\n\n{}", EMPTY_ANSWER_NUDGE));
+        assert_eq!(msgs[1]["content"].as_str().unwrap(), format!("질문\n\n{}", EMPTY_ANSWER_NUDGE_PLAIN), "도구를 안 썼으면 '도구 결과' 말이 없는 문구");
         assert_eq!(history[0].content, "질문");
     }
 

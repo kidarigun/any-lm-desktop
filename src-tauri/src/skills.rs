@@ -395,13 +395,21 @@ pub const SKILL_AUTO_MIN_MARGIN: f64 = 0.5;
 /// IDF를 셀 때 설치된 Skill 수에 더하는 "아무 Skill에도 해당하지 않는 일반 요청" 가상 문서 수.
 /// Skill이 하나뿐일 때도 모든 토큰의 IDF가 같아지지 않고, 여러 Skill에 흔한 토큰은 덜 친다.
 pub const SKILL_AUTO_GENERIC_DOCS: f64 = 1.0;
+/// 설명으로 고를 때, 맞은 토큰 중 흔한 낱말(`GENERIC_TOKENS`)이 아닌 것이 Skill 이름 토큰이 아니면 이만큼은 있어야 한다.
+/// Skill이 하나뿐이면 IDF가 모두 ln 3이라 `SKILL_AUTO_MIN_WEIGHT`만으로는 "아무 낱말 둘"과 같아서다("회사 업무 매뉴얼" → weekly-report 방지).
+pub const SKILL_AUTO_MIN_DISTINCTIVE: usize = 2;
 /// 앞 턴에 자동으로 불러온 Skill을 다음 요청에도 이어서 넣는 최대 턴 수(다른 Skill을 고르거나 설정을 끄면 멈춤)
 pub const SKILL_STICKY_TURNS: usize = 3;
+/// 이어 쓰기를 따져 보는 요청 길이: 의미 있는 낱말(띄어쓰기 단위)이 이만큼 이상인데 Skill과 겹치는 토큰이 하나도 없으면 다른 일로 보고 이어 넣지 않는다.
+/// "계속"·"날짜만 바꿔 줘"·"3번 섹션 다시 써 줘" 같은 짧은 후속 요청은 늘 이어 넣는다.
+pub const SKILL_STICKY_UNRELATED_MIN_WORDS: usize = 3;
 /// 자동으로 넣는 Skill 지침의 최대 글자 수와 컨텍스트(글자) 대비 비율
 const SKILL_AUTO_BUDGET_CAP: usize = 10_000;
 const SKILL_AUTO_BUDGET_RATIO: f64 = 0.20;
 /// 머리 줄 `[Skill: <이름> — ...]`의 이름 뒤 부분
 pub const AUTO_HEADER_TAIL: &str = "앱이 이 요청에 맞는 Skill로 판단해 미리 불러왔습니다. 아래 지침을 그대로 따르세요. 맞지 않으면 무시하세요.";
+/// 이어 쓰기(Sticky)로 넣을 때 머리 줄의 이름 뒤 부분: 이번 요청과 맞는지 모델이 판단하게 한다.
+pub const STICKY_HEADER_TAIL: &str = "앞 요청에서 쓰던 Skill입니다. 이번 요청이 그 작업을 이어 가는 것일 때만 따르고, 다른 일이면 무시하세요.";
 /// 자동으로 불러온 Skill을 모델이 같은 턴에 다시 load_skill로 부를 때(첫 번째만) 돌려주는 답.
 /// 저장되어 다음 턴에도 보이므로 "위에 있다"고 하지 않는다.
 pub const ALREADY_LOADED: &str = "앱이 이 턴에 미리 넣었던 Skill입니다. 지침이 필요하면 load_skill로 다시 읽으세요.";
@@ -420,6 +428,23 @@ const STOPWORDS: &[&str] = &[
     "which", "any", "all", "into", "about", "include", "includes", "including", "like", "such", "should", "will", "would",
     "also", "if", "then", "than", "so", "not", "no", "get", "make", "create", "help", "need", "needs", "read", "write", "edit",
 ];
+
+/// 맞은 토큰으로는 세지만 "이 Skill다운" 토큰으로는 치지 않는 흔한 낱말(여러 일에 두루 쓰인다).
+const GENERIC_TOKENS: &[&str] = &[
+    "회사", "업무", "파일", "내용", "자료", "문서", "정보", "데이터", "목록", "코드", "작업",
+    "text", "texts", "file", "files", "data", "table", "tables", "add", "document", "documents", "doc", "docs", "code",
+    "list", "lists", "content", "contents", "new", "work", "page", "pages", "format", "information", "info", "function",
+    "functions", "project", "folder", "folders",
+];
+
+fn is_generic(token: &str) -> bool {
+    GENERIC_TOKENS.contains(&token)
+}
+
+/// Skill 이름을 토큰으로(`weekly-report` → weekly, report)
+fn name_tokens(name: &str) -> BTreeSet<String> {
+    meaningful_tokens(&name.replace(['-', '_'], " "))
+}
 
 /// Skill을 고른 이유
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -524,23 +549,28 @@ pub fn select_for_message(skills: &[SkillInfo], message: &str) -> Option<(SkillI
         let df = owns.iter().filter(|o| o.contains(t)).count().max(1) as f64;
         (1.0 + docs / df).ln()
     };
-    // (IDF 합, 맞은 수, Skill)
-    let mut scored: Vec<(f64, usize, &SkillInfo)> = candidates
+    // (IDF 합, 맞은 토큰, Skill)
+    let mut scored: Vec<(f64, Vec<&str>, &SkillInfo)> = candidates
         .iter()
         .zip(owns.iter())
         .map(|(s, own)| {
-            let hits: Vec<&String> = query.iter().filter(|t| own.contains(*t)).collect();
-            (hits.iter().map(|t| idf(t)).sum(), hits.len(), *s)
+            let hits: Vec<&str> = query.iter().filter(|t| own.contains(*t)).map(String::as_str).collect();
+            (hits.iter().map(|t| idf(&t.to_string())).sum(), hits, *s)
         })
         .collect();
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    let (weight, hits, skill) = *scored.first()?;
     let runner_up = scored.get(1).map_or(0.0, |r| r.0);
-    let coverage = hits as f64 / query.len() as f64;
-    (hits >= SKILL_AUTO_MIN_HITS
+    let (weight, hits, skill) = scored.into_iter().next()?;
+    let coverage = hits.len() as f64 / query.len() as f64;
+    // 흔한 낱말만 맞으면 고르지 않는다: 이름 토큰이 하나 맞거나, 흔하지 않은 토큰이 둘 이상 맞아야 한다.
+    let own_name = name_tokens(&skill.name);
+    let distinctive: Vec<&str> = hits.iter().copied().filter(|t| !is_generic(t)).collect();
+    let specific = distinctive.iter().any(|t| own_name.contains(*t)) || distinctive.len() >= SKILL_AUTO_MIN_DISTINCTIVE;
+    (hits.len() >= SKILL_AUTO_MIN_HITS
         && coverage >= SKILL_AUTO_MIN_COVERAGE
         && weight >= SKILL_AUTO_MIN_WEIGHT
-        && weight - runner_up >= SKILL_AUTO_MIN_MARGIN)
+        && weight - runner_up >= SKILL_AUTO_MIN_MARGIN
+        && specific)
         .then(|| (skill.clone(), SelectReason::Implicit))
 }
 
@@ -552,7 +582,8 @@ pub fn auto_skill_budget(context_length: u32) -> usize {
 
 /// 고른 Skill의 지침(`load_for_model`과 같은 글)에 머리 줄을 붙이고 예산에 맞춘다.
 pub fn build_auto_skill(skill: &SkillInfo, reason: SelectReason, context_length: u32, can_run_python: bool) -> Result<AutoSkill, String> {
-    let header = format!("[Skill: {} — {}]\n\n", skill.name, AUTO_HEADER_TAIL);
+    let tail = if reason == SelectReason::Sticky { STICKY_HEADER_TAIL } else { AUTO_HEADER_TAIL };
+    let header = format!("[Skill: {} — {}]\n\n", skill.name, tail);
     let body = load_for_model(skill, can_run_python)?;
     let budget = auto_skill_budget(context_length);
     let full = format!("{}{}", header, body);
@@ -587,7 +618,11 @@ fn message_auto_skill(m: &crate::store::ChatMessage) -> Option<(String, SelectRe
 pub fn sticky_from_history(history: &[crate::store::ChatMessage]) -> Option<String> {
     let mut answers = history.iter().rev().filter(|m| m.role == "assistant");
     let (name, reason) = message_auto_skill(answers.next()?)?;
-    let mut streak = usize::from(reason == SelectReason::Sticky);
+    if reason != SelectReason::Sticky {
+        // 바로 앞에서 새로 고른 Skill: 그 앞의 이어 쓰기 기록은 세지 않는다.
+        return Some(name);
+    }
+    let mut streak = 1;
     for m in answers {
         match message_auto_skill(m) {
             Some((n, SelectReason::Sticky)) if n.eq_ignore_ascii_case(&name) => streak += 1,
@@ -595,6 +630,18 @@ pub fn sticky_from_history(history: &[crate::store::ChatMessage]) -> Option<Stri
         }
     }
     (streak < SKILL_STICKY_TURNS).then_some(name)
+}
+
+/// 앞 Skill을 이번 요청에 이어 넣어도 되는지. 짧은 후속 요청(의미 있는 낱말 `SKILL_STICKY_UNRELATED_MIN_WORDS`개 미만)은 늘 그렇다.
+/// 그보다 길면 요청 토큰 중 흔하지 않은 것이 Skill 이름·설명·SKILL.md 본문에 하나라도 있어야 한다("파이썬으로 CSV 합치는 코드 짜 줘"는 주간 보고 Skill을 이어 넣지 않는다).
+pub fn sticky_fits(skill: &SkillInfo, message: &str) -> bool {
+    let words = message.split_whitespace().filter(|w| !meaningful_tokens(w).is_empty()).count();
+    if words < SKILL_STICKY_UNRELATED_MIN_WORDS {
+        return true;
+    }
+    let body = read_skill_md(&skill.dir).map(|t| parse_skill_md(&t).body).unwrap_or_default();
+    let own = meaningful_tokens(&format!("{} {} {}", skill.name.replace(['-', '_'], " "), skill.description, body));
+    meaningful_tokens(message).iter().any(|t| !is_generic(t) && own.contains(t))
 }
 
 /// 턴 시작 때 부른다: 켜져 있으면 쓸 수 있는 Skill 중 이번 메시지에 맞는 것을 골라 지침을 만든다.
@@ -614,7 +661,7 @@ pub fn auto_for_turn(
     let (skill, reason) = select_for_message(&skills, message).or_else(|| {
         let name = sticky_from_history(history)?;
         let s = skills.iter().find(|s| s.name.eq_ignore_ascii_case(&name))?.clone();
-        Some((s, SelectReason::Sticky))
+        sticky_fits(&s, message).then_some((s, SelectReason::Sticky))
     })?;
     build_auto_skill(&skill, reason, context_length, project.is_some()).ok()
 }
@@ -1324,6 +1371,8 @@ mod tests {
 
     const PDF_DESC: &str = "Use this skill whenever the user wants to do anything with PDF files. This includes reading or extracting text from PDFs.";
     const DOCX_DESC: &str = "Use this skill when the user wants to create, read, or edit Word documents (.docx).";
+    const XLSX_DESC: &str = "Use this skill any time a spreadsheet file is the primary input or output. Open, read, edit, or fix an existing .xlsx, .csv file; add columns, compute formulas, formatting, charting, cleaning messy data.";
+    const REVIEW_DESC: &str = "Review code changes for security, performance, and correctness. Trigger with a PR URL or diff, review this before I merge, is this code safe.";
 
     #[test]
     fn everyday_requests_do_not_pick_a_skill_even_when_it_is_the_only_one() {
@@ -1348,8 +1397,24 @@ mod tests {
             assert_eq!(picked(&english, q), None, "{}", q);
             assert_eq!(picked(&pdf_alone, q), None, "PDF 하나: {}", q);
         }
+        // 흔한 낱말(회사·업무·text·files·add…)만 맞으면 고르지 않는다.
+        for q in ["회사 업무 매뉴얼 만들어 줘", "회사 업무 규정 요약해 줘"] {
+            assert_eq!(picked(&three, q), None, "세 Skill: {}", q);
+            assert_eq!(picked(&alone, q), None, "Skill 하나: {}", q);
+        }
+        for q in ["write a function that reads text files", "find text in files with grep"] {
+            assert_eq!(picked(&english, q), None, "{}", q);
+            assert_eq!(picked(&pdf_alone, q), None, "PDF 하나: {}", q);
+        }
+        let xlsx_alone = vec![info("xlsx", XLSX_DESC)];
+        assert_eq!(picked(&xlsx_alone, "add columns to the table in the README"), None);
+        let review_alone = vec![info("code-review", REVIEW_DESC)];
+        assert_eq!(picked(&review_alone, "write a report on the code changes"), None, "이름 토큰이라도 흔한 낱말(code)이면 치지 않는다");
         // 맞는 요청은 여전히 고른다.
         assert_eq!(picked(&pdf_alone, "extract the text from this pdf"), Some(("pdf".into(), SelectReason::Implicit)));
+        assert_eq!(picked(&xlsx_alone, "add columns to this spreadsheet and compute formulas"), Some(("xlsx".into(), SelectReason::Implicit)));
+        assert_eq!(picked(&review_alone, "review this code for security issues"), Some(("code-review".into(), SelectReason::Implicit)));
+        assert_eq!(picked(&alone, "주간 보고 써 줘"), Some(("weekly-report".into(), SelectReason::Implicit)));
         assert_eq!(picked(&alone, "이번 주 주간 업무 보고서를 만들어 줘"), Some(("weekly-report".into(), SelectReason::Implicit)));
     }
 
@@ -1381,6 +1446,7 @@ mod tests {
     fn follow_ups_keep_the_auto_loaded_skill_for_three_turns() {
         let first = answer_with(vec![auto("weekly-report", SelectReason::Implicit).tool_record()]);
         let sticky = || answer_with(vec![auto("weekly-report", SelectReason::Sticky).tool_record()]);
+        let first_again = || answer_with(vec![auto("weekly-report", SelectReason::Implicit).tool_record()]);
         let mut h = vec![user("주간 보고서"), first];
         assert_eq!(sticky_from_history(&h).as_deref(), Some("weekly-report"));
         h.push(user("계속"));
@@ -1390,9 +1456,43 @@ mod tests {
             h.push(user("계속"));
             assert_eq!(sticky_from_history(&h).is_some(), n < SKILL_STICKY_TURNS, "이어 쓴 턴 {}", n);
         }
+        // 이어 쓰기 기록 뒤에 새로 고른 Skill이 있으면 그 앞 기록은 세지 않는다(I,S,S,S,I 다음 "계속"은 이어 쓴다).
+        let mut fresh = vec![user("주간 보고서"), first_again()];
+        for _ in 0..3 {
+            fresh.push(user("계속"));
+            fresh.push(sticky());
+        }
+        fresh.push(user("새 주간 보고서"));
+        fresh.push(first_again());
+        fresh.push(user("계속"));
+        assert_eq!(sticky_from_history(&fresh).as_deref(), Some("weekly-report"));
+        fresh.push(sticky());
+        fresh.push(user("계속"));
+        assert_eq!(sticky_from_history(&fresh).as_deref(), Some("weekly-report"), "새로 고른 뒤 이어 쓴 턴은 1");
         // 바로 앞 답변에 자동 기록이 없으면 이어 쓰지 않는다.
         assert_eq!(sticky_from_history(&[user("a"), answer_with(vec![]), user("b")]), None);
         assert_eq!(sticky_from_history(&[]), None);
+    }
+
+    #[test]
+    fn sticky_skill_gets_its_own_header_and_is_skipped_for_a_different_task() {
+        let root = tempfile::tempdir().unwrap();
+        let body = "# 주간 업무 보고서 양식\n\n1. `## 1. 이번 주 한 일` - 표로 작성 (열: 요일, 내용, 결과)\n2. `## 2. 다음 주 할 일` - 번호 목록\n3. `## 3. 요청·이슈`\n파일은 `reports/주간보고_YYYY-MM-DD.md` (보고서를 쓰는 날짜)로 저장합니다.";
+        write(&root.path().join(".skills/fit-weekly/SKILL.md"), &format!("---\nname: fit-weekly\ndescription: {}\n---\n\n{}", WEEKLY_DESC, body));
+        let ctx = Some(("p-fit", root.path()));
+        let first = auto_for_turn(ctx, "이번 주 주간 업무 보고서를 만들어 줘", &[], 32768, true).unwrap();
+        assert_eq!(first.reason, SelectReason::Implicit);
+        assert!(first.text.starts_with(&format!("[Skill: fit-weekly — {}]", AUTO_HEADER_TAIL)), "{}", first.text);
+        let history = vec![user("이번 주 주간 업무 보고서를 만들어 줘"), answer_with(vec![first.tool_record()])];
+        for q in ["계속", "날짜만 바꿔 줘", "3번 섹션 다시 써 줘", "다음 주 할 일 표에 결과 열을 추가해 줘"] {
+            let s = auto_for_turn(ctx, q, &history, 32768, true).unwrap_or_else(|| panic!("이어 써야 한다: {}", q));
+            assert_eq!(s.reason, SelectReason::Sticky, "{}", q);
+            assert!(s.text.starts_with(&format!("[Skill: fit-weekly — {}]", STICKY_HEADER_TAIL)), "{}", s.text);
+            assert!(!s.text.contains(AUTO_HEADER_TAIL), "이어 쓰기에는 '맞는 Skill로 판단' 문구가 없다");
+        }
+        for q in ["파이썬으로 CSV 합치는 코드 짜 줘", "회사 홈페이지 소개 문구 세 줄로 써 줘"] {
+            assert!(auto_for_turn(ctx, q, &history, 32768, true).is_none(), "다른 일에는 이어 넣지 않는다: {}", q);
+        }
     }
 
     #[test]
