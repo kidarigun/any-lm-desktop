@@ -42,7 +42,7 @@
 **Interfaces:**
 - Produces: 이후 모든 작업이 따르는 `AGENTS.md` 규칙과 `STATUS.md` 형식.
 
-- [ ] **Step 1: 복제와 브랜치**
+- [x] **Step 1: 복제와 브랜치**
 
 ```powershell
 git clone C:\DOCS\EXAONE C:\DOCS\any-lm-desktop
@@ -51,7 +51,7 @@ git checkout -B main origin/feature/agent-loop-and-document-canvas
 git log -1 --format=%h   # e885b02 이어야 한다
 ```
 
-- [ ] **Step 2: 원격 정리**
+- [x] **Step 2: 원격 정리**
 
 ```powershell
 git remote remove origin
@@ -61,12 +61,12 @@ git branch -D feature/agent-loop-and-document-canvas 2>$null
 git remote -v   # upstream fetch = github URL, push = DISABLED
 ```
 
-- [ ] **Step 3: 기준 상태 확인 (아무것도 고치기 전)**
+- [x] **Step 3: 기준 상태 확인 (아무것도 고치기 전)**
 
 Run: `npm install` → `npm test` → `npx tsc --noEmit` → `cd src-tauri; cargo test --lib`
 Expected: 모두 통과. 실패하면 고치지 말고 실패 목록을 `docs/handoff/STATUS.md`의 "기준 상태"에 적는다(이후 작업이 새로 깬 것과 구분하려고).
 
-- [ ] **Step 4: 인계 파일 작성**
+- [x] **Step 4: 인계 파일 작성**
 
 `AGENTS.md`에 들어갈 절(이 순서): ① 프로젝트 한 단락(스펙 1절 요약) ② 폴더 지도(`src-tauri/src/*.rs`, `src/*` 하위 폴더 한 줄씩) ③ 빌드·테스트 명령(Global Constraints 마지막 줄) ④ 코딩 규칙(Global Constraints 2~5줄을 그대로) ⑤ **인계 규칙**: 스펙 6.4 "인계 규칙" 1~7을 그대로 옮긴다 ⑥ 원본 수정 가져오기 절차(`git fetch upstream`, `git cherry-pick <hash>`, 충돌 기록은 LOG에).
 `CLAUDE.md` 내용은 정확히 한 줄 `@AGENTS.md`. `GEMINI.md`는 `이 저장소의 작업 지침은 AGENTS.md에 있습니다. 먼저 AGENTS.md를 읽고 그대로 따르세요.` 한 줄.
@@ -74,7 +74,7 @@ Expected: 모두 통과. 실패하면 고치지 말고 실패 목록을 `docs/ha
 `START.md`: 도구마다 붙여 넣을 시작 문구 — "AGENTS.md와 docs/handoff/STATUS.md를 읽고, STATUS의 '다음 할 일'부터 이어서 진행해. 시작 전에 git status와 git log -5로 상태가 STATUS와 맞는지 확인해." — 와 마무리 문구 — "지금 단계를 마무리할 수 있으면 마무리하고, 아니면 wip 커밋을 하고 STATUS의 '다음 할 일'에 정확한 위치를 적은 뒤 LOG에 한 줄 남겨." 
 `0001-fork-with-history.md`: 스펙 4절 표와 선택 이유.
 
-- [ ] **Step 5: 스펙·계획 옮기고 원본 설계 문서 삭제, 커밋**
+- [x] **Step 5: 스펙·계획 옮기고 원본 설계 문서 삭제, 커밋**
 
 ```powershell
 git add -A
