@@ -15,6 +15,7 @@ const status = (over: Partial<KnowledgeStatus> = {}): KnowledgeStatus => ({
   folders: [],
   error: null,
   overLimit: false,
+  overEntryLimit: false,
   ...over,
 });
 
@@ -31,6 +32,9 @@ describe("knowledgeFormat", () => {
     expect(knowledgeStatusLine(status({ files: 3000, chunks: 9000, lastIndexed: "x", overLimit: true }))).toContain(
       "파일 수 한도(3,000개)에 닿아 나머지는 색인하지 않음"
     );
+    const entries = knowledgeStatusLine(status({ files: 10, chunks: 20, lastIndexed: "x", overLimit: true, overEntryLimit: true }));
+    expect(entries).toContain("훑기 항목 수 한도(폴더·파일 200,000개)에 닿아 나머지는 색인하지 않음");
+    expect(entries).not.toContain("3,000개");
   });
   it("formats the time as YYYY-MM-DD HH:MM in local time", () => {
     const d = new Date(2026, 10, 3, 7, 4);

@@ -32,6 +32,7 @@
 - 프로젝트 지침 편집기(스펙 4절): 완료. 프로젝트 화면 지침 카드 [편집] → 전용 큰 모달(`src/project/InstructionsEditor.tsx`, 규칙 `instructionsFormat.ts`: 글자·약 토큰(1.5자)·로드된 컨텍스트 대비 %, 10% 초과 노란 경고, 서식 예시 4종 넣기/덧붙이기, Esc=취소(변경 있으면 확인), 저장 오류는 모달 안). 컨텍스트를 모르면 토큰만 표시. 프로젝트 설정 창의 작은 입력란은 유지하고 [큰 편집기로 열기] 링크 추가. 메모리 항목은 저장 때 줄바꿈·연속 공백을 한 칸으로 합친다.
 - 프로젝트 메모리(스펙 `2026-11-23-project-memory-knowledge.md` 3절): 완료(4절 지침 편집기, 5절 지식 폴더도 아래 줄에서 완료). 구현 위치: `store.rs`(`Project.memory`, `MemoryItem`), `memory.rs`(한도·중복·프롬프트 절), `exaone.rs`(`remember` 도구 `remember_tool`, 프롬프트 절 `build_system_prompt(..., context_length)`), `lib.rs`(`upsert_project`, `*_project_memory` 명령), `src/project/`(ProjectMemoryCard, memoryFormat). 메모리는 턴 시작 때의 프로젝트 복사본으로 프롬프트에 들어가므로 같은 턴 중에 저장한 것은 다음 턴부터 프롬프트에 보인다. 하니스는 앱 상태가 없어 `remember`를 실행하지 못한다.
 - 지식 폴더(스펙 5절): 완료. `knowledge.rs`(훑기·건너뛰기·한도, 조각 1,200자/겹침 200, 토큰 = 영문·숫자 소문자 + 한글 2글자 묶음, BM25 k1 1.2·b 0.75, 색인 `앱 데이터\knowledge\<id>.json`에 파일별 크기·수정 시각, 깨지거나 옛 형식이면 다시 만듦), `Project.knowledge_folders`, 명령 `add_knowledge_folder`·`remove_knowledge_folder`·`reindex_knowledge`·`knowledge_status`(색인은 뒤에서, 이벤트 `anylm-knowledge-status`), 턴 시작(보내기·다시 보내기·승인 뒤 이어가기) 빠른 갱신(5초, 남은 것은 다음으로) + 마지막 사용자 메시지로 `[참고 자료]`(마지막 사용자 메시지 바로 앞의 user+assistant 한 쌍, 저장 안 함, min(12000, 컨텍스트×1.5×0.15)자, 6조각, `### 출처: <경로>`; 줄이기 기준·자동 압축 어림에도 넣음. 턴은 갱신을 최대 1.5초만 기다리고 메모리의 색인으로 찾음), `search_knowledge` 도구(승인 없음, 도구 출력 상한, 지식 폴더 있을 때만 목록에). 화면은 프로젝트 화면 "지식 폴더" 카드(`src/project/KnowledgeCard.tsx`). 세부 결정은 `docs/decisions/0005-knowledge-folders.md`. 하니스 시나리오 `harness/knowledge.json`(knowledgeFiles/knowledgeFolders). 실측: 그때 LM Studio에 로드돼 있던 모델이 qwen3.6-35b-a3b(32768)뿐이어서(9B는 로드 안 됨, 로드·언로드하지 않음) 35B로 확인 — 지식 폴더에만 있는 제품 코드의 출시일과 출처 경로가 답에 나옴(3/3, 4/4). 9B 실측은 아직.
+- 내장 웹 검색 MCP(결정 0006): 완료. `src/catalog/builtin.ts`에 공식 서버 8개(Tavily·Exa·Brave·Perplexity·Firecrawl·Kagi·Jina·Linkup, 분류 "웹 검색"), `mergeCatalogs`(내장 먼저·같은 id는 내장 우선·원격 `official` 무시), 찾아보기는 원격 목록이 없어도 내장 항목과 오류 띠를 보여 주고 카드에 "공식" 표시. 연결된 서버의 `catalogId`가 내장 검색 항목이면 `[MCP]` 절에 최신 정보는 웹 검색으로 찾고 URL을 밝히라는 한 줄(`ToolSpec.catalog_id`). 키 없이 Exa 실측(`cargo test --lib live_exa -- --ignored`): tools/list에 web_search_exa·web_fetch_exa, 검색 결과 본문 반환. 키가 필요한 제공사는 호출해 보지 않았다.
 - 지침 편집기 후속: 프로젝트 설정 창의 [큰 편집기로 열기]는 창의 값이 저장된 값과 같을 때만 쓸 수 있고(다르면 "큰 편집기: 먼저 저장하세요"), 화면의 프로젝트를 바꾸지 않는다. 편집기 Esc는 포커스가 창 밖이어도 듣고(창이 열려 있는 동안만 window 리스너), `role="dialog" aria-modal="true"`.
 
 ## 다음 할 일
@@ -51,6 +52,8 @@
    - 그 밖에 검토의 "Can stay" 목록(서버 상태는 아무 HTTP 응답이면 켜짐으로 봄 등).
 
 ## 마지막 확인
+2026-11-24, 지식 폴더 검토 2차 수정 뒤: `npm test` → 통과 (23 파일, 142 통과, 1 건너뜀) · `npx tsc --noEmit` → 오류 없음 · `cd src-tauri && cargo test --lib` → 224 통과, 0 실패, 10 무시 · `cargo check --all-targets` 경고 없음.
+
 2026-11-24, 지식 폴더 검토 1차 수정 뒤: `npm test` → 통과 (23 파일, 133 통과, 1 건너뜀) · `npx tsc --noEmit` → 오류 없음 · `cd src-tauri && cargo test --lib` → 219 통과, 0 실패, 9 무시 · `cargo check --all-targets` 경고 없음. 하니스 `harness/knowledge.json`(qwen3.6-35b-a3b 32768, 로드돼 있던 그대로) 4/4.
 
 2026-11-23, 지식 폴더 뒤: `npm test` → 통과 (23 파일, 133 통과, 1 건너뜀) · `npx tsc --noEmit` → 오류 없음 · `cd src-tauri && cargo test --lib` → 211 통과, 0 실패, 9 무시 · `npm run build` 성공. LM Studio는 qwen3.6-35b-a3b(32768)가 로드된 상태 그대로(로드·언로드 안 함).
@@ -80,8 +83,7 @@
 작업을 시작하기 전(복제 직후, e885b02)의 테스트 결과다. 이후 실패가 나오면 이 기준과 비교해 새로 깬 것인지 구분한다.
 - `npm install`: 성공
 - `npm test`: 16 파일 통과, 102 통과 / 1 건너뜀 / 실패 0
-- `npx tsc --noEmit`: 오류 0- 내장 웹 검색 MCP(결정 0006): 완료. `src/catalog/builtin.ts`에 공식 서버 8개(Tavily·Exa·Brave·Perplexity·Firecrawl·Kagi·Jina·Linkup, 분류 "웹 검색"), `mergeCatalogs`(내장 먼저·같은 id는 내장 우선·원격 `official` 무시), 찾아보기는 원격 목록이 없어도 내장 항목과 오류 띠를 보여 주고 카드에 "공식" 표시. 연결된 서버의 `catalogId`가 내장 검색 항목이면 `[MCP]` 절에 최신 정보는 웹 검색으로 찾고 URL을 밝히라는 한 줄(`ToolSpec.catalog_id`). 키 없이 Exa 실측(`cargo test --lib live_exa -- --ignored`): tools/list에 web_search_exa·web_fetch_exa, 검색 결과 본문 반환. 키가 필요한 제공사는 호출해 보지 않았다.
-
+- `npx tsc --noEmit`: 오류 0
 - `cargo test --lib`: 121 통과 / 실패 0 / 7 무시(ignored)
 
 ## 수동 확인 목록

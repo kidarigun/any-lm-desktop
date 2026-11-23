@@ -101,6 +101,8 @@ pub struct KnowledgeIndex {
     pub missing_folders: Vec<String>,
     /// 파일 수 한도(또는 훑기 항목 상한)에 닿아 나머지는 훑지 않았는지
     pub over_limit: bool,
+    /// 그중 훑기 항목(폴더·파일) 상한 때문이었는지(아니면 지원 파일 수 한도)
+    pub over_entry_limit: bool,
 }
 
 /// 검색 결과 조각
@@ -136,6 +138,8 @@ pub struct ScanResult {
     pub missing_folders: Vec<String>,
     /// 파일 수 한도·훑기 항목 상한에 닿아 거기서 훑기를 멈췄는지(넘은 파일은 하나씩 적지 않는다)
     pub over_limit: bool,
+    /// 그중 훑기 항목 상한 때문이었는지
+    pub over_entry_limit: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -157,8 +161,8 @@ impl Default for Limits {
     }
 }
 
-/// 글 추출 실패. `Transient`(다리 시간 초과·변환기 없음·파일 잠김 등)는 실패로 기억하지 않고 다음 갱신에서
-/// 다시 시도한다. `Permanent`(UTF-8 아님·변환 실패 등 파일 탓)만 크기·수정 시각과 함께 기억한다.
+/// 글 추출 실패. `Transient`(변환기 없음·다리 끊김·파일 잠김 등)는 실패로 기억하지 않고 다음 갱신에서
+/// 다시 시도한다. `Permanent`(UTF-8 아님·읽기 권한 없음·변환 실패·변환 시간 초과 등 파일 탓)만 크기·수정 시각과 함께 기억한다.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExtractError {
     Permanent(String),
@@ -575,6 +579,7 @@ pub fn scan_folders_with(folders: &[String], limits: &Limits) -> ScanResult {
                 entries_seen += 1;
                 if entries_seen > limits.max_entries {
                     res.over_limit = true;
+                    res.over_entry_limit = true;
                     continue 'walk;
                 }
                 let Ok(ft) = e.file_type() else { continue };
@@ -645,6 +650,7 @@ pub struct RefreshPlan {
     pub scan_skipped: Vec<SkippedFile>,
     pub missing_folders: Vec<String>,
     pub over_limit: bool,
+    pub over_entry_limit: bool,
 }
 
 /// 옛 색인과 훑기 결과를 비교해 무엇을 다시 추출할지 정한다. `force`면 모두 다시 추출한다.
@@ -668,6 +674,7 @@ pub fn plan_refresh(old: &KnowledgeIndex, folders: &[String], scan: ScanResult, 
         scan_skipped: scan.skipped,
         missing_folders: scan.missing_folders,
         over_limit: scan.over_limit,
+        over_entry_limit: scan.over_entry_limit,
         ..Default::default()
     };
     let mut matched: HashSet<String> = HashSet::new();
@@ -767,12 +774,14 @@ where
     };
     let scan_skips_changed = skip_keys(&old.skipped) != skip_keys(&scan.skipped);
     let mut plan = plan_refresh(old, folders, scan, mode == RefreshMode::Rebuild);
-    let mut changed = mode != RefreshMode::Quick
+    // 다시 색인(Rebuild)만 늘 저장한다. 빠른·전체 갱신은 바뀐 것이 있을 때만 저장한다(색인 시각도 그때만 바뀐다).
+    let mut changed = mode == RefreshMode::Rebuild
         || old.version != INDEX_VERSION
         || plan.removed > 0
         || scan_skips_changed
         || old.missing_folders != plan.missing_folders
-        || old.over_limit != plan.over_limit;
+        || old.over_limit != plan.over_limit
+        || old.over_entry_limit != plan.over_entry_limit;
     let mut files = std::mem::take(&mut plan.keep);
     let mut skipped = std::mem::take(&mut plan.keep_skipped);
     skipped.extend(std::mem::take(&mut plan.scan_skipped));
@@ -829,6 +838,7 @@ where
             last_indexed,
             missing_folders: plan.missing_folders,
             over_limit: plan.over_limit,
+            over_entry_limit: plan.over_entry_limit,
         },
         changed,
         deferred,
@@ -888,15 +898,22 @@ pub struct KnowledgeStatus {
     pub last_indexed: Option<String>,
     pub folders: Vec<FolderStatus>,
     pub error: Option<String>,
-    /// 파일 수 한도에 닿아 나머지는 색인하지 않았는지
+    /// 한도에 닿아 나머지는 색인하지 않았는지
     pub over_limit: bool,
+    /// 그 한도가 훑기 항목(폴더·파일 200,000개) 상한이었는지(아니면 지원 파일 3,000개)
+    pub over_entry_limit: bool,
 }
 
 /// 색인과 지금 폴더 목록으로 개수를 센다(목록에 없는 폴더의 조각은 세지 않는다).
 pub fn status_of(index: &KnowledgeIndex, folders: &[String]) -> KnowledgeStatus {
     let missing: HashSet<String> = index.missing_folders.iter().map(|f| path_key(f)).collect();
     let mut st =
-        KnowledgeStatus { last_indexed: index.last_indexed.clone(), over_limit: index.over_limit, ..Default::default() };
+        KnowledgeStatus {
+            last_indexed: index.last_indexed.clone(),
+            over_limit: index.over_limit,
+            over_entry_limit: index.over_entry_limit,
+            ..Default::default()
+        };
     for folder in folders {
         let k = path_key(folder);
         let files: Vec<&IndexedFile> = index.files.iter().filter(|f| path_key(&f.folder) == k).collect();
@@ -1103,16 +1120,33 @@ pub async fn extract_file<R: Runtime>(app: &AppHandle<R>, f: &ScannedFile) -> Re
     let bytes = tokio::task::spawn_blocking(move || std::fs::read(&path))
         .await
         .map_err(|e| ExtractError::Transient(e.to_string()))?
-        .map_err(|e| ExtractError::Transient(format!("읽을 수 없음: {}", e)))?;
+        .map_err(read_error)?;
     match f.kind {
         SourceKind::Text => decode_text(bytes).map_err(ExtractError::Permanent),
-        SourceKind::Doc(kind) => crate::doc_bridge::extract_text(app, kind, &bytes).await.map_err(|e| {
-            if crate::doc_bridge::is_transient_error(&e) {
-                ExtractError::Transient(e)
-            } else {
-                ExtractError::Permanent(e)
-            }
-        }),
+        SourceKind::Doc(kind) => crate::doc_bridge::extract_text(app, kind, &bytes).await.map_err(bridge_error),
+    }
+}
+
+/// 파일 읽기 오류: 권한 없음 등 다시 해도 같은 것은 `Permanent`, 잠김·사라짐 등은 `Transient`.
+fn read_error(e: std::io::Error) -> ExtractError {
+    use std::io::ErrorKind::*;
+    match e.kind() {
+        PermissionDenied => ExtractError::Permanent("읽기 권한이 없음".to_string()),
+        InvalidInput | InvalidData | Unsupported => ExtractError::Permanent(format!("읽을 수 없음: {}", e)),
+        _ => ExtractError::Transient(format!("읽을 수 없음: {}", e)),
+    }
+}
+
+/// 문서 변환 오류: 변환기 없음·다리 끊김·보내기 실패만 `Transient`. 변환 시간 초과(90초)는 그 파일이 늘 그럴 수 있으므로
+/// `Permanent`("변환 시간 초과")로 크기·수정 시각과 함께 기억해 바뀌지 않으면 다시 보내지 않는다.
+/// (빠른 갱신의 5초 기한으로 끊긴 것은 여기까지 오지 않고 미룸이 된다.)
+fn bridge_error(e: String) -> ExtractError {
+    if crate::doc_bridge::is_timeout_error(&e) {
+        ExtractError::Permanent(format!("변환 시간 초과({}초)", crate::doc_bridge::BRIDGE_TIMEOUT.as_secs()))
+    } else if crate::doc_bridge::is_transient_error(&e) {
+        ExtractError::Transient(e)
+    } else {
+        ExtractError::Permanent(e)
     }
 }
 
@@ -1178,6 +1212,11 @@ pub async fn refresh_project<R: Runtime>(
                     mgr.set_loaded(project_id, loaded);
                 }
                 Err(e) => error = Some(e.to_string()),
+            }
+            if project_exists(app, project_id) == Some(false) {
+                // 확인과 저장 사이에 프로젝트가 지워졌다(지우기의 forget이 먼저 돌았을 수 있다): 다시 지운다.
+                mgr.forget(project_id);
+                return Some(deferred);
             }
         }
         match current_folders(app, project_id) {

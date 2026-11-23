@@ -15,7 +15,12 @@ export function knowledgeStatusLine(s: KnowledgeStatus): string {
   const parts = [`파일 ${s.files}개`, `조각 ${s.chunks}개`, `건너뜀 ${s.skipped}개`];
   if (s.lastIndexed) parts.push(`마지막 색인 ${formatIndexedAt(s.lastIndexed)}`);
   if (s.deferred > 0) parts.push(`다음 질문 때 이어서 색인 ${s.deferred}개`);
-  if (s.overLimit) parts.push("파일 수 한도(3,000개)에 닿아 나머지는 색인하지 않음");
+  if (s.overLimit)
+    parts.push(
+      s.overEntryLimit
+        ? "훑기 항목 수 한도(폴더·파일 200,000개)에 닿아 나머지는 색인하지 않음"
+        : "파일 수 한도(3,000개)에 닿아 나머지는 색인하지 않음"
+    );
   return parts.join(" · ");
 }
 

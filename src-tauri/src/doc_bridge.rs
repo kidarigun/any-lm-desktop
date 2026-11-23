@@ -14,7 +14,7 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 pub const REQUEST_EVENT: &str = "doc-bridge-request";
-const BRIDGE_TIMEOUT: Duration = Duration::from_secs(90);
+pub const BRIDGE_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// 웹뷰 변환기가 처리하는 문서 형식
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -104,13 +104,29 @@ const ERR_CLOSED: &str = "문서 변환기가 응답 없이 종료되었습니�
 const ERR_TIMEOUT_PREFIX: &str = "문서 변환이 ";
 const ERR_TIMEOUT_SUFFIX: &str = "초 안에 끝나지 않았습니다.";
 
-/// 다리 자체의 일시적 오류(변환기 없음·보내기 실패·응답 없이 종료·시간 초과)인지.
-/// 이런 오류는 파일 탓이 아니므로 다음에 다시 시도할 수 있다. 변환기가 돌려준 변환 실패는 아니다.
+/// 다리 자체의 일시적 오류(변환기 없음·보내기 실패·응답 없이 종료)인지.
+/// 이런 오류는 파일 탓이 아니므로 다음에 다시 시도할 수 있다. 변환기가 돌려준 변환 실패와
+/// 시간 초과(`is_timeout_error`: 그 파일이 늘 오래 걸릴 수 있다)는 아니다.
 pub fn is_transient_error(err: &str) -> bool {
-    err == ERR_UNAVAILABLE
-        || err == ERR_CLOSED
-        || err.starts_with(ERR_SEND_PREFIX)
-        || (err.starts_with(ERR_TIMEOUT_PREFIX) && err.ends_with(ERR_TIMEOUT_SUFFIX))
+    err == ERR_UNAVAILABLE || err == ERR_CLOSED || err.starts_with(ERR_SEND_PREFIX)
+}
+
+/// 변환이 `BRIDGE_TIMEOUT` 안에 끝나지 않았다는 오류인지.
+pub fn is_timeout_error(err: &str) -> bool {
+    err.starts_with(ERR_TIMEOUT_PREFIX) && err.ends_with(ERR_TIMEOUT_SUFFIX)
+}
+
+/// 기다리던 요청을 `pending`에서 뺀다(끝나든, 시간이 지나든, 부른 쪽이 기다림을 버리든).
+struct PendingGuard<'a> {
+    pending: &'a Mutex<HashMap<String, oneshot::Sender<BridgeReply>>>,
+    id: String,
+}
+
+impl Drop for PendingGuard<'_> {
+    fn drop(&mut self) {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        pending.remove(&self.id);
+    }
 }
 
 async fn request<R: Runtime>(app: &AppHandle<R>, mut req: BridgeRequest) -> Result<BridgeReply, String> {
@@ -123,14 +139,13 @@ async fn request<R: Runtime>(app: &AppHandle<R>, mut req: BridgeRequest) -> Resu
         .lock()
         .map_err(|e| e.to_string())?
         .insert(id.clone(), tx);
+    let _guard = PendingGuard { pending: &bridge.pending, id };
 
     if let Err(e) = app.emit(REQUEST_EVENT, req) {
-        bridge.pending.lock().map_err(|e| e.to_string())?.remove(&id);
         return Err(format!("{}: {}", ERR_SEND_PREFIX, e));
     }
 
     let result = tokio::time::timeout(BRIDGE_TIMEOUT, rx).await;
-    bridge.pending.lock().map_err(|e| e.to_string())?.remove(&id);
     let reply = match result {
         Ok(Ok(reply)) => reply,
         Ok(Err(_)) => return Err(ERR_CLOSED.to_string()),
@@ -287,11 +302,25 @@ mod tests {
         // 다리가 없으면 일시적 오류
         let err = extract_text(app.handle(), DocKind::Pdf, b"x").await.unwrap_err();
         assert!(is_transient_error(&err), "{err}");
-        assert!(is_transient_error(&format!("문서 변환이 {}초 안에 끝나지 않았습니다.", BRIDGE_TIMEOUT.as_secs())));
+        // 시간 초과는 일시 오류가 아니다(늘 오래 걸리는 파일을 매번 다시 보내지 않게)
+        let timeout = format!("문서 변환이 {}초 안에 끝나지 않았습니다.", BRIDGE_TIMEOUT.as_secs());
+        assert!(!is_transient_error(&timeout) && is_timeout_error(&timeout));
+        assert!(!is_timeout_error(&err));
         assert!(is_transient_error("문서 변환기가 응답 없이 종료되었습니다."));
         assert!(is_transient_error("문서 변환 요청을 보내지 못했습니다: closed"));
         // 변환기가 돌려준 실패(파일 탓)는 아니다
         assert!(!is_transient_error("문서 변환에 실패했습니다."));
         assert!(!is_transient_error("PDF를 읽을 수 없습니다: Invalid PDF structure"));
+    }
+
+    #[tokio::test]
+    async fn abandoned_requests_are_removed_from_pending() {
+        let app = tauri::test::mock_app();
+        app.manage(DocBridge::default());
+        let bridge = app.state::<DocBridge>();
+        // 응답이 오지 않는 요청을 부른 쪽이 기다림을 버리면(빠른 갱신 기한 등) pending에 남지 않는다
+        let r = tokio::time::timeout(Duration::from_millis(50), extract_text(app.handle(), DocKind::Pdf, b"x")).await;
+        assert!(r.is_err(), "응답이 없으니 기다림이 끝나야 한다");
+        assert!(bridge.pending.lock().unwrap().is_empty());
     }
 }

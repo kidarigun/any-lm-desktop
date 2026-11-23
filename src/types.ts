@@ -66,8 +66,10 @@ export interface KnowledgeStatus {
   lastIndexed: string | null;
   folders: KnowledgeFolderStatus[];
   error: string | null;
-  /** 파일 수 한도(3,000개)에 닿아 나머지는 색인하지 않았는지 */
+  /** 한도에 닿아 나머지는 색인하지 않았는지 */
   overLimit: boolean;
+  /** 그 한도가 훑기 항목(폴더·파일 200,000개) 상한이었는지(아니면 지원 파일 3,000개) */
+  overEntryLimit: boolean;
 }
 
 export interface MemoryItem {

@@ -260,7 +260,7 @@ fn scan_skips_build_dirs_unknown_types_and_counts_limits() {
     let limits2 = Limits { max_files: 2, ..limits };
     let scan = scan_folders_with(&[folder.clone(), root.join("없는 폴더").to_string_lossy().to_string()], &limits2);
     assert_eq!(scan.files.len(), 2);
-    assert!(scan.over_limit);
+    assert!(scan.over_limit && !scan.over_entry_limit, "파일 수 한도");
     assert_eq!(scan.skipped.len(), 1, "크기로 건너뛴 big.txt만: {:?}", scan.skipped);
     assert_eq!(scan.missing_folders.len(), 1, "한도 뒤의 폴더도 없는지는 확인한다");
 
@@ -280,7 +280,7 @@ fn scan_entry_limit_stops_on_folders_of_unsupported_files() {
     write(&dir.path().join("zz.md"), "끝");
     let limits = Limits { max_files: 100, text_max_bytes: 1_000, doc_max_bytes: 1_000, max_entries: 20 };
     let scan = scan_folders_with(&[dir.path().to_string_lossy().to_string()], &limits);
-    assert!(scan.over_limit);
+    assert!(scan.over_limit && scan.over_entry_limit, "항목 수 상한");
     assert!(scan.files.is_empty() && scan.skipped.is_empty());
     let limits = Limits { max_entries: 1_000, ..limits };
     let scan = scan_folders_with(&[dir.path().to_string_lossy().to_string()], &limits);
@@ -481,21 +481,65 @@ async fn turn_context_uses_the_cached_index_and_never_reads_the_file_on_the_turn
     let folder = kb.to_string_lossy().to_string();
     let app = app_with_projects(dir.path(), &["p1"], &folder);
     let project = app.state::<crate::AppState>().db.lock().unwrap().projects[0].clone();
-    // 기다림이 0이면 이번 턴은 (메모리에 색인이 없으니) 참고 자료 없이 바로 간다
+    let mgr = app.state::<KnowledgeManager>();
+    // 디스크에는 사실이 든 색인 파일이 있지만 메모리에는 아직 없다
+    let ok = |f: ScannedFile| async move { std::fs::read_to_string(&f.path).map_err(|e| ExtractError::Permanent(e.to_string())) };
+    let built = refresh_index(&KnowledgeIndex::default(), &[folder.clone()], RefreshMode::Full, ok, |_, _| {}).await;
+    std::fs::create_dir_all(dir.path().join("data").join("knowledge")).unwrap();
+    write_index(&mgr.index_path("p1"), &built.index).unwrap();
+    assert!(mgr.cached("p1").is_none());
+    // 다른 색인이 돌고 있으면(갱신이 바로 돌아옴) 턴은 색인 파일을 직접 읽지 않고 참고 자료 없이 간다
+    assert!(mgr.try_begin("p1"));
     let started = std::time::Instant::now();
-    let sec = context_for_turn_within(app.handle(), Some(&project), "ZK-7741 출시일", 32768, Duration::ZERO).await;
-    assert!(started.elapsed() < Duration::from_millis(500));
-    let _ = sec; // 아주 빠른 기계에서는 이미 끝났을 수도 있다
-    // 뒤의 갱신이 끝나면 다음 턴부터 찾는다
-    let mut sec = String::new();
-    for _ in 0..100 {
-        sec = context_for_turn_within(app.handle(), Some(&project), "ZK-7741 출시일", 32768, Duration::from_secs(2)).await;
-        if !sec.is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    let sec = context_for_turn_within(app.handle(), Some(&project), "ZK-7741 출시일", 32768, Duration::from_secs(2)).await;
+    assert!(started.elapsed() < Duration::from_millis(500), "{:?}", started.elapsed());
+    assert_eq!(sec, "", "턴에서 색인 파일을 읽지 않는다");
+    assert!(mgr.cached("p1").is_none(), "색인 파일을 메모리로 올리지도 않았다");
+    // 갱신이 끝난 뒤의 턴: 갱신이 파일을 읽어 메모리에 올리고, 턴은 그것으로 찾는다
+    mgr.finish("p1", None, 0);
+    let sec = context_for_turn_within(app.handle(), Some(&project), "ZK-7741 출시일", 32768, Duration::from_secs(2)).await;
     assert!(sec.starts_with("[참고 자료]") && sec.contains("2027년 3월 14일"), "{sec}");
+    assert!(mgr.cached("p1").is_some());
+}
+
+#[tokio::test]
+async fn bridge_timeout_is_remembered_as_failed_in_full_refresh_and_not_resent() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(&root.join("huge.pdf"), "%PDF");
+    let folders = vec![root.to_string_lossy().to_string()];
+    let calls = AtomicUsize::new(0);
+    let slow = |_f: ScannedFile| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        async move { Err::<String, ExtractError>(bridge_error("문서 변환이 90초 안에 끝나지 않았습니다.".to_string())) }
+    };
+    let out = refresh_index(&KnowledgeIndex::default(), &folders, RefreshMode::Full, slow, |_, _| {}).await;
+    assert_eq!(out.deferred, 0);
+    assert_eq!(out.index.skipped.len(), 1);
+    assert!(out.index.skipped[0].failed && out.index.skipped[0].reason.contains("변환 시간 초과"), "{:?}", out.index.skipped);
+    // 바뀌지 않았으면 빠른 갱신·전체 갱신 모두 다시 보내지 않고, 전체 갱신도 색인을 다시 쓰지 않는다
+    let q = refresh_index(&out.index, &folders, RefreshMode::Quick, slow, |_, _| {}).await;
+    let f = refresh_index(&out.index, &folders, RefreshMode::Full, slow, |_, _| {}).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(!q.changed && !f.changed);
+    assert_eq!(f.index.last_indexed, out.index.last_indexed, "색인 시각도 그대로");
+    // [다시 색인]은 다시 시도한다
+    let r = refresh_index(&out.index, &folders, RefreshMode::Rebuild, slow, |_, _| {}).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(r.changed);
+}
+
+#[test]
+fn extract_errors_are_classified() {
+    let timeout = bridge_error("문서 변환이 90초 안에 끝나지 않았습니다.".to_string());
+    assert!(matches!(timeout, ExtractError::Permanent(ref r) if r.contains("변환 시간 초과")), "{timeout:?}");
+    assert!(matches!(bridge_error("문서 변환기를 사용할 수 없습니다 (앱 창이 준비되지 않았습니다).".to_string()), ExtractError::Transient(_)));
+    assert!(matches!(bridge_error("문서 변환기가 응답 없이 종료되었습니다.".to_string()), ExtractError::Transient(_)));
+    assert!(matches!(bridge_error("PDF를 읽을 수 없습니다".to_string()), ExtractError::Permanent(_)));
+    let denied = read_error(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+    assert!(matches!(denied, ExtractError::Permanent(ref r) if r.contains("권한")), "{denied:?}");
+    assert!(matches!(read_error(std::io::Error::from(std::io::ErrorKind::NotFound)), ExtractError::Transient(_)));
+    assert!(matches!(read_error(std::io::Error::other("sharing violation")), ExtractError::Transient(_)));
 }
 
 // ---------------------------------------------------------------- 저장 파일
@@ -530,7 +574,9 @@ fn status_counts_files_chunks_and_skipped_per_folder() {
     assert_eq!(st.skipped_samples.len(), 1);
     assert!(!st.over_limit);
     idx.over_limit = true;
-    assert!(status_of(&idx, &["A".to_string()]).over_limit);
+    idx.over_entry_limit = true;
+    let st = status_of(&idx, &["A".to_string()]);
+    assert!(st.over_limit && st.over_entry_limit);
 }
 
 #[test]

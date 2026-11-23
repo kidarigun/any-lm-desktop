@@ -1676,6 +1676,21 @@ fn dedup(items: impl Iterator<Item = String>) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// 내장 검색 항목 id 목록이 화면 쪽 내장 목록(src/catalog/builtin.ts)과 어긋나지 않는다.
+    #[test]
+    fn builtin_search_ids_match_the_frontend_catalog() {
+        let ts = include_str!("../../src/catalog/builtin.ts");
+        // `mcp: [` 안의 항목은 6칸 들여쓰기 `id: "...",`로 시작한다(입력 칸은 `key:`를 쓴다).
+        let from_ts: HashSet<&str> = ts
+            .lines()
+            .filter_map(|l| l.strip_prefix("      id: \""))
+            .filter_map(|rest| rest.split('"').next())
+            .collect();
+        let from_rust: HashSet<&str> = BUILTIN_SEARCH_CATALOG_IDS.iter().copied().collect();
+        assert_eq!(from_ts.len(), BUILTIN_SEARCH_CATALOG_IDS.len(), "builtin.ts 항목 수: {from_ts:?}");
+        assert_eq!(from_ts, from_rust);
+    }
+
     #[test]
     fn tool_names_fit_api_limits() {
         let mut used = HashSet::new();
