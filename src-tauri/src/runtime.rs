@@ -35,7 +35,7 @@ const MAX_DOWNLOAD: u64 = 200 * 1024 * 1024;
 static ROOT: OnceLock<PathBuf> = OnceLock::new();
 static JOBS: LazyLock<Mutex<HashMap<String, Job>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// 앱 시작 시 한 번: 실행 환경을 둘 폴더 (%LOCALAPPDATA%\io.github.kidarigun.kexaone-desktop\runtimes)
+/// 앱 시작 시 한 번: 실행 환경을 둘 폴더 (%LOCALAPPDATA%\io.github.kidarigun.anylm-desktop\runtimes)
 pub fn set_root(dir: PathBuf) {
     let _ = ROOT.set(dir);
 }
