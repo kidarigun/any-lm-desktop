@@ -53,20 +53,33 @@ export function InstructionsEditor({
     areaRef.current?.focus();
   }, []);
 
+  // Esc는 포커스가 창 밖(예: 바탕을 누른 뒤)에 있어도 듣는다. 열려 있는 동안만 등록하고 닫히면 뗀다.
+  const escRef = useRef<() => void>(() => {});
+  escRef.current = () => {
+    if (menuOpen) setMenuOpen(false);
+    else requestClose();
+  };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.isComposing) return;
+      e.preventDefault();
+      e.stopPropagation();
+      escRef.current();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
+
   return (
-    <div
-      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-      onKeyDown={(e) => {
-        if (e.key === "Escape") {
-          e.stopPropagation();
-          if (menuOpen) setMenuOpen(false);
-          else requestClose();
-        }
-      }}
-    >
-      <div className="bg-white dark:bg-[#262624] border border-stone-200 dark:border-[#3A3A36] rounded-2xl w-full max-w-2xl p-6 shadow-xl space-y-3">
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="instructions-editor-title"
+        className="bg-white dark:bg-[#262624] border border-stone-200 dark:border-[#3A3A36] rounded-2xl w-full max-w-2xl p-6 shadow-xl space-y-3"
+      >
         <div className="flex items-center justify-between">
-          <h3 className="text-sm font-bold text-stone-900 dark:text-stone-100">프로젝트 지침 · {project.name}</h3>
+          <h3 id="instructions-editor-title" className="text-sm font-bold text-stone-900 dark:text-stone-100">프로젝트 지침 · {project.name}</h3>
           <button onClick={requestClose} aria-label="닫기">
             <X className="w-4 h-4 text-stone-400" />
           </button>

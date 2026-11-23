@@ -10,6 +10,7 @@ import {
   LoadedInstance,
   LoadPlan,
   Project,
+  KnowledgeStatus,
   SaveResult,
   SnapshotDiff,
   PythonInfo,
@@ -819,6 +820,38 @@ export const BackendAPI = {
   async deleteProjectMemory(projectId: string, memoryId: string): Promise<Project> {
     if (!isTauri()) throw new Error("프로젝트 메모리는 앱에서만 쓸 수 있습니다.");
     return await invoke<Project>("delete_project_memory", { projectId, memoryId });
+  },
+
+  /** 지식 폴더를 더한다(색인은 뒤에서 시작). 바뀐 Project를 돌려준다. */
+  async addKnowledgeFolder(projectId: string, path: string): Promise<Project> {
+    if (!isTauri()) throw new Error("지식 폴더는 앱에서만 쓸 수 있습니다.");
+    return await invoke<Project>("add_knowledge_folder", { projectId, path });
+  },
+
+  async removeKnowledgeFolder(projectId: string, path: string): Promise<Project> {
+    if (!isTauri()) throw new Error("지식 폴더는 앱에서만 쓸 수 있습니다.");
+    return await invoke<Project>("remove_knowledge_folder", { projectId, path });
+  },
+
+  /** [다시 색인]: 모든 파일을 다시 읽는다(뒤에서 진행, 상태는 onKnowledgeStatus로). */
+  async reindexKnowledge(projectId: string): Promise<void> {
+    if (!isTauri()) throw new Error("지식 폴더는 앱에서만 쓸 수 있습니다.");
+    await invoke("reindex_knowledge", { projectId });
+  },
+
+  async knowledgeStatus(projectId: string): Promise<KnowledgeStatus | null> {
+    if (!isTauri()) return null;
+    return await invoke<KnowledgeStatus>("knowledge_status", { projectId });
+  },
+
+  /** 색인 진행·결과 알림 */
+  async onKnowledgeStatus(handler: (projectId: string, status: KnowledgeStatus) => void): Promise<UnlistenFn> {
+    if (isTauri()) {
+      return await listen<{ projectId: string; status: KnowledgeStatus }>("anylm-knowledge-status", (event) => {
+        handler(event.payload.projectId, event.payload.status);
+      });
+    }
+    return () => {};
   },
 
   /** 모델이 remember로 메모리를 저장하는 등 프로젝트가 바뀌면 알려 준다. */

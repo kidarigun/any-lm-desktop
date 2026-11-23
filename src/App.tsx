@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AppLogo } from "./ui/AppLogo";
 import { ProjectMemoryCard } from "./project/ProjectMemoryCard";
 import { InstructionsEditor } from "./project/InstructionsEditor";
+import { KnowledgeCard } from "./project/KnowledgeCard";
+import { draftMatchesProject } from "./project/knowledgeFormat";
 import { formatInstructionsStats, instructionsStats } from "./project/instructionsFormat";
 import { isExternalLink, renderMarkdownSafe } from "./security/sanitize";
 import {
@@ -465,7 +467,8 @@ export default function App() {
     setShowSettingsModal(false);
   }
   const [showProjectModal, setShowProjectModal] = useState<boolean>(false);
-  const [showInstructionsEditor, setShowInstructionsEditor] = useState<boolean>(false);
+  /** 지침 편집기를 연 프로젝트 id (닫혀 있으면 null). 화면의 프로젝트를 바꾸지 않고도 열 수 있다. */
+  const [instructionsEditorId, setInstructionsEditorId] = useState<string | null>(null);
   const [editingProject, setEditingProject] = useState<{
     id?: string;
     name: string;
@@ -489,6 +492,10 @@ export default function App() {
 
   const chatEndRef = useRef<HTMLDivElement | null>(null);
 
+  const instructionsEditorProject = useMemo(
+    () => (instructionsEditorId ? projects.find((p) => p.id === instructionsEditorId) : undefined),
+    [instructionsEditorId, projects]
+  );
   const activeProject = useMemo(
     () => projects.find((p) => p.id === activeProjectId) || projects[0],
     [projects, activeProjectId]
@@ -2233,7 +2240,7 @@ export default function App() {
                         프로젝트 지침
                       </span>
                       <button
-                        onClick={() => setShowInstructionsEditor(true)}
+                        onClick={() => setInstructionsEditorId(activeProject.id)}
                         className="text-xs text-[#A50034] dark:text-[#FF5C8D] font-semibold hover:underline cursor-pointer"
                       >
                         편집
@@ -2258,6 +2265,11 @@ export default function App() {
                 </div>
 
                 <ProjectMemoryCard
+                  project={activeProject}
+                  onChange={(updated) => setProjects((prev) => prev.map((p) => (p.id === updated.id ? updated : p)))}
+                />
+
+                <KnowledgeCard
                   project={activeProject}
                   onChange={(updated) => setProjects((prev) => prev.map((p) => (p.id === updated.id ? updated : p)))}
                 />
@@ -3184,12 +3196,12 @@ export default function App() {
         />
       )}
 
-      {showInstructionsEditor && activeProject && (
+      {instructionsEditorProject && (
         <InstructionsEditor
-          project={activeProject}
+          project={instructionsEditorProject}
           contextLength={instructionsContext}
           onSaved={(saved) => setProjects((prev) => prev.map((p) => (p.id === saved.id ? saved : p)))}
-          onClose={() => setShowInstructionsEditor(false)}
+          onClose={() => setInstructionsEditorId(null)}
         />
       )}
 
@@ -3256,19 +3268,24 @@ export default function App() {
               <div>
                 <div className="flex items-center justify-between mb-1">
                   <label className="font-semibold text-stone-700 dark:text-stone-300">프로젝트 지침</label>
-                  {editingProject.id && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowProjectModal(false);
-                        setActiveProjectId(editingProject.id!);
-                        setShowInstructionsEditor(true);
-                      }}
-                      className="text-[#A50034] dark:text-[#FF5C8D] font-semibold hover:underline cursor-pointer"
-                    >
-                      큰 편집기로 열기
-                    </button>
-                  )}
+                  {editingProject.id &&
+                    (draftMatchesProject(editingProject, projects.find((p) => p.id === editingProject.id)) ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          // 고친 것이 없을 때만 연다(설정 창의 변경을 버리지 않게). 화면의 프로젝트는 그대로 둔다.
+                          setShowProjectModal(false);
+                          setInstructionsEditorId(editingProject.id!);
+                        }}
+                        className="text-[#A50034] dark:text-[#FF5C8D] font-semibold hover:underline cursor-pointer"
+                      >
+                        큰 편집기로 열기
+                      </button>
+                    ) : (
+                      <span className="text-[11px] text-stone-400" title="이 창에서 바꾼 내용을 먼저 저장하면 큰 편집기를 열 수 있습니다.">
+                        큰 편집기: 먼저 저장하세요
+                      </span>
+                    ))}
                 </div>
                 <textarea
                   rows={3}

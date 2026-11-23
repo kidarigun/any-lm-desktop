@@ -33,6 +33,39 @@ export interface Project {
   autoApprove?: string[];
   /** 프로젝트 메모리 (오래된 항목이 앞) */
   memory?: MemoryItem[];
+  /** 지식 폴더(절대 경로). 앱은 읽기만 한다. */
+  knowledgeFolders?: string[];
+}
+
+/** 지식 폴더 하나의 색인 상태 */
+export interface KnowledgeFolderStatus {
+  path: string;
+  files: number;
+  chunks: number;
+  skipped: number;
+  missing: boolean;
+}
+
+export interface KnowledgeSkipped {
+  path: string;
+  reason: string;
+}
+
+/** 프로젝트 지식 폴더 색인 상태 (knowledge_status 명령, anylm-knowledge-status 이벤트) */
+export interface KnowledgeStatus {
+  indexing: boolean;
+  /** 색인 중: 추출한 파일 수 / 추출할 파일 수 */
+  done: number;
+  total: number;
+  files: number;
+  chunks: number;
+  skipped: number;
+  /** 시간이 모자라 다음 갱신으로 미룬 파일 수 */
+  deferred: number;
+  skippedSamples: KnowledgeSkipped[];
+  lastIndexed: string | null;
+  folders: KnowledgeFolderStatus[];
+  error: string | null;
 }
 
 export interface MemoryItem {

@@ -16,6 +16,7 @@ Rust (`src-tauri/src/`)
 - `testdata/` — 테스트용 LM Studio 응답(`lmstudio_models.json`).
 - `store.rs` — 대화·설정 저장 파일과 스냅샷 자료형.
 - `memory.rs` — 프로젝트 메모리(항목 추가·수정·삭제 규칙, 한도, 시스템 프롬프트 절).
+- `knowledge.rs` — 지식 폴더: 훑기·조각·토큰(한글 2글자 묶음)·BM25·색인 파일(`knowledge/<id>.json`)·빠른 갱신·`[참고 자료]` 절·`search_knowledge` 도구(테스트는 `knowledge_tests.rs`).
 - `fs_ops.rs` — 프로젝트 폴더 안의 파일 읽기/쓰기/목록(경로 검증 포함).
 - `doc_bridge.rs` — Rust가 웹뷰의 문서 변환 라이브러리(DOCX/HWPX/PPTX/PDF/XLSX)를 호출하는 다리.
 - `snapshot_diff.rs` — 스냅샷의 이전/이후 내용 텍스트 추출(변경 보기).
@@ -33,7 +34,7 @@ Rust (`src-tauri/src/`)
 - `lmstudio/` — LM Studio 연결 창(`ConnectionDialog`), 모델 선택(`ModelPicker`·"생각하기" 토글), 내리고 로드 선택(`LoadChoiceDialog`), 보내기 전 모델 준비 규칙(`sendFlow`: 로드 계획→다음 단계, 원하는 컨텍스트, 작게 다시 시도 값), [서버 시작] 버튼(`StartServerButton`), 모델 설명 글자(`modelText`).
 - `chat/` — 대화별 실행 상태와 답변 통계 줄(`statsLine`). `canvas/` — 문서 캔버스(편집기·PDF/PPTX/XLSX/HWPX 뷰어).
 - `docs/` — 문서 형식 변환(docx, hwpx, pptx, pdf, xlsx, markdown)과 Rust 다리 구현.
-- `project/` — 프로젝트 메모리 카드(`ProjectMemoryCard`)와 표시 규칙(`memoryFormat`), 지침 전용 편집기(`InstructionsEditor`)와 글자·토큰 계산·서식 예시(`instructionsFormat`).
+- `project/` — 프로젝트 메모리 카드(`ProjectMemoryCard`)와 표시 규칙(`memoryFormat`), 지침 전용 편집기(`InstructionsEditor`)와 글자·토큰 계산·서식 예시(`instructionsFormat`), 지식 폴더 카드(`KnowledgeCard`)와 상태 줄·설정 창 비교 규칙(`knowledgeFormat`).
 - `explorer/` — 파일 탐색기·@파일 멘션. `diff/` — 변경 보기와 이력.
 - `mcp/` — MCP 대화상자. `skills/` — Skill 대화상자. `catalog/` — 카탈로그 화면.
 - `python/` — Python 실행 대화상자. `runtime/` — 실행 환경 패널.
