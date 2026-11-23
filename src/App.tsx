@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AppLogo } from "./ui/AppLogo";
 import { ProjectMemoryCard } from "./project/ProjectMemoryCard";
+import { InstructionsEditor } from "./project/InstructionsEditor";
+import { formatInstructionsStats, instructionsStats } from "./project/instructionsFormat";
 import { isExternalLink, renderMarkdownSafe } from "./security/sanitize";
 import {
   Check,
@@ -463,6 +465,7 @@ export default function App() {
     setShowSettingsModal(false);
   }
   const [showProjectModal, setShowProjectModal] = useState<boolean>(false);
+  const [showInstructionsEditor, setShowInstructionsEditor] = useState<boolean>(false);
   const [editingProject, setEditingProject] = useState<{
     id?: string;
     name: string;
@@ -559,6 +562,8 @@ export default function App() {
     () => estimateContextInfo(activeConversation, loadedContext),
     [activeConversation, loadedContext]
   );
+  /** 지침 편집기용: 실제로 로드된 컨텍스트만(없으면 null → 토큰만 표시) */
+  const instructionsContext = models.find((m) => m.key === effectiveModelKey)?.loaded[0]?.contextLength || null;
   const kLabel = (n: number) => `${Math.round(n / 1024)}K`;
 
   /** "생각하기" 토글: 모델별 설정에 저장한다. 다음 요청부터 적용된다. */
@@ -2228,15 +2233,7 @@ export default function App() {
                         프로젝트 지침
                       </span>
                       <button
-                        onClick={() => {
-                          setEditingProject({
-                            id: activeProject.id,
-                            name: activeProject.name,
-                            rootPath: activeProject.rootPath,
-                            instructions: activeProject.instructions,
-                          });
-                          setShowProjectModal(true);
-                        }}
+                        onClick={() => setShowInstructionsEditor(true)}
                         className="text-xs text-[#A50034] dark:text-[#FF5C8D] font-semibold hover:underline cursor-pointer"
                       >
                         편집
@@ -2246,6 +2243,17 @@ export default function App() {
                       {activeProject.instructions ||
                         "설정된 프로젝트 지침이 없습니다."}
                     </p>
+                    {activeProject.instructions && (
+                      <p
+                        className={`text-[11px] ${
+                          instructionsStats(activeProject.instructions, instructionsContext).warn
+                            ? "text-amber-600 dark:text-amber-400 font-semibold"
+                            : "text-stone-400"
+                        }`}
+                      >
+                        {formatInstructionsStats(instructionsStats(activeProject.instructions, instructionsContext))}
+                      </p>
+                    )}
                   </div>
                 </div>
 
@@ -3176,6 +3184,15 @@ export default function App() {
         />
       )}
 
+      {showInstructionsEditor && activeProject && (
+        <InstructionsEditor
+          project={activeProject}
+          contextLength={instructionsContext}
+          onSaved={(saved) => setProjects((prev) => prev.map((p) => (p.id === saved.id ? saved : p)))}
+          onClose={() => setShowInstructionsEditor(false)}
+        />
+      )}
+
       {/* Modal 2: Project Configuration with Native Folder Explorer Picker */}
       {showProjectModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
@@ -3237,9 +3254,22 @@ export default function App() {
               </div>
 
               <div>
-                <label className="font-semibold text-stone-700 dark:text-stone-300 block mb-1">
-                  프로젝트 지침
-                </label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="font-semibold text-stone-700 dark:text-stone-300">프로젝트 지침</label>
+                  {editingProject.id && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowProjectModal(false);
+                        setActiveProjectId(editingProject.id!);
+                        setShowInstructionsEditor(true);
+                      }}
+                      className="text-[#A50034] dark:text-[#FF5C8D] font-semibold hover:underline cursor-pointer"
+                    >
+                      큰 편집기로 열기
+                    </button>
+                  )}
+                </div>
                 <textarea
                   rows={3}
                   value={editingProject.instructions}

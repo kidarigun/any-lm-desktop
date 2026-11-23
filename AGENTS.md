@@ -33,7 +33,7 @@ Rust (`src-tauri/src/`)
 - `lmstudio/` — LM Studio 연결 창(`ConnectionDialog`), 모델 선택(`ModelPicker`·"생각하기" 토글), 내리고 로드 선택(`LoadChoiceDialog`), 보내기 전 모델 준비 규칙(`sendFlow`: 로드 계획→다음 단계, 원하는 컨텍스트, 작게 다시 시도 값), [서버 시작] 버튼(`StartServerButton`), 모델 설명 글자(`modelText`).
 - `chat/` — 대화별 실행 상태와 답변 통계 줄(`statsLine`). `canvas/` — 문서 캔버스(편집기·PDF/PPTX/XLSX/HWPX 뷰어).
 - `docs/` — 문서 형식 변환(docx, hwpx, pptx, pdf, xlsx, markdown)과 Rust 다리 구현.
-- `project/` — 프로젝트 메모리 카드(`ProjectMemoryCard`)와 표시 규칙(`memoryFormat`).
+- `project/` — 프로젝트 메모리 카드(`ProjectMemoryCard`)와 표시 규칙(`memoryFormat`), 지침 전용 편집기(`InstructionsEditor`)와 글자·토큰 계산·서식 예시(`instructionsFormat`).
 - `explorer/` — 파일 탐색기·@파일 멘션. `diff/` — 변경 보기와 이력.
 - `mcp/` — MCP 대화상자. `skills/` — Skill 대화상자. `catalog/` — 카탈로그 화면.
 - `python/` — Python 실행 대화상자. `runtime/` — 실행 환경 패널.

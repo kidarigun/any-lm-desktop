@@ -23,7 +23,9 @@ fn new_id() -> String {
 }
 
 fn validate_text(text: &str) -> Result<String, String> {
-    let t = text.trim();
+    // 줄바꿈을 포함한 공백 덩어리는 한 칸으로 합친다(항목 하나 = 목록 한 줄).
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let t = collapsed.as_str();
     if t.is_empty() {
         return Err("기억할 내용이 비어 있습니다.".to_string());
     }
@@ -142,6 +144,18 @@ pub fn project_memory_mut<'a>(projects: &'a mut [Project], project_id: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collapses_whitespace_and_newlines_to_one_space() {
+        let mut items = Vec::new();
+        add_item(&mut items, "  첫째 줄
+
+  둘째	줄   끝 ", "user", "t").unwrap();
+        assert_eq!(items[0].text, "첫째 줄 둘째 줄 끝");
+        // 같은 내용이 줄바꿈만 다르게 오면 중복으로 본다
+        assert!(matches!(add_item(&mut items, "첫째 줄 둘째 줄
+끝", "model", "t").unwrap(), AddOutcome::Duplicate));
+    }
 
     fn item(id: &str, text: &str) -> MemoryItem {
         MemoryItem {
