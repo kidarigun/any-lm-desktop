@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-pub const PORT: u16 = 45789;
+/// 원본 앱(K-EXAONE Desktop)은 45788(중복 실행)·45789(MCP OAuth)를 쓴다. 이 앱은 45790, OAuth는 45791(`mcp_oauth::CALLBACK_PORT`).
+pub const PORT: u16 = 45790;
 const HELLO: &[u8] = b"ANYLM-DESKTOP-SHOW\n";
 const ACK: &[u8] = b"ANYLM-DESKTOP-OK\n";
 
@@ -104,9 +105,23 @@ mod tests {
 
     #[test]
     fn identity_constants_differ_from_the_original_app() {
-        assert_eq!(PORT, 45789);
+        assert_eq!(PORT, 45790);
         assert_eq!(HELLO, b"ANYLM-DESKTOP-SHOW
 ");
+    }
+
+    #[test]
+    fn ports_do_not_collide_with_each_other_or_the_original_app() {
+        let oauth = crate::mcp_oauth::CALLBACK_PORT;
+        assert_eq!(oauth, 45791);
+        // 앱이 켜져 있는 동안 중복 실행 포트를 잡고 있으므로 OAuth 포트와 같으면 로그인을 못 받는다.
+        assert_ne!(PORT, oauth);
+        // 원본 앱: 45788(중복 실행), 45789(MCP OAuth)
+        for upstream in [45788u16, 45789] {
+            assert_ne!(PORT, upstream);
+            assert_ne!(oauth, upstream);
+        }
+        assert!(crate::mcp_oauth::redirect_uri().contains(":45791/"));
     }
 
     #[test]

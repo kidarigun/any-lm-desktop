@@ -95,7 +95,8 @@
 | 버전 | 0.4.4 | 0.1.0 (네 곳: package.json, package-lock.json, Cargo.toml, tauri.conf.json) |
 | Cargo 패키지 / lib 이름 | `exaone-desktop` / `exaone_desktop_lib` | `any-lm-desktop` / `any_lm_desktop_lib` |
 | 자격 증명 서비스명 (`secrets.rs`, MCP 비밀 값) | `ai.exaone.desktop` | `io.github.kidarigun.anylm-desktop` |
-| 중복 실행 방지 포트·인사말 (`single_instance.rs`) | 45788, `EXAONE-DESKTOP-SHOW` | 다른 고정 포트(예: 45789), `ANYLM-DESKTOP-SHOW` |
+| 중복 실행 방지 포트·인사말 (`single_instance.rs`) | 45788, `EXAONE-DESKTOP-SHOW` | 45790, `ANYLM-DESKTOP-SHOW` |
+| 원격 MCP OAuth 로그인 결과 포트 (`mcp_oauth.rs` `CALLBACK_PORT`, 리디렉션 URI) | 45789 (`http://localhost:45789/oauth2callback`) | 45791 (`http://localhost:45791/oauth2callback`). 앱이 켜져 있는 동안 중복 실행 포트를 잡고 있으므로 두 포트는 서로 달라야 하고, 원본의 45788·45789와도 달라야 한다(결정 R14, 최종 검토에서 발견) |
 | HTML 미리보기 호스트 (`html_preview.rs`, CSP `frame-src`) | `exaone-preview.localhost` | `anylm-preview.localhost` |
 | 대화상자 환경 변수 | `EXAONE_DLG_*` | `ANYLM_DLG_*` |
 | localStorage 키 | `exaone_*` | `anylm_*` |

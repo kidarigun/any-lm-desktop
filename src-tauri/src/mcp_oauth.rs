@@ -3,7 +3,8 @@
 //! - 목록·사용자가 엔드포인트와 클라이언트 ID를 주면 그대로 쓴다 (Google처럼 직접 만든 클라이언트).
 //! - 주지 않으면 MCP 권한 규약대로 찾는다: 401 응답의 `resource_metadata` 또는
 //!   `/.well-known/oauth-protected-resource` → 권한 서버 메타데이터 → (클라이언트가 없으면) 동적 등록.
-//! - 로그인 결과는 `http://localhost:45789/oauth2callback`으로 받는다 (웹 애플리케이션 클라이언트에 이 주소를 등록).
+//! - 로그인 결과는 `http://localhost:45791/oauth2callback`으로 받는다 (웹 애플리케이션 클라이언트에 이 주소를 등록).
+//!   원본 앱(K-EXAONE Desktop)은 45789를 쓰므로 두 앱을 같이 켜도 로그인 포트가 겹치지 않게 45791을 쓴다.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -12,7 +13,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
 
-pub const CALLBACK_PORT: u16 = 45789;
+pub const CALLBACK_PORT: u16 = 45791;
 pub const CALLBACK_PATH: &str = "/oauth2callback";
 pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
@@ -500,7 +501,7 @@ mod tests {
         let url = authorization_url(&ep, "cid", &["a b".into(), "c".into()], "st", &p.challenge, &extra).unwrap();
         let u = reqwest::Url::parse(&url).unwrap();
         let q: BTreeMap<_, _> = u.query_pairs().into_owned().collect();
-        assert_eq!(q["redirect_uri"], "http://localhost:45789/oauth2callback");
+        assert_eq!(q["redirect_uri"], "http://localhost:45791/oauth2callback");
         assert_eq!(q["scope"], "a b c");
         assert_eq!(q["access_type"], "offline");
         assert_eq!(q["code_challenge_method"], "S256");

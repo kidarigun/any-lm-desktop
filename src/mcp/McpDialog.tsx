@@ -535,7 +535,7 @@ export function McpDialog({ onClose }: { onClose: () => void }) {
             {draft.oauthOn && (
               <>
                 <p className="text-[11px] text-stone-500 dark:text-stone-400">
-                  저장한 뒤 [로그인]을 누르면 브라우저에서 계정에 로그인합니다. 클라이언트 ID를 비우면 서버에 자동 등록을 시도합니다. 직접 만든 클라이언트라면 리디렉션 URI에 <code className="font-mono">http://localhost:45789/oauth2callback</code>을 등록하세요.
+                  저장한 뒤 [로그인]을 누르면 브라우저에서 계정에 로그인합니다. 클라이언트 ID를 비우면 서버에 자동 등록을 시도합니다. 직접 만든 클라이언트라면 리디렉션 URI에 <code className="font-mono">http://localhost:45791/oauth2callback</code>을 등록하세요.
                 </p>
                 <div className="grid grid-cols-2 gap-1.5">
                   <input

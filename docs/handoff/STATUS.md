@@ -6,7 +6,7 @@
 ## 진행 중
 - 계획 파일: `docs/superpowers/plans/2026-11-23-any-lm-desktop.md`
 - 작업 1(저장소 만들기와 인계 체계): 단계 1~5 완료. 단계 6(GitHub 비공개 저장소 `kidarigun/any-lm-desktop` 생성·푸시)은 사용자 승인 대기 중이라 아직 하지 않았다.
-- 작업 2(정체성 분리와 업데이트 제거): 완료. 제품명·identifier·버전·크레이트명·자격 증명 서비스명·단일 실행 포트(45789)·미리보기 호스트·대화상자 환경 변수·localStorage 접두어(`anylm_`)·기본 작업 폴더(`문서\AnyLM`)를 바꾸고, 업데이트 기능(`tauri-plugin-updater`, UpdatePanel, `check_update`/`install_update`, `checkUpdates` 설정, `make_latest_json.py`)과 `migrate_old_data_dir`을 삭제했다.
+- 작업 2(정체성 분리와 업데이트 제거): 완료. 제품명·identifier·버전·크레이트명·자격 증명 서비스명·단일 실행 포트(45789 → 최종 검토 뒤 45790, MCP OAuth 포트도 45789 → 45791)·미리보기 호스트·대화상자 환경 변수·localStorage 접두어(`anylm_`)·기본 작업 폴더(`문서\AnyLM`)를 바꾸고, 업데이트 기능(`tauri-plugin-updater`, UpdatePanel, `check_update`/`install_update`, `checkUpdates` 설정, `make_latest_json.py`)과 `migrate_old_data_dir`을 삭제했다.
 
 - 작업 3(설정을 LM Studio 연결로 바꾸기): 완료. `lmstudio.rs`(server_urls·authorize·friendly_error) 추가, `AppSettings`를 serverUrl/선택 토큰/autoCompact/modelPrefs로 교체, exaone.rs의 API 키 필수 검사·reasoning_effort 삭제, 추론 강도 선택 UI 삭제(작업 6에서 모델 선택기가 들어갈 자리). 설정 대화상자는 최소 수정만 했다(작업 5에서 재구성).
 
@@ -26,7 +26,7 @@
 
 | # | 완료 기준 | 결과 | 근거 |
 |---|---|---|---|
-| 1 | 앱이 뜨고 원본과 동시 실행, 서로 안 보임 | 부분 통과 — 화면 확인 필요 | `npm run tauri dev`로 창 "Any LM Desktop"(포트 45789 LISTEN) 실행. 설치된 원본(`%LOCALAPPDATA%\Desktop App for LG K-EXAONE\exaone-desktop.exe`)을 같이 띄우니 창 "Desktop App for LG K-EXAONE"(포트 45788)이 동시에 떴다. identifier `io.github.kidarigun.anylm-desktop` vs `...kexaone-desktop`, 데이터 폴더 `%APPDATA%` 아래 서로 따로, 둘 다 종료함. 창 모양·대화가 안 섞이는지는 눈으로 |
+| 1 | 앱이 뜨고 원본과 동시 실행, 서로 안 보임 | 부분 통과 — 화면 확인 필요 | `npm run tauri dev`로 창 "Any LM Desktop"(그때 포트 45789 LISTEN — 원본의 MCP OAuth 포트와 같아 최종 검토 뒤 45790으로 옮김) 실행. 설치된 원본(`%LOCALAPPDATA%\Desktop App for LG K-EXAONE\exaone-desktop.exe`)을 같이 띄우니 창 "Desktop App for LG K-EXAONE"(포트 45788)이 동시에 떴다. identifier `io.github.kidarigun.anylm-desktop` vs `...kexaone-desktop`, 데이터 폴더 `%APPDATA%` 아래 서로 따로, 둘 다 종료함. 창 모양·대화가 안 섞이는지는 눈으로 |
 | 2 | 모델 목록·연결 상태 | 부분 통과 — 화면 확인 필요 | `GET /api/v1/models` → qwen3.6-35b-a3b, qwen3.5-9b, 임베딩 1개. `parse_models`·`server_urls` 테스트 통과, `lm_server_running`은 같은 서버를 본다. 연결 창에 보이는 모습은 눈으로 |
 | 3 | 대화별 모델 전환, 모델 이름 표시 | 부분 통과 — 화면 확인 필요 | `/v1/chat/completions`에 `"model":"qwen3.5-9b"` → 응답 model 일치(추론 토큰 0). `sendFlow`·`statsLine`(모델 이름 끝에) 테스트 통과. 9B→35B [내리고 로드]는 8GB라 로드하지 않음 |
 | 4 | 로드 안 된 모델은 앱 컨텍스트로 로드 후 답 | 부분 통과 — 화면 확인 필요 | `plan_load_cases`·`plan_load_missing_model`·`wanted_context_respects_prefs_and_max`·`sendFlow` "maps load plans to the next step"(notLoaded→load) 통과. 실제 로드 후 답하는 화면은 눈으로 |
@@ -54,6 +54,7 @@
 - 원본 앱과 새 앱 창이 동시에 뜨고(작업 12에서 두 창이 같이 뜨는 것은 프로세스로 확인), 서로의 대화·설정이 보이지 않는지, 창 모양이 어색하지 않은지
 - 헤더 이름 "Any LM Desktop"과 "LM" 로고 칸, 프로젝트 지침 자리표시·압축 창 문구가 어색하지 않은지
 - 화면 어디에도 호출 한도·키 만료·추론 강도(low/high/max)·업데이트 표시가 없는지
+- 원본 앱을 켠 채 MCP OAuth 로그인: 원본 앱(45788·45789)을 켜 둔 상태에서 새 앱의 원격 MCP [로그인]이 브라우저 로그인 후 성공하는지(새 앱은 중복 실행 45790, 로그인 결과 45791). `netstat -ano | findstr 4579`로 45790이 LISTEN인지도 확인
 
 ### LM Studio 연결 창
 - 두 모델이 보이고 9B 행이 '로드됨 · 32K'인지, 연결 점이 맞게 바뀌는지

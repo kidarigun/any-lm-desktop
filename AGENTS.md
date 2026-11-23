@@ -45,6 +45,7 @@ Rust (`src-tauri/src/`)
 
 - 저장소는 `C:\DOCS\any-lm-desktop`. 원본 `C:\DOCS\EXAONE`와 그 GitHub 저장소에는 아무것도 쓰지 않는다(커밋·푸시·파일 수정 금지).
 - 앱 이름 `Any LM Desktop`, identifier `io.github.kidarigun.anylm-desktop`, 버전 `0.1.0`.
+- 포트: 중복 실행 방지 `45790`(`single_instance::PORT`), 원격 MCP OAuth 로그인 결과 `45791`(`mcp_oauth::CALLBACK_PORT`, 리디렉션 URI `http://localhost:45791/oauth2callback`). 원본 앱은 45788·45789를 쓰므로 이 값들과 겹치면 안 된다(테스트 `ports_do_not_collide_with_each_other_or_the_original_app`).
 - 내부 파일·함수·이벤트 이름(`exaone.rs`, `run_exaone_turn`, `onExaoneStream`, `"exaone-stream"`)은 바꾸지 않는다. 사용자에게 보이는 문자열과 스펙 6.2 표의 충돌 요소만 바꾼다.
 - 화면 문구는 한국어. 사용자에게 보이는 곳에 "EXAONE"/"K-EXAONE"/"LG"를 쓰지 않는다(NOTICE·README의 출처 설명만 예외).
 - LM Studio 서버 주소는 `http://localhost`, `http://127.0.0.1`, `http://[::1]`만 허용. 기본값 `http://localhost:1234`.
