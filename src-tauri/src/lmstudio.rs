@@ -118,7 +118,11 @@ pub fn parse_models(v: &Value) -> Vec<LmModel> {
                         .filter_map(|i| {
                             Some(LoadedInstance {
                                 id: i.get("id")?.as_str()?.to_string(),
-                                context_length: i.pointer("/config/context_length")?.as_u64()? as u32,
+                                // 컨텍스트를 못 읽어도 로드된 것으로 남긴다(두 번째 인스턴스 방지).
+                                context_length: i
+                                    .pointer("/config/context_length")
+                                    .and_then(|c| c.as_u64())
+                                    .unwrap_or(0) as u32,
                             })
                         })
                         .collect()
@@ -218,9 +222,20 @@ pub async fn list_models(settings: &AppSettings) -> Result<Vec<LmModel>, String>
     Ok(parse_models(&v))
 }
 
+pub const ALREADY_LOADED_MESSAGE: &str = "이미 로드된 모델입니다. [다시 로드]를 사용하세요.";
+
+/// 같은 모델의 두 번째 인스턴스를 만들지 않기 위한 검사. 이미 로드돼 있으면 오류.
+pub fn ensure_not_loaded(models: &[LmModel], key: &str) -> Result<(), String> {
+    match plan_load(models, key, DEFAULT_CONTEXT) {
+        LoadPlan::Ready { .. } | LoadPlan::SmallerLoaded { .. } => Err(ALREADY_LOADED_MESSAGE.to_string()),
+        _ => Ok(()),
+    }
+}
+
 /// 컨텍스트 길이만 지정해 로드한다(GPU 배분은 LM Studio 기본/저장값에 맡긴다).
 pub async fn load_model(settings: &AppSettings, key: &str, context_length: u32) -> Result<LoadedInstance, String> {
     let urls = server_urls(&settings.server_url)?;
+    ensure_not_loaded(&list_models(settings).await?, key)?;
     let body = serde_json::json!({ "model": key, "context_length": context_length, "echo_load_config": true });
     let resp = authorize(client(LOAD_TIMEOUT)?.post(&urls.load).json(&body), &settings.api_key)
         .send()
@@ -394,6 +409,23 @@ mod tests {
         let body = r#"{"error":{"type":"model_not_found","message":"Model nope not found"}}"#;
         assert_eq!(api_error_message(404, body), "Model nope not found");
         assert!(api_error_message(500, "oops").contains("500"));
+    }
+
+    #[test]
+    fn ensure_not_loaded_refuses_loaded_models() {
+        let m = fixture();
+        assert_eq!(ensure_not_loaded(&m, "qwen3.5-9b").unwrap_err(), ALREADY_LOADED_MESSAGE);
+        assert!(ensure_not_loaded(&m, "qwen3.6-35b-a3b").is_ok());
+    }
+
+    #[test]
+    fn instance_without_context_is_kept_as_loaded() {
+        let v = serde_json::json!({"models":[{"type":"llm","key":"k","display_name":"K",
+            "loaded_instances":[{"id":"k","config":{}}],"max_context_length":4096}]});
+        let m = parse_models(&v);
+        assert_eq!(m[0].loaded, vec![LoadedInstance { id: "k".into(), context_length: 0 }]);
+        assert!(matches!(plan_load(&m, "k", 32768), LoadPlan::SmallerLoaded { loaded: 0, .. }));
+        assert!(ensure_not_loaded(&m, "k").is_err());
     }
 
     #[test]
