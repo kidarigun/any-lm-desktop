@@ -5,7 +5,7 @@
 
 ## 진행 중
 - 계획 파일: `docs/superpowers/plans/2026-11-23-any-lm-desktop.md`
-- 작업 1(저장소 만들기와 인계 체계): 단계 1~5 완료. 단계 6(GitHub 비공개 저장소 `kidarigun/any-lm-desktop` 생성·푸시)은 사용자 승인 대기 중이라 아직 하지 않았다.
+- 작업 1(저장소 만들기와 인계 체계): 완료. 단계 6은 사용자 승인 뒤 2026-11-23에 GitHub 비공개 저장소 `kidarigun/any-lm-desktop`을 만들고 `origin`으로 `main`을 push했다.
 - 작업 2(정체성 분리와 업데이트 제거): 완료. 제품명·identifier·버전·크레이트명·자격 증명 서비스명·단일 실행 포트(45789 → 최종 검토 뒤 45790, MCP OAuth 포트도 45789 → 45791)·미리보기 호스트·대화상자 환경 변수·localStorage 접두어(`anylm_`)·기본 작업 폴더(`문서\AnyLM`)를 바꾸고, 업데이트 기능(`tauri-plugin-updater`, UpdatePanel, `check_update`/`install_update`, `checkUpdates` 설정, `make_latest_json.py`)과 `migrate_old_data_dir`을 삭제했다.
 
 - 작업 3(설정을 LM Studio 연결로 바꾸기): 완료. `lmstudio.rs`(server_urls·authorize·friendly_error) 추가, `AppSettings`를 serverUrl/선택 토큰/autoCompact/modelPrefs로 교체, exaone.rs의 API 키 필수 검사·reasoning_effort 삭제, 추론 강도 선택 UI 삭제(작업 6에서 모델 선택기가 들어갈 자리). 설정 대화상자는 최소 수정만 했다(작업 5에서 재구성).
@@ -32,7 +32,8 @@
 ## 다음 할 일
 1. **화면 수동 확인**: 아래 "수동 확인 목록"을 사용자와 함께 앱 화면에서 확인한다(`npm run tauri dev`). 문제가 나오면 고치고 목록에서 지운다.
 2. **인계 연습(완료 기준 9, 작업 12 단계 2)**: 사용자가 Codex 또는 Antigravity 새 세션에 `docs/handoff/START.md`의 시작 문구를 붙여 넣어, 그 도구가 AGENTS → STATUS → 계획 순서로 읽고 이어서 작업할 수 있는지 본다. 결과는 LOG에 남긴다.
-3. **GitHub 비공개 저장소 생성·푸시(작업 1 단계 6, 작업 12 단계 3)**: 사용자 승인 대기. 승인되면 `gh repo create kidarigun/any-lm-desktop --private` 후 `origin`으로 push. `upstream` push 주소는 `DISABLED` 유지.
+3. **GitHub 비공개 저장소**: 완료(2026-11-23, 사용자 승인). `origin` = https://github.com/kidarigun/any-lm-desktop (비공개), `main`이 `origin/main`을 추적. `upstream`(원본 k-exaone-desktop) push 주소는 `DISABLED` 유지. 이후 push는 작업을 마칠 때 사용자가 허락한 경우에만 한다.
+   - 인계 연습용 작은 작업: 계획 문서(`docs/superpowers/plans/2026-11-23-any-lm-desktop.md`)에 남은 옛 포트 표기 `PORT = 45789`를 지금 값(중복 실행 45790, MCP OAuth 45791)으로 고친다 — 계획을 그대로 따르면 포트 테스트가 깨진다.
 4. **미뤄 둔 사소한 점(최종 검토, 지금 고치지 않아도 됨)**:
    - 9: AI 요약의 대화 글자 상한이 고정 60,000자이고 생각 켜짐을 물려받아 8K/32K에서 로컬 요약으로 자주 떨어짐 → 컨텍스트×1.5×0.6 상한, 요약은 생각 끄기 검토.
    - 10: 승인 후 이어가기·수정 후 다시 보내기는 모델 준비를 하지 않고, 다시 보내기는 자동 압축도 하지 않음.
