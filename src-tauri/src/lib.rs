@@ -17,6 +17,7 @@ pub mod secrets;
 pub mod single_instance;
 pub mod snapshot_diff;
 pub mod store;
+pub mod terminal;
 
 #[cfg(test)]
 mod harness;
@@ -2518,6 +2519,7 @@ pub fn run() {
             app.manage(doc_bridge::DocBridge::default());
             app.manage(knowledge::KnowledgeManager::new(app_data_dir.join("knowledge")));
             app.manage(PathGrants::default());
+            app.manage(terminal::TerminalManager::new(terminal::tauri_sink(app.handle().clone())));
             app.manage(html_preview::PreviewServer::start().map_err(|err| format!("HTML 미리보기 서버를 시작할 수 없습니다: {err}")));
             Ok(())
         })
@@ -2607,6 +2609,14 @@ pub fn run() {
             find_project_files,
             reveal_project_path,
             reveal_saved_path,
+            terminal::terminal_open,
+            terminal::terminal_write,
+            terminal::terminal_resize,
+            terminal::terminal_close,
+            terminal::terminal_list,
+            terminal::terminal_snapshot,
+            terminal::terminal_busy,
+            terminal::terminal_shells,
         ])
         .build(tauri::generate_context!())
         .expect("error while running Any LM Desktop")
@@ -2618,6 +2628,10 @@ pub fn run() {
                 }
                 if let Some(m) = app.try_state::<Arc<mcp::McpManager>>() {
                     m.shutdown_all();
+                }
+                // 작업 패널 터미널: 세션마다 프로세스 트리 전체를 끝낸다.
+                if let Some(t) = app.try_state::<terminal::TerminalManager>() {
+                    t.close_all();
                 }
                 if let Some(g) = app.try_state::<single_instance::ListenerGuard>() {
                     g.shutdown();

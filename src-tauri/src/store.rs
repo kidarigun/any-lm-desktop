@@ -31,6 +31,8 @@ pub struct AppSettings {
     pub model_prefs: BTreeMap<String, ModelPref>,
     /// 요청에 맞는 Skill을 앱이 골라 미리 넣는다(결정 0007). 끄면 모델이 load_skill을 직접 불러야 한다.
     pub skill_auto_load: bool,
+    /// 작업 패널 터미널의 셸: "powershell"(기본) | "pwsh" | "cmd" (결정 0008)
+    pub terminal_shell: String,
 }
 
 impl Default for AppSettings {
@@ -44,6 +46,7 @@ impl Default for AppSettings {
             auto_compact: true,
             model_prefs: BTreeMap::new(),
             skill_auto_load: true,
+            terminal_shell: "powershell".to_string(),
         }
     }
 }

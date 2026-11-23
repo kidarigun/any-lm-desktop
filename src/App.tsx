@@ -53,6 +53,8 @@ import {
 const DocumentCanvas = React.lazy(() => import("./canvas/DocumentCanvas"));
 const DiffViewer = React.lazy(() => import("./diff/DiffViewer"));
 const PythonRunDialog = React.lazy(() => import("./python/PythonRunDialog"));
+// 터미널(xterm)은 작업 패널을 처음 열 때 불러온다.
+const WorkPanel = React.lazy(() => import("./workpanel/WorkPanel"));
 import { startDocBridge } from "./docs/bridge";
 import { DRAG_MIME, FileExplorer, type ExplorerApi } from "./explorer/FileExplorer";
 import { useFileMention } from "./explorer/FileMention";
@@ -76,6 +78,8 @@ import {
 import { StartServerButton } from "./lmstudio/StartServerButton";
 import { statsLineText } from "./chat/statsLine";
 import { RuntimePanel } from "./runtime/RuntimePanel";
+import { WorkPanelToggle } from "./workpanel/WorkPanelToggle";
+import { useWorkPanel } from "./workpanel/useWorkPanel";
 import {
   CANVAS_DEFAULT_WIDTH,
   CANVAS_MIN_WIDTH,
@@ -507,6 +511,13 @@ export default function App() {
     () => (activeMode === "chat" ? "general-chat" : activeProject?.id || ""),
     [activeMode, activeProject]
   );
+
+  // 오른쪽 작업 패널(터미널): 프로젝트·코드 화면은 프로젝트 폴더, 일반 채팅은 사용자 홈(빈 값)
+  const workPanel = useWorkPanel({
+    cwd: currentScopeId !== "general-chat" && activeProject ? activeProject.rootPath : "",
+    canvasOpen: !!activeArtifact,
+    windowWidth,
+  });
 
   const filteredConversations = useMemo(() => {
     const list = conversations.filter((c) =>
@@ -1518,14 +1529,15 @@ export default function App() {
   }, []);
 
   // 창 크기가 바뀌어도 채팅창이 너무 좁아지지 않도록 화면에 쓰는 폭만 줄인다 (저장된 폭은 그대로).
-  const availWidth = availableWidth(windowWidth, sidebarCollapsed);
+  // 작업 패널이 보이면 그 폭만큼 캔버스·채팅창이 나눠 쓸 폭이 줄어든다.
+  const availWidth = Math.max(0, availableWidth(windowWidth, sidebarCollapsed) - (workPanel.showPanel ? workPanel.width : 0));
   const canvasMaxWidth = maxCanvasWidth(availWidth);
   const shownCanvasWidth = canvasExpanded
-    ? wideCanvasWidth(windowWidth, sidebarCollapsed)
+    ? Math.min(wideCanvasWidth(windowWidth, sidebarCollapsed), canvasMaxWidth)
     : clampCanvasWidth(canvasWidth, availWidth);
 
   function changeCanvasWidth(width: number) {
-    const w = clampCanvasWidth(width, availableWidth(window.innerWidth, sidebarCollapsed));
+    const w = clampCanvasWidth(width, availWidth);
     setCanvasWidth(w);
     setCanvasExpanded(false);
     saveCanvasWidth(w);
@@ -2097,6 +2109,7 @@ export default function App() {
               <FileText className="w-3.5 h-3.5" />
               <span>문서 열기</span>
             </button>
+            <WorkPanelToggle open={workPanel.open} onToggle={workPanel.toggle} />
           </div>
         </header>
 
@@ -3059,7 +3072,7 @@ export default function App() {
       </main>
 
       {/* 문서 캔버스: 형식(Markdown·Word·PowerPoint·PDF·HTML·텍스트)에 맞춘 편집기 */}
-      {activeArtifact && (
+      {activeArtifact && workPanel.showCanvas && (
         <aside
           ref={canvasRef}
           style={{ width: shownCanvasWidth }}
@@ -3113,6 +3126,35 @@ export default function App() {
           />
           </React.Suspense>
         </aside>
+      )}
+
+      {/* 오른쪽 작업 패널: 터미널 (캔버스가 열려 있으면 그 오른쪽) */}
+      {workPanel.showPanel && (
+        <React.Suspense
+          fallback={
+            <aside
+              style={{ width: workPanel.width }}
+              className="shrink-0 border-l border-[#E2E0D8] dark:border-[#2E2E2A] bg-white dark:bg-[#232321] p-4 text-xs text-stone-500"
+            >
+              터미널을 불러오는 중...
+            </aside>
+          }
+        >
+        <WorkPanel
+          panel={workPanel}
+          isDark={isDark}
+          windowWidth={windowWidth}
+          shell={settings.terminalShell ?? "powershell"}
+          onShellChange={(id) =>
+            BackendAPI.saveSettings({ ...settings, terminalShell: id })
+              .then(setSettings)
+              .catch((err) => setErrorBanner(String(err)))
+          }
+          onLink={(url) => {
+            if (isExternalLink(url)) BackendAPI.openExternalUrl(url).catch(() => {});
+          }}
+        />
+        </React.Suspense>
       )}
 
       {pythonRun && activeProject && (

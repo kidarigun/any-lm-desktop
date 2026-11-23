@@ -23,6 +23,8 @@ export interface AppSettings {
   modelPrefs: Record<string, ModelPref>;
   /** 요청에 맞는 Skill을 앱이 골라 미리 넣는다. 없으면 켜짐 */
   skillAutoLoad?: boolean;
+  /** 작업 패널 터미널의 셸: "powershell"(기본) | "pwsh" | "cmd" */
+  terminalShell?: string;
 }
 
 export interface Project {

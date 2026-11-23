@@ -30,6 +30,12 @@ sha2 = "0.10"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
+# 오른쪽 작업 패널의 터미널 (Windows ConPTY)
+portable-pty = "0.9.0"
+
+[target.'cfg(windows)'.dependencies]
+# 터미널 프로세스 트리를 Job Object로 묶어 닫기·앱 종료 때 함께 끝낸다.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [dev-dependencies]
 tempfile = "3"
