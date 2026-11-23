@@ -202,6 +202,16 @@ pub struct ToolSpec {
     pub description: String,
     pub schema: Value,
     pub auto_approve: bool,
+    /// 찾아보기 목록에서 설치한 서버면 그 항목 ID (아니면 빈 문자열)
+    pub catalog_id: String,
+}
+
+/// 앱에 내장된 공식 웹 검색 서버의 찾아보기 항목 ID (`src/catalog/builtin.ts`와 같아야 한다)
+pub const BUILTIN_SEARCH_CATALOG_IDS: [&str; 8] =
+    ["tavily", "exa", "brave-search", "perplexity", "firecrawl", "kagi", "jina", "linkup"];
+
+pub fn is_builtin_search_catalog_id(id: &str) -> bool {
+    BUILTIN_SEARCH_CATALOG_IDS.contains(&id)
 }
 
 impl ToolSpec {
@@ -1389,6 +1399,7 @@ impl McpManager {
                     description: desc,
                     schema: t.input_schema.clone(),
                     auto_approve: cfg.auto_approve.contains(&t.name),
+                    catalog_id: cfg.catalog_id.clone(),
                 });
             }
         }
@@ -2123,5 +2134,33 @@ rl.on('line', (line) => {
             let (out, _) = c.client.call_tool("search", &json!({ "q": "모델" })).await.unwrap();
             assert_eq!(out, "찾음: 모델");
         }
+    }
+    /// 실제 인터넷의 Exa 공식 서버(키 없음)에 앱의 MCP 클라이언트로 붙어 본다.
+    /// `cargo test --lib live_exa -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "인터넷 필요"]
+    async fn live_exa_keyless_search() {
+        let secrets = MemorySecrets::default();
+        let cfg = McpServerConfig {
+            id: "exa-live".into(),
+            name: "Exa 웹 검색".into(),
+            transport: "http".into(),
+            url: "https://mcp.exa.ai/mcp".into(),
+            catalog_id: "exa".into(),
+            ..Default::default()
+        };
+        let c = Client::connect(&cfg, &secrets, None).await.expect("연결");
+        let names: Vec<&str> = c.tools.iter().map(|t| t.name.as_str()).collect();
+        println!("tools: {:?}", names);
+        assert!(names.contains(&"web_search_exa"), "{:?}", names);
+        let (out, is_err) = c
+            .client
+            .call_tool("web_search_exa", &json!({ "query": "latest Rust stable release", "numResults": 3 }))
+            .await
+            .expect("호출");
+        println!("is_error={} len={}
+{}", is_err, out.len(), out.chars().take(400).collect::<String>());
+        assert!(!is_err && !out.trim().is_empty());
+        c.client.close().await;
     }
 }

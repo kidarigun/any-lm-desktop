@@ -38,6 +38,8 @@ interface CatalogBase {
   note?: string;
   /** 처음 설정 방법을 설명하는 페이지 */
   guide?: string;
+  /** 앱에 내장된 공식 항목 (원격 목록의 값은 쓰지 않는다) */
+  official?: boolean;
 }
 
 export interface CatalogMcp extends CatalogBase {
@@ -115,6 +117,8 @@ function base(raw: Json): CatalogBase | null {
     license: str(raw.license) || undefined,
     note: str(raw.note) || undefined,
     guide: link(raw.guide),
+    // 원격 데이터가 스스로 공식 표시를 달 수 없게 항상 비운다 (내장 목록만 builtinCatalog에서 붙인다).
+    official: undefined,
   };
 }
 
@@ -208,6 +212,23 @@ export function normalizeCatalog(raw: unknown, catalogUrl: string): Catalog {
     updated: str(data.updated) || undefined,
     mcp: filteredMcp,
     skills: skills.filter(unique),
+  };
+}
+
+/**
+ * 내장 목록과 원격 목록을 합친다. 내장 항목이 먼저, 같은 id는 내장이 이긴다.
+ * 원격 목록이 없으면(받지 못했고 저장본도 없음) 내장 항목만 돌려준다.
+ */
+export function mergeCatalogs(builtin: Catalog, remote: Catalog | null): Catalog {
+  if (!remote) return { ...builtin, mcp: [...builtin.mcp], skills: [...builtin.skills] };
+  const mcpIds = new Set(builtin.mcp.map((m) => m.id));
+  const skillIds = new Set(builtin.skills.map((s) => s.id));
+  return {
+    name: remote.name,
+    homepage: remote.homepage,
+    updated: remote.updated,
+    mcp: [...builtin.mcp, ...remote.mcp.filter((m) => !mcpIds.has(m.id))],
+    skills: [...builtin.skills, ...remote.skills.filter((s) => !skillIds.has(s.id))],
   };
 }
 

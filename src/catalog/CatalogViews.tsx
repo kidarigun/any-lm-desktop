@@ -6,6 +6,7 @@ import {
   buildMcpInstall,
   categoriesOf,
   filterEntries,
+  mergeCatalogs,
   missingRuntimes,
   normalizeCatalog,
   oauthInputKeys,
@@ -15,6 +16,7 @@ import {
   type CatalogSkill,
   type Runtimes,
 } from "./catalog";
+import { builtinCatalog } from "./builtin";
 import { joinArgs } from "../mcp/importConfig";
 import { RuntimeInstallButton } from "../runtime/RuntimePanel";
 
@@ -57,12 +59,19 @@ export function useCatalog() {
     setError("");
     try {
       const [r, rt] = await Promise.all([BackendAPI.catalogLoad(url || undefined), BackendAPI.catalogRuntimes()]);
-      memo = { url: r.url, catalog: normalizeCatalog(r.catalog, r.url), fromCache: r.fromCache, error: r.error };
+      memo = { url: r.url, catalog: mergeCatalogs(builtinCatalog(), normalizeCatalog(r.catalog, r.url)), fromCache: r.fromCache, error: r.error };
       runtimesMemo = rt;
       setData(memo);
       setRuntimes(rt);
     } catch (e) {
+      // 목록을 받지 못했고 저장본도 없으면 내장 목록만 보여 준다 (기억해 두지 않아 다시 시도할 수 있다).
+      setData((prev) => prev ?? { url, catalog: mergeCatalogs(builtinCatalog(), null), fromCache: false, error: null });
       setError(errorText(e));
+      const rt = await BackendAPI.catalogRuntimes().catch(() => null);
+      if (rt) {
+        runtimesMemo = rt;
+        setRuntimes(rt);
+      }
     } finally {
       setLoading(false);
     }
@@ -212,11 +221,12 @@ function RuntimeNotice({ missing, onInstalled }: { missing: string[]; onInstalle
   );
 }
 
-function Meta({ e }: { e: { category: string; publisher?: string; homepage?: string; license?: string; note?: string; guide?: string } }) {
+function Meta({ e }: { e: { category: string; publisher?: string; homepage?: string; license?: string; note?: string; guide?: string; official?: boolean } }) {
   return (
     <>
     <div className="flex items-center gap-1.5 flex-wrap text-[10px] text-stone-400 dark:text-stone-500">
       <span className="px-1.5 py-px rounded bg-stone-100 dark:bg-[#2C2C29] text-stone-500 dark:text-stone-400">{e.category}</span>
+      {e.official && <span className="px-1.5 py-px rounded bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 font-semibold">공식</span>}
       {e.publisher && <span>{e.publisher}</span>}
       {e.license && <span>{e.license}</span>}
       {e.guide && (
@@ -241,6 +251,12 @@ function StatusLine({ loading, error, data }: { loading: boolean; error: string;
       <div className="py-6 text-center text-red-700 dark:text-red-400 space-y-1">
         <p>목록을 불러오지 못했습니다.</p>
         <p className="text-[11px]">{error}</p>
+      </div>
+    );
+  if (error && data)
+    return (
+      <div className="mb-2 px-3 py-1.5 rounded-lg bg-amber-50 dark:bg-amber-900/20 text-[11px] text-amber-800 dark:text-amber-300">
+        인터넷에서 목록을 받지 못했습니다. 앱에 들어 있거나 이미 받아 둔 항목만 보여 줍니다. ({error})
       </div>
     );
   if (loading && !data) return <div className="py-8 text-center text-stone-500">목록을 불러오는 중...</div>;
