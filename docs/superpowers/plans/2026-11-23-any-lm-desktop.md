@@ -534,7 +534,7 @@ it("has no K-EXAONE branding in UI sources", () => {
 **Files:**
 - Modify: `docs/handoff/STATUS.md`, `docs/handoff/LOG.md`
 
-- [ ] **Step 1: 스펙 7절 완료 기준 1~8을 하나씩 실측**하고, 기준마다 결과(통과/실패, 근거)를 STATUS "마지막 확인"에 적는다. 실패한 기준은 새 작업으로 이 계획 끝에 추가한다.
+- [x] **Step 1: 스펙 7절 완료 기준 1~8을 하나씩 실측**하고, 기준마다 결과(통과/실패, 근거)를 STATUS "마지막 확인"에 적는다. 실패한 기준은 새 작업으로 이 계획 끝에 추가한다.
 
 - [ ] **Step 2: 인계 연습(완료 기준 9).** 사용자에게 다른 도구(Codex 또는 Antigravity)에서 `docs/handoff/START.md`의 시작 문구로 세션을 열어 달라고 요청한다. 그 도구가 STATUS만 보고 남은 일(또는 작은 연습 작업: README 오탈자 수정 같은 것)을 이어서 커밋하는지, 커밋에 `Agent:` 줄이 붙는지, STATUS·LOG를 갱신하는지 확인한다. 어긋난 점은 `AGENTS.md`에 규칙으로 보탠다.
 

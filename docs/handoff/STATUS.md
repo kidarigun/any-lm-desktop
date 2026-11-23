@@ -21,15 +21,23 @@
 - 작업 11(harness를 LM Studio로, 문서 정리): 완료. `harness::config_from_env`(ANYLM_MODEL 필수, ANYLM_SERVER 기본 http://localhost:1234, ANYLM_CONTEXT 기본 32768, 선택 ANYLM_TOKEN)로 설정을 만들고 앱 설정·자격 증명 관리자는 읽지 않는다. 호출 상한 로직 삭제, 시험용 변수는 모두 `ANYLM_*`(EXA_* 없음). README·CHANGELOG(0.1.0)·NOTICE 재작성, THIRD_PARTY_NOTICES 재생성(updater 항목 제거).
 
 ## 마지막 확인
-2026-11-23, 작업 11 완료 시점:
-- `npm test` → 통과 (20 파일, 114 통과, 1 건너뜀)
-- `npx tsc --noEmit` → 통과 (오류 없음)
-- `cd src-tauri && cargo test --lib` → 통과 (159 통과, 0 실패, 8 무시)
-- 실측 하니스: `ANYLM_MODEL=qwen3.5-9b`, `ANYLM_SCENARIOS=../harness/smoke.json`로 `harness::live` 실행 → smoke-hello 1개 시나리오가 끝까지 돌고 검사 1/1 통과(호출 1회, 52초, 입력 189·출력 1780 토큰). LM Studio는 qwen3.5-9b(32768) 1개만 로드된 상태 그대로(로드·언로드 안 함). 전체 시나리오(`make_scenarios.py`)는 돌리지 않았다.
-1. 계획의 작업 12부터 이어서 진행한다(`docs/superpowers/plans/2026-11-23-any-lm-desktop.md`).
-2. 작업 1의 단계 6은 사용자가 승인하면 한다: "`kidarigun/any-lm-desktop` 비공개 저장소를 만들고 main을 올릴까요?" → 승인 시 `gh repo create kidarigun/any-lm-desktop --private --source . --remote origin --push`.
+2026-11-23, 작업 12 단계 1(완료 기준 실측). 명령으로 확인한 것만 적었고 화면은 보지 못했다.
+- `npm test` → 통과 (20 파일, 114 통과, 1 건너뜀) · `npx tsc --noEmit` → 오류 없음 · `cd src-tauri && cargo test --lib` → 159 통과, 0 실패, 8 무시
+
+| # | 완료 기준 | 결과 | 근거 |
+|---|---|---|---|
+| 1 | 앱이 뜨고 원본과 동시 실행, 서로 안 보임 | 부분 통과 — 화면 확인 필요 | `npm run tauri dev`로 창 "Any LM Desktop"(포트 45789 LISTEN) 실행. 설치된 원본(`%LOCALAPPDATA%\Desktop App for LG K-EXAONE\exaone-desktop.exe`)을 같이 띄우니 창 "Desktop App for LG K-EXAONE"(포트 45788)이 동시에 떴다. identifier `io.github.kidarigun.anylm-desktop` vs `...kexaone-desktop`, 데이터 폴더 `%APPDATA%` 아래 서로 따로, 둘 다 종료함. 창 모양·대화가 안 섞이는지는 눈으로 |
+| 2 | 모델 목록·연결 상태 | 부분 통과 — 화면 확인 필요 | `GET /api/v1/models` → qwen3.6-35b-a3b, qwen3.5-9b, 임베딩 1개. `parse_models`·`server_urls` 테스트 통과, `lm_server_running`은 같은 서버를 본다. 연결 창에 보이는 모습은 눈으로 |
+| 3 | 대화별 모델 전환, 모델 이름 표시 | 부분 통과 — 화면 확인 필요 | `/v1/chat/completions`에 `"model":"qwen3.5-9b"` → 응답 model 일치(추론 토큰 0). `sendFlow`·`statsLine`(모델 이름 끝에) 테스트 통과. 9B→35B [내리고 로드]는 8GB라 로드하지 않음 |
+| 4 | 로드 안 된 모델은 앱 컨텍스트로 로드 후 답 | 부분 통과 — 화면 확인 필요 | `plan_load_cases`·`plan_load_missing_model`·`wanted_context_respects_prefs_and_max`·`sendFlow` "maps load plans to the next step"(notLoaded→load) 통과. 실제 로드 후 답하는 화면은 눈으로 |
+| 5 | 프로젝트 모드 파일 만들기·수정·되돌리기 | 통과(되돌리기는 단위 테스트) | 하니스 `proj-multiturn`을 qwen3.5-9b로 실행: `read_file`→`write_file`(summary.md 생성)→`modify_file`(맨 끝에 "다음 회의: 11월 20일 오전 10시" 추가, 파일에서 확인)→`write_file`(summary_en.md), 8회·54초, 검사 6/7(실패 1건은 날짜 표기 "11월 27일" vs 모델이 쓴 "2026-11-27", 파일 만들기·수정과 무관). 되돌리기는 `fs_ops::test_read_write_modify_delete_and_undo`·`binary_overwrite_and_delete_can_be_undone`·`snapshot_diff` 테스트. 되돌리기 버튼 화면은 눈으로 |
+| 6 | 70% 자동 압축·긴급 압축 | 부분 통과 — 화면 확인 필요 | `auto_compact_triggers_at_70_percent`·`auto_compact_respects_setting`·`auto_compact_skips_when_nothing_to_cover`, `summary_request_uses_conversation_model_and_reasoning_off`, `stream_overflow_error_escalates_compaction_instead_of_plain_retry`, `context_overflow_is_retried_with_shorter_history`, `detects_lm_studio_overflow` 통과. 압축 카드와 진행 문구는 눈으로 |
+| 7 | K-EXAONE 전용 요소 없음 | 통과(화면 문구는 눈으로 한 번 더) | `ui/noBrandText.test.ts` 통과. `git grep -i -E "rate|만료|low|high|max|update|업데이트|exaone|엑사원" -- src`를 훑어 판정: 남은 것은 Tailwind `max-w-*`·`Math.max`·`updated`(대화 갱신)·내부 이름(`onExaoneStream`, `exaone-stream`, `exaone-ordered`, 드래그 MIME)뿐이고 호출 한도·키 만료·추론 강도 low/high/max·업데이트 화면은 없음. 사소한 잔재 2건(화면에 안 보임): `src/types.ts:183` 주석의 "하루 호출 한도", `src/api.ts:488` 카탈로그 기본 주소 `kidarigun/exaone-catalog` |
+| 8 | 모든 테스트 통과 | 통과 | 위 세 명령: 114 / 오류 0 / 159 |
+| 9 | 인계 연습 | 사용자와 함께 진행 예정 | 작업 12 단계 2 |
 
 ## 결정 필요
+- 작업 12 단계 2(인계 연습)는 사용자와 함께 한다.
 - GitHub 비공개 저장소 생성·푸시 여부(작업 1 단계 6).
 
 ## 기준 상태
@@ -40,17 +48,30 @@
 - `cargo test --lib`: 121 통과 / 실패 0 / 7 무시(ignored)
 
 ## 수동 확인 목록
-(사람이 화면에서 직접 확인해야 하는 항목을 이후 작업이 여기에 덧붙인다.)
-- 원본 앱과 새 앱 창이 동시에 뜨는지 눈으로 확인 (작업 2: 프로세스·포트·데이터 폴더만 확인했고 창 모양은 보지 못했다)
-- 앱 개발자 도구에서 lm_list_models 결과 확인: `await window.__TAURI__.core.invoke("lm_list_models")` → 모델 2개(작업 4는 GUI를 못 봐서 `#[ignore]` 실서버 테스트로 대신 확인)
-- LM Studio 화면에서 모델별 GPU 설정(전문가 가중치 CPU로)을 저장해 둔 뒤 앱으로 로드해도 그 값이 유지되는지 (작업 4: 저장값이 없는 상태에서만 확인, 결정 기록 0002)
-- LM Studio 연결 창에서 두 모델이 보이고 9B 행이 '로드됨 · 32K'인지 확인 (작업 5: GUI를 못 봐서 단위 테스트와 빌드로만 확인)
-- 한 대화에서 9B로 한 번 묻고 모델 선택을 35B로 바꿔 한 번 더 묻기 → [내리고 로드] 후 35B가 답하고 두 답변 아래 모델 이름이 다른지, 입력창 아래 모델 선택 모양·로드 중 표시·'다시 로드' 안내 (작업 6: GUI를 못 봐서 단위 테스트·빌드·curl 요청 본문 확인만 했다. 8GB VRAM이라 35B는 로드하지 않았다)
-- 입력창 아래 "생각하기" 체크가 추론 지원 모델(9B·35B)에서만 보이고, 끄고 보낸 답변이 생각 없이 바로 나오는지, 켜면 다시 생각하는지 (작업 7: GUI를 못 봐서 단위 테스트·빌드·curl 실측만 했다. 35B는 8192로 잠깐 로드해 curl로만 확인)
-- 컨텍스트를 8192로 로드한 9B에 긴 답변이 나오는 질문을 몇 번 해서, 70%를 넘을 때 "컨텍스트가 70% 찼습니다. 이전 대화를 요약하는 중…"이 보이고 압축 카드가 생기며 대화가 이어지는지 (작업 9: GUI·LM Studio 모델 변경 없이 단위 테스트와 mock 서버 요청 본문 확인만 했다). 확인 뒤 32768로 되돌릴 것
-- 헤더 이름 "Any LM Desktop"과 "LM" 로고 칸, 답변 아래 통계 줄(입력 · 출력 · 추론 · 초당 토큰 · 모델 이름), 프로젝트 지침 자리표시·압축 창 문구가 어색하지 않은지 화면으로 확인 (작업 10: GUI를 못 봐서 단위 테스트·빌드로만 확인)
+(사람이 화면에서 직접 확인해야 하는 항목. 화면별로 묶음.)
+
+### 시작·창
+- 원본 앱과 새 앱 창이 동시에 뜨고(작업 12에서 두 창이 같이 뜨는 것은 프로세스로 확인), 서로의 대화·설정이 보이지 않는지, 창 모양이 어색하지 않은지
+- 헤더 이름 "Any LM Desktop"과 "LM" 로고 칸, 프로젝트 지침 자리표시·압축 창 문구가 어색하지 않은지
+- 화면 어디에도 호출 한도·키 만료·추론 강도(low/high/max)·업데이트 표시가 없는지
+
+### LM Studio 연결 창
+- 두 모델이 보이고 9B 행이 '로드됨 · 32K'인지, 연결 점이 맞게 바뀌는지
+- 개발자 도구에서 `await window.__TAURI__.core.invoke("lm_list_models")` → 모델 2개
+- LM Studio 화면에서 모델별 GPU 설정(전문가 가중치 CPU로)을 저장해 둔 뒤 앱으로 로드해도 그 값이 유지되는지 (결정 기록 0002)
+
+### 대화 화면
+- 한 대화에서 9B로 한 번 묻고 모델 선택을 35B로 바꿔 한 번 더 묻기 → [내리고 로드] 후 35B가 답하고, 두 답변 아래 모델 이름이 다른지. 입력창 아래 모델 선택 모양·로드 중 표시·'다시 로드' 안내 (35B는 8GB VRAM에서 로드하지 않았다)
+- 로드되지 않은 모델을 고르고 보내면 앱이 정한 컨텍스트로 로드한 뒤 답하는지
+- 입력창 아래 "생각하기" 체크가 추론 지원 모델(9B·35B)에서만 보이고, 끄면 생각 없이 바로 답하며 켜면 다시 생각하는지
+- 답변 아래 통계 줄(입력 · 출력 · 추론 · 초당 토큰 · 모델 이름)이 어색하지 않은지
+- 9B를 8192로 로드해 긴 답변이 나오는 질문을 몇 번 해서, 70%를 넘을 때 "컨텍스트가 70% 찼습니다. 이전 대화를 요약하는 중…"이 보이고 압축 카드가 생기며 대화가 이어지는지. 확인 뒤 32768로 되돌릴 것
+
+### 프로젝트 화면
+- 프로젝트에서 파일을 만들고 고친 뒤 되돌리기 버튼으로 이전 내용이 돌아오는지 (백엔드는 테스트로 확인)
+- 에이전트 작업 도중 컨텍스트가 넘칠 때 긴급 압축으로 이어 가는지(필요하면 9B를 8192로 로드해 확인)
 
 ## 마지막 작업자
 - 도구: claude-code
-- 모델: Claude Sonnet 5.5
+- 모델: Claude Opus 5.5
 - 시각: 2026-11-23
