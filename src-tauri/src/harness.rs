@@ -473,7 +473,7 @@ async fn live() {
                     t.finish_reason,
                     usage_num(t, "prompt_tokens"),
                     usage_num(t, "completion_tokens"),
-                    usage_num(t, "reasoning_tokens"),
+                    t.usage.as_ref().and_then(crate::exaone::reasoning_tokens_of).unwrap_or(0),
                     t.error.as_deref().map(|e| format!("오류: {}", e.chars().take(120).collect::<String>())).unwrap_or_default(),
                 );
             }
@@ -513,7 +513,7 @@ async fn live() {
             "toolErrors": turns.iter().filter_map(|t| t.message.as_ref()).flat_map(|m| m.tool_records.iter()).filter(|r| r.status == "error").count(),
             "promptTokens": all_traces.iter().map(|t| usage_num(t, "prompt_tokens")).max().unwrap_or(0),
             "completionTokens": all_traces.iter().map(|t| usage_num(t, "completion_tokens")).sum::<u64>(),
-            "reasoningTokens": all_traces.iter().map(|t| usage_num(t, "reasoning_tokens")).sum::<u64>(),
+            "reasoningTokens": all_traces.iter().map(|t| t.usage.as_ref().and_then(crate::exaone::reasoning_tokens_of).unwrap_or(0)).sum::<u64>(),
             "reasoningChars": all_traces.iter().map(|t| t.reasoning_chars).sum::<usize>(),
             "contentChars": all_traces.iter().map(|t| t.content_chars).sum::<usize>(),
             "maxGapMs": all_traces.iter().map(|t| t.max_gap_ms).max().unwrap_or(0),

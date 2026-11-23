@@ -921,6 +921,17 @@ fn checkpoint_message(msg: &ChatMessage, partial: Option<(&str, &str, bool)>) ->
     m
 }
 
+/// 사용량(usage)에서 추론 토큰 수를 읽는다.
+/// LM Studio(OpenAI 호환)는 `usage.completion_tokens_details.reasoning_tokens`에 넣는다(결정 0003).
+/// 원본 K-EXAONE 서버의 최상위 `usage.reasoning_tokens`도 대비로 읽는다.
+pub(crate) fn reasoning_tokens_of(usage: &Value) -> Option<u64> {
+    usage
+        .get("completion_tokens_details")
+        .and_then(|d| d.get("reasoning_tokens"))
+        .and_then(Value::as_u64)
+        .or_else(|| usage.get("reasoning_tokens").and_then(Value::as_u64))
+}
+
 /// 요청 한 번의 호출·토큰·시간을 답변의 통계에 더한다.
 fn add_stats(msg: &mut ChatMessage, trace: &RoundTrace) {
     let num = |key: &str| trace.usage.as_ref().and_then(|u| u.get(key)).and_then(Value::as_u64);
@@ -931,7 +942,7 @@ fn add_stats(msg: &mut ChatMessage, trace: &RoundTrace) {
         stats.prompt_tokens = n;
     }
     stats.completion_tokens += num("completion_tokens").unwrap_or(0);
-    stats.reasoning_tokens += num("reasoning_tokens").unwrap_or(0);
+    stats.reasoning_tokens += trace.usage.as_ref().and_then(reasoning_tokens_of).unwrap_or(0);
 }
 
 struct StreamSink<'a, R: Runtime> {
@@ -3451,8 +3462,21 @@ mod tests {
     #[test]
     fn usage_chunk_is_kept() {
         let mut acc = RoundAccumulator::default();
-        acc.apply_chunk(&json!({"choices":[],"usage":{"prompt_tokens":22,"completion_tokens":234,"reasoning_tokens":216}})).unwrap();
-        assert_eq!(acc.usage.unwrap()["reasoning_tokens"], 216);
+        // LM Studio의 실제 모양 (결정 0003, harness/runs/task12 기록)
+        acc.apply_chunk(&json!({"choices":[],"usage":{"prompt_tokens":22,"completion_tokens":234,"total_tokens":256,"completion_tokens_details":{"reasoning_tokens":216}}})).unwrap();
+        let usage = acc.usage.unwrap();
+        assert_eq!(usage["completion_tokens_details"]["reasoning_tokens"], 216);
+        assert_eq!(reasoning_tokens_of(&usage), Some(216));
+    }
+
+    #[test]
+    fn reasoning_tokens_are_read_from_lm_studio_shape_with_old_fallback() {
+        assert_eq!(reasoning_tokens_of(&json!({"completion_tokens_details":{"reasoning_tokens":52}})), Some(52));
+        // 원본 서버의 최상위 필드
+        assert_eq!(reasoning_tokens_of(&json!({"reasoning_tokens":7})), Some(7));
+        // 둘 다 있으면 LM Studio 모양이 우선
+        assert_eq!(reasoning_tokens_of(&json!({"reasoning_tokens":7,"completion_tokens_details":{"reasoning_tokens":9}})), Some(9));
+        assert_eq!(reasoning_tokens_of(&json!({"prompt_tokens":3})), None);
     }
 
     #[test]
@@ -3720,12 +3744,12 @@ content-length: {}
         let r1 = vec![
             sse(json!({"choices":[{"delta":{"reasoning_content":"읽자"}}]})),
             sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"read_file","arguments":"{\"relative_path\":\"a.txt\"}"}}]}}]})),
-            sse(json!({"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20,"reasoning_tokens":5}})),
+            sse(json!({"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20,"completion_tokens_details":{"reasoning_tokens":5}}})),
             sse_done(),
         ];
         let r2 = vec![
             sse(json!({"choices":[{"delta":{"content":"읽었습니다."}}]})),
-            sse(json!({"choices":[],"usage":{"prompt_tokens":150,"completion_tokens":30,"reasoning_tokens":0}})),
+            sse(json!({"choices":[],"usage":{"prompt_tokens":150,"completion_tokens":30,"completion_tokens_details":{"reasoning_tokens":3}}})),
             sse_done(),
         ];
         let (url, _) = mock_server(vec![r1, r2], 0).await;
@@ -3758,7 +3782,7 @@ content-length: {}
         assert!(saved[0].incomplete && saved[0].tool_records.len() == 1 && saved[0].id == out.id);
         assert!(!out.incomplete);
         let stats = out.stats.unwrap();
-        assert_eq!((stats.api_calls, stats.prompt_tokens, stats.completion_tokens, stats.reasoning_tokens), (2, 150, 50, 5));
+        assert_eq!((stats.api_calls, stats.prompt_tokens, stats.completion_tokens, stats.reasoning_tokens), (2, 150, 50, 8));
     }
 
     #[tokio::test]
