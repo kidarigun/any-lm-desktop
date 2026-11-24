@@ -38,6 +38,16 @@ export interface AppSettings {
   skillAutoLoad?: boolean;
   /** 작업 패널 터미널의 셸: "powershell"(기본) | "pwsh" | "cmd" */
   terminalShell?: string;
+  /** 앱을 켤 때 새 버전이 있는지 확인할지 (없으면 켜짐) */
+  checkUpdates?: boolean;
+}
+
+/** 설치할 수 있는 새 버전 */
+export interface UpdateInfo {
+  currentVersion: string;
+  version: string;
+  notes?: string | null;
+  date?: string | null;
 }
 
 export interface Project {

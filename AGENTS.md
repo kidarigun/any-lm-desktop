@@ -4,7 +4,7 @@
 
 ## 1. 프로젝트
 
-Any LM Desktop은 사용자가 만든 K-EXAONE Desktop 0.4.4(Tauri v2 + React/TypeScript + Rust, 커밋 `e885b02`)를 이력째 복제해 **로컬 LLM(LM Studio · Ollama · OpenAI 호환 로컬 서버) 전용 데스크톱 작업 앱**으로 바꾸는 비공개 프로젝트다. 로컬 LLM 서버는 주로 채팅만 지원하므로, 이 앱이 문서 작성·캔버스·프로젝트 폴더 작업·코드 작업(에이전트 루프, HWPX/DOCX/PPTX/XLSX, Skill, MCP, 실행 환경 관리, 컨텍스트 압축)을 맡는다. 대상 환경은 RTX 5060 Laptop 8GB, RAM 32GB PC의 로컬 모델(Qwen3.5-9B, Qwen3.6-35B-A3B 등)이다. 설계 문서는 `docs/superpowers/specs/2026-11-23-any-lm-desktop-design.md`, 멀티 공급자 설계는 `docs/superpowers/specs/2026-11-24-multi-local-providers-design.md`, 구현 계획은 `docs/superpowers/plans/2026-11-23-any-lm-desktop.md` 및 `docs/superpowers/plans/2026-11-24-multi-local-providers.md`.
+Any LM Desktop은 사용자가 만든 K-EXAONE Desktop 0.4.4(Tauri v2 + React/TypeScript + Rust, 커밋 `e885b02`)를 이력째 복제해 **로컬 LLM(LM Studio · Ollama · OpenAI 호환 로컬 서버) 전용 데스크톱 작업 앱**으로 바꾸는 공개 오픈소스 프로젝트다. 로컬 LLM 서버는 주로 채팅만 지원하므로, 이 앱이 문서 작성·캔버스·프로젝트 폴더 작업·코드 작업(에이전트 루프, HWPX/DOCX/PPTX/XLSX, Skill, MCP, 실행 환경 관리, 컨텍스트 압축)을 맡는다. 대상 환경은 RTX 5060 Laptop 8GB, RAM 32GB PC의 로컬 모델(Qwen3.5-9B, Qwen3.6-35B-A3B 등)이다. 설계 문서는 `docs/superpowers/specs/2026-11-23-any-lm-desktop-design.md`, 멀티 공급자 설계는 `docs/superpowers/specs/2026-11-24-multi-local-providers-design.md`, 업데이터·통합 설정·공개 전환 설계는 `docs/superpowers/specs/2026-11-24-updater-settings-release-design.md`, 구현 계획은 `docs/superpowers/plans/2026-11-23-any-lm-desktop.md`, `docs/superpowers/plans/2026-11-24-multi-local-providers.md`, `docs/superpowers/plans/2026-11-24-updater-settings-release.md`.
 
 ## 2. 폴더 지도
 
@@ -41,10 +41,12 @@ Rust (`src-tauri/src/`)
 - `explorer/` — 파일 탐색기·@파일 멘션. `diff/` — 변경 보기와 이력.
 - `mcp/` — MCP 대화상자. `skills/` — Skill 대화상자와 "Skill 자동 불러오기" 스위치·카드 이름표 규칙(`autoLoad`). `catalog/` — 카탈로그 화면과 규칙(`catalog.ts`), 앱에 내장한 공식 웹 검색 MCP 8개(`builtin.ts`, 원격 목록과 `mergeCatalogs`로 합침. 결정 0006).
 - `python/` — Python 실행 대화상자. `runtime/` — 실행 환경 패널.
+- `settings/` — 통합 `[설정]` 모달(`SettingsDialog`, 4개 탭: 연결·모델 / Skill / MCP 서버 / 환경·업데이트)과 탭 규칙(`settingsTabs`, 결정 0013).
+- `update/` — GitHub Releases 기반 앱 자동 업데이트 UI(`UpdatePanel`: `useUpdater`, `UpdateBanner`, `UpdateSettings`).
 - `workpanel/` — 오른쪽 작업 패널: 열기/닫기·폭·Ctrl+`·캔버스와 함께 보기(`panelState`), 셸/서버/미리보기 탭(`tabs`), 상태 훅(`useWorkPanel`), 패널(`WorkPanel`, 지연 로딩)·터미널(`TerminalView`, `terminalApi`)·서버 실행(`ServerMenu`, `devServerApi`)·로컬 미리보기(`PreviewView`).
 - `security/` — HTML 정화. `ui/` — 패널 크기 조절·스크롤바 공용 UI, 화면 문구 브랜드 검사 테스트(`noBrandText`).
 
-그 밖: `harness/` 실측 시나리오와 결과 요약 스크립트, `scripts/third_party_notices.py`(THIRD_PARTY_NOTICES 생성), `docs/handoff/` 인계 문서, `docs/decisions/` 결정 기록, `docs/superpowers/` 설계·계획.
+그 밖: `harness/` 실측 시나리오와 결과 요약 스크립트, `scripts/make_latest_json.py`(자동 업데이트 `latest.json` 생성), `scripts/third_party_notices.py`(THIRD_PARTY_NOTICES 생성), `docs/handoff/` 인계 문서, `docs/decisions/` 결정 기록, `docs/superpowers/` 설계·계획.
 
 ## 3. 빌드·테스트 명령
 
@@ -76,7 +78,7 @@ Rust (`src-tauri/src/`)
 3. 커밋 메시지 끝에 `Agent: claude-code | codex | antigravity` 트레일러를 단다(어떤 도구가 한 일인지 나중에 알 수 있게).
 4. 토큰이 떨어져 가면 **인계 커밋**을 먼저 한다: 단계 중간이면 `wip:` 접두어로 커밋하고, STATUS의 "다음 할 일"에 정확한 위치(파일, 함수, 남은 작업)를 적는다. 커밋하지 않은 변경을 남긴 채 도구를 바꾸지 않는다.
 5. 계획에 없는 결정을 했으면 `docs/decisions/`에 남긴다. 사용자에게 물어야 할 것은 STATUS의 "결정 필요"에 적고 멈춘다.
-6. 브랜치: 비공개 단독 프로젝트이므로 `main`에서 바로 작업한다(도구를 바꿀 때 브랜치 혼동을 없애려고). 큰 실험만 별도 브랜치.
+6. 브랜치: 단독 프로젝트이므로 `main`에서 바로 작업한다(도구를 바꿀 때 브랜치 혼동을 없애려고). 큰 실험만 별도 브랜치. 공개 저장소(`kidarigun/any-lm-desktop`, PUBLIC)이므로 비밀키·토큰·실측 로그를 커밋하지 않도록 주의한다.
 7. 원본 수정 가져오기: `git fetch upstream` → `git cherry-pick <커밋>`. 충돌 해결 기록은 LOG에 남긴다.
 
 추가: 사람이 직접 화면에서 확인해야 하는 항목은 `docs/handoff/STATUS.md`의 "수동 확인 목록"에 덧붙인다. `docs/handoff/LOG.md`는 맨 아래에 추가만 한다.

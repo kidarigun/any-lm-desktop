@@ -30,6 +30,7 @@ export function SkillsDialog({
   autoLoad,
   onAutoLoadChange,
   onClose,
+  embedded = false,
 }: {
   /** 프로젝트·코드 화면이면 그 프로젝트 (프로젝트 Skill도 보여 준다) */
   projectId?: string;
@@ -38,6 +39,7 @@ export function SkillsDialog({
   autoLoad: boolean;
   onAutoLoadChange: (on: boolean) => Promise<void>;
   onClose: () => void;
+  embedded?: boolean;
 }) {
   const [skills, setSkills] = useState<SkillInfo[] | null>(null);
   const [error, setError] = useState("");
@@ -65,10 +67,11 @@ export function SkillsDialog({
   }, [refresh]);
 
   useEffect(() => {
+    if (embedded) return;
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, embedded]);
 
   async function run(task: () => Promise<void>) {
     setBusy(true);
@@ -230,25 +233,31 @@ export function SkillsDialog({
   const btn =
     "px-2.5 py-1.5 rounded-lg border border-stone-300 dark:border-[#3A3A36] bg-white dark:bg-[#1E1E1C] hover:bg-stone-50 dark:hover:bg-[#2A2A27] text-stone-700 dark:text-stone-200 font-medium flex items-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed";
 
-  return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div role="dialog" aria-label="Skill" className="bg-[#FAF9F5] dark:bg-[#262624] border border-stone-200 dark:border-[#3A3A36] rounded-2xl w-full max-w-2xl max-h-[85vh] flex flex-col shadow-xl text-xs">
-        <div className="flex items-start justify-between gap-3 px-5 pt-5 pb-3">
-          <div>
+  const px = embedded ? "" : "px-5 ";
+  const mx = embedded ? "" : "mx-5 ";
+
+  const inner = (
+    <>
+      <div className={`flex items-start justify-between gap-3 ${px}${embedded ? "" : "pt-5 "}pb-3`}>
+        <div>
+          {!embedded && (
             <h3 className="text-sm font-bold text-stone-900 dark:text-stone-100 flex items-center gap-1.5">
               <Sparkles className="w-4 h-4 text-[#A50034] dark:text-[#FF5C8D]" /> Skill
             </h3>
-            <p className="mt-1 text-stone-500 dark:text-stone-400 leading-relaxed">
-              모델이 요청에 맞는 Skill을 골라 그 지침대로 작업합니다. 켜 둔 Skill은 이름과 설명만 먼저 전달되고, 필요할 때 본문을 읽습니다.
-              {activeCount > 0 && <> 지금 <b className="text-stone-700 dark:text-stone-200">{activeCount}개</b> 사용 중.</>}
-            </p>
-          </div>
+          )}
+          <p className={`${embedded ? "" : "mt-1 "}text-stone-500 dark:text-stone-400 leading-relaxed`}>
+            모델이 요청에 맞는 Skill을 골라 그 지침대로 작업합니다. 켜 둔 Skill은 이름과 설명만 먼저 전달되고, 필요할 때 본문을 읽습니다.
+            {activeCount > 0 && <> 지금 <b className="text-stone-700 dark:text-stone-200">{activeCount}개</b> 사용 중.</>}
+          </p>
+        </div>
+        {!embedded && (
           <button onClick={onClose} aria-label="닫기" className="p-1 cursor-pointer">
             <X className="w-4 h-4 text-stone-400" />
           </button>
-        </div>
+        )}
+      </div>
 
-        <div className="px-5 pb-3 flex gap-1" role="tablist">
+      <div className={`${px}pb-3 flex gap-1`} role="tablist">
           {(
             [
               ["installed", "설치됨"],
@@ -272,7 +281,7 @@ export function SkillsDialog({
         </div>
 
         {tab === "installed" && (
-        <div className="px-5 pb-3 flex flex-wrap items-center gap-1.5">
+        <div className={`${px}pb-3 flex flex-wrap items-center gap-1.5`}>
           <button onClick={() => install("folder")} disabled={busy} className={btn}>
             <FolderPlus className="w-3.5 h-3.5" /> 폴더에서 추가
           </button>
@@ -293,7 +302,7 @@ export function SkillsDialog({
         )}
 
         {tab === "installed" && (
-          <div className="mx-5 mb-3 flex items-start gap-2.5 rounded-xl border border-stone-200 dark:border-[#383834] bg-white dark:bg-[#1E1E1C] px-3 py-2.5">
+          <div className={`${mx}mb-3 flex items-start gap-2.5 rounded-xl border border-stone-200 dark:border-[#383834] bg-white dark:bg-[#1E1E1C] px-3 py-2.5`}>
             <button
               role="switch"
               aria-checked={autoLoad}
@@ -321,7 +330,7 @@ export function SkillsDialog({
 
         {tab === "installed" && newName !== null && (
           <form
-            className="mx-5 mb-3 flex items-center gap-1.5"
+            className={`${mx}mb-3 flex items-center gap-1.5`}
             onSubmit={(e) => {
               e.preventDefault();
               void create();
@@ -343,7 +352,7 @@ export function SkillsDialog({
 
         {(error || notice) && (
           <div
-            className={`mx-5 mb-3 px-3 py-2 rounded-lg ${
+            className={`${mx}mb-3 px-3 py-2 rounded-lg ${
               error
                 ? "bg-red-50 dark:bg-red-900/20 text-red-800 dark:text-red-300"
                 : "bg-emerald-50 dark:bg-emerald-900/20 text-emerald-800 dark:text-emerald-300"
@@ -354,7 +363,7 @@ export function SkillsDialog({
           </div>
         )}
 
-        <div className="flex-1 min-h-0 overflow-y-auto px-5 pb-4 space-y-4">
+        <div className={`${embedded ? "" : "flex-1 min-h-0 overflow-y-auto px-5 "}pb-4 space-y-4`}>
           {tab === "browse" ? (
             <SkillCatalog
               installed={skills ?? []}
@@ -396,12 +405,23 @@ export function SkillsDialog({
           )}
         </div>
 
-        <div className="px-5 py-3 border-t border-stone-200 dark:border-[#34342F] text-[11px] text-stone-500 dark:text-stone-400 flex items-start gap-1.5">
+        <div className={`${px}py-3 border-t border-stone-200 dark:border-[#34342F] text-[11px] text-stone-500 dark:text-stone-400 flex items-start gap-1.5`}>
           <AlertTriangle className="w-3.5 h-3.5 mt-px shrink-0 text-amber-600" />
           <span>
             Skill 안의 스크립트는 실행하기 전에 항상 승인을 묻습니다. 믿을 수 있는 곳에서 받은 Skill만 설치하세요. 스크립트 실행은 프로젝트 화면에서만 됩니다.
           </span>
         </div>
+    </>
+  );
+
+  if (embedded) {
+    return <div className="text-xs flex flex-col">{inner}</div>;
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div role="dialog" aria-label="Skill" className="bg-[#FAF9F5] dark:bg-[#262624] border border-stone-200 dark:border-[#3A3A36] rounded-2xl w-full max-w-2xl max-h-[85vh] flex flex-col shadow-xl text-xs">
+        {inner}
       </div>
     </div>
   );

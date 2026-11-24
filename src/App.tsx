@@ -21,7 +21,6 @@ import {
   Paperclip,
   PanelLeftClose,
   PanelLeftOpen,
-  Plug,
   PanelRightClose,
   PanelRightOpen,
   Plus,
@@ -65,10 +64,9 @@ import { fileHistory } from "./diff/history";
 import { PanelResizer } from "./ui/PanelResizer";
 import { LoadBoundary } from "./ui/LoadBoundary";
 import { retryableLazy } from "./ui/retryableLazy";
-import { SkillsDialog } from "./skills/SkillsDialog";
 import { skillAutoLoadOn, toolBadgeLabel, withSkillAutoLoad } from "./skills/autoLoad";
-import { McpDialog } from "./mcp/McpDialog";
-import { ConnectionDialog } from "./lmstudio/ConnectionDialog";
+import { SettingsDialog } from "./settings/SettingsDialog";
+import { settingsButtonStatusTitle } from "./settings/settingsTabs";
 import { LoadChoiceDialog, type LoadChoice } from "./lmstudio/LoadChoiceDialog";
 import { ModelPicker, ReasoningToggle } from "./lmstudio/ModelPicker";
 import { PROVIDER_META, activeProvider } from "./lmstudio/providerMeta";
@@ -83,7 +81,7 @@ import {
 } from "./lmstudio/sendFlow";
 import { StartServerButton } from "./lmstudio/StartServerButton";
 import { statsLineText } from "./chat/statsLine";
-import { RuntimePanel } from "./runtime/RuntimePanel";
+import { UpdateBanner, useUpdater } from "./update/UpdatePanel";
 import { WorkPanelToggle } from "./workpanel/WorkPanelToggle";
 import { useWorkPanel } from "./workpanel/useWorkPanel";
 import { canvasRoom } from "./workpanel/panelState";
@@ -455,14 +453,11 @@ export default function App() {
   );
   // Modals
   const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
-  const [showSkills, setShowSkills] = useState(false);
-  const [showMcp, setShowMcp] = useState(false);
   /** 변경 보기 창: 함께 볼 변경 기록들과 처음 보여 줄 기록 */
   const [diffView, setDiffView] = useState<{ ids: string[]; initial: string; variant?: "files" | "history" } | null>(null);
   /** Python 실행 창에 띄운 스크립트 (프로젝트 기준 상대 경로) */
   const [pythonRun, setPythonRun] = useState<string | null>(null);
-  const [settingsError, setSettingsError] = useState<string | null>(null);
-  /** LM Studio 서버 연결 상태(null = 아직 모름) */
+  /** LM Studio / 로컬 LLM 서버 연결 상태(null = 아직 모름) */
   const [serverUp, setServerUp] = useState<boolean | null>(null);
   const refreshServerStatus = React.useCallback(async () => {
     try {
@@ -479,9 +474,9 @@ export default function App() {
   /** 저장하지 않고 닫으면 입력하던 키는 버린다. */
   function closeSettingsModal() {
     setSettings((s) => ({ ...s, apiKey: "" }));
-    setSettingsError(null);
     setShowSettingsModal(false);
   }
+  const updater = useUpdater(settings.checkUpdates);
   const [showProjectModal, setShowProjectModal] = useState<boolean>(false);
   /** 지침 편집기를 연 프로젝트 id (닫혀 있으면 null). 화면의 프로젝트를 바꾸지 않고도 열 수 있다. */
   const [instructionsEditorId, setInstructionsEditorId] = useState<string | null>(null);
@@ -609,7 +604,7 @@ export default function App() {
       });
       setSettings({ ...saved, apiKey: "" });
     } catch (e) {
-      setSettingsError(String(e));
+      setErrorBanner(String(e));
     }
   }
 
@@ -1986,38 +1981,25 @@ export default function App() {
 
         {/* Bottom Settings Button */}
         <div className="p-3 border-t border-[#E2E0D8] dark:border-[#2C2C29] space-y-1.5">
-          <button
-            onClick={() => setShowSkills(true)}
-            className="w-full py-2 px-3 rounded-xl bg-white dark:bg-[#242421] hover:bg-stone-100 dark:hover:bg-[#2E2E2A] border border-stone-300/80 dark:border-[#383834] text-xs font-medium text-stone-700 dark:text-stone-200 flex items-center gap-1.5 cursor-pointer transition"
-          >
-            <Sparkles className="w-3.5 h-3.5 text-stone-500 dark:text-stone-400" />
-            Skill
-          </button>
-          <button
-            onClick={() => setShowMcp(true)}
-            className="w-full py-2 px-3 rounded-xl bg-white dark:bg-[#242421] hover:bg-stone-100 dark:hover:bg-[#2E2E2A] border border-stone-300/80 dark:border-[#383834] text-xs font-medium text-stone-700 dark:text-stone-200 flex items-center gap-1.5 cursor-pointer transition"
-          >
-            <Plug className="w-3.5 h-3.5 text-stone-500 dark:text-stone-400" />
-            MCP 서버
-          </button>
+          <UpdateBanner updater={updater} runningCount={Object.keys(runs).length} />
           <button
             onClick={() => setShowSettingsModal(true)}
             className="w-full py-2 px-3 rounded-xl bg-white dark:bg-[#242421] hover:bg-stone-100 dark:hover:bg-[#2E2E2A] border border-stone-300/80 dark:border-[#383834] text-xs font-medium text-stone-700 dark:text-stone-200 flex items-center justify-between cursor-pointer transition"
           >
             <span className="flex items-center gap-1.5">
               <Settings className="w-3.5 h-3.5 text-stone-500 dark:text-stone-400" />
-              {providerMeta.label} 연결
+              설정
             </span>
             <span
               className="flex items-center gap-1 text-[11px] font-semibold text-stone-500 dark:text-stone-400"
-              title={serverUp === null ? "확인 중" : serverUp ? "연결됨" : "꺼져 있음"}
+              title={settingsButtonStatusTitle(providerMeta.label, serverUp)}
             >
               <span
                 className={`w-2 h-2 rounded-full ${
                   serverUp === null ? "bg-stone-400" : serverUp ? "bg-emerald-500" : "bg-red-500"
                 }`}
               />
-              {serverUp === null ? "" : serverUp ? "연결됨" : "꺼져 있음"}
+              {providerMeta.label}
             </span>
           </button>
         </div>
@@ -3228,21 +3210,6 @@ export default function App() {
         </React.Suspense>
       )}
 
-      {showSkills && (
-        <SkillsDialog
-          projectId={activeMode !== "chat" ? activeProject?.id : undefined}
-          projectName={activeMode !== "chat" ? activeProject?.name : undefined}
-          autoLoad={skillAutoLoadOn(settings)}
-          onAutoLoadChange={async (on) => {
-            const saved = await BackendAPI.saveSettings(withSkillAutoLoad(settings, on));
-            setSettings({ ...saved, apiKey: "" });
-          }}
-          onClose={() => setShowSkills(false)}
-        />
-      )}
-
-      {showMcp && <McpDialog onClose={() => setShowMcp(false)} />}
-
       {loadChoice && (
         <LoadChoiceDialog
           loadedNames={loadChoice.loadedNames}
@@ -3251,18 +3218,17 @@ export default function App() {
         />
       )}
 
-      {/* Modal 1: 로컬 LLM 연결 */}
+      {/* Modal 1: 통합 설정 */}
       {showSettingsModal && (
-        <ConnectionDialog
+        <SettingsDialog
           settings={settings}
           onSettingsChanged={(saved) => setSettings({ ...saved, apiKey: "" })}
-          onSave={async (next) => {
+          onSaveSettings={async (next) => {
             const prevProvider = activeProvider(settings);
             const prevUrl = settings.serverUrl;
             const saved = await BackendAPI.saveSettings(next);
             const nextProvider = activeProvider(saved);
             setSettings({ ...saved, apiKey: "" });
-            setSettingsError(null);
             setShowSettingsModal(false);
             if (prevProvider !== nextProvider || prevUrl !== saved.serverUrl) {
               setModels([]);
@@ -3274,6 +3240,20 @@ export default function App() {
             void refreshModels();
           }}
           onClose={closeSettingsModal}
+          projectId={activeMode !== "chat" ? activeProject?.id : undefined}
+          projectName={activeMode !== "chat" ? activeProject?.name : undefined}
+          skillAutoLoad={skillAutoLoadOn(settings)}
+          onSkillAutoLoadChange={async (on) => {
+            const saved = await BackendAPI.saveSettings(withSkillAutoLoad(settings, on));
+            setSettings({ ...saved, apiKey: "" });
+          }}
+          updater={updater}
+          runningCount={Object.keys(runs).length}
+          autoCheckUpdates={settings.checkUpdates !== false}
+          onAutoCheckUpdatesChange={async (value) => {
+            const saved = await BackendAPI.saveSettings({ ...settings, apiKey: "", checkUpdates: value });
+            setSettings({ ...saved, apiKey: "" });
+          }}
         />
       )}
 

@@ -134,7 +134,7 @@ function KeyValueRows({
 }
 
 /** MCP 서버를 추가·연결·관리하는 창 */
-export function McpDialog({ onClose }: { onClose: () => void }) {
+export function McpDialog({ onClose, embedded = false }: { onClose: () => void; embedded?: boolean }) {
   const [servers, setServers] = useState<McpServerView[] | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [importText, setImportText] = useState<string | null>(null);
@@ -168,13 +168,19 @@ export function McpDialog({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (draft) setDraft(null);
-      else if (importText !== null) setImportText(null);
-      else onClose();
+      if (draft) {
+        if (embedded) e.stopImmediatePropagation();
+        setDraft(null);
+      } else if (importText !== null) {
+        if (embedded) e.stopImmediatePropagation();
+        setImportText(null);
+      } else if (!embedded) {
+        onClose();
+      }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, draft, importText]);
+    window.addEventListener("keydown", onKey, embedded);
+    return () => window.removeEventListener("keydown", onKey, embedded);
+  }, [onClose, draft, importText, embedded]);
 
   async function run(task: () => Promise<void>) {
     setBusy(true);
@@ -629,111 +635,128 @@ export function McpDialog({ onClose }: { onClose: () => void }) {
   );
 
   const connected = (servers ?? []).filter((s) => s.state.status === "connected").length;
+  const px = embedded ? "" : "px-5 ";
+  const mx = embedded ? "" : "mx-5 ";
+
+  const inner = (
+    <>
+      <div className={`flex items-start justify-between gap-3 ${px}${embedded ? "" : "pt-5 "}pb-3`}>
+        <div>
+          {(!embedded || draft) && (
+            <h3 className="text-sm font-bold text-stone-900 dark:text-stone-100 flex items-center gap-1.5">
+              {!embedded && <Plug className="w-4 h-4 text-[#A50034] dark:text-[#FF5C8D]" />}
+              {!embedded && "MCP 서버"}
+              {draft && <span className="font-normal text-stone-500">{!embedded ? "· " : ""}{draft.config.id ? "서버 편집" : "서버 추가"}</span>}
+            </h3>
+          )}
+          <p className={`${!embedded || draft ? "mt-1 " : ""}text-stone-500 dark:text-stone-400 leading-relaxed`}>
+            외부 도구 서버를 연결하면 모델이 그 도구를 쓸 수 있습니다. 모든 화면(채팅·프로젝트·코드)에서 쓰입니다.
+            {connected > 0 && <> 지금 <b className="text-stone-700 dark:text-stone-200">{connected}개</b> 연결됨.</>}
+          </p>
+        </div>
+        {!embedded && (
+          <button onClick={onClose} aria-label="닫기" className="p-1 cursor-pointer">
+            <X className="w-4 h-4 text-stone-400" />
+          </button>
+        )}
+      </div>
+
+      {!draft && importText === null && (
+      <div className={`${px}pb-3 flex gap-1`} role="tablist">
+        {(
+          [
+            ["installed", "내 서버"],
+            ["browse", "찾아보기"],
+          ] as const
+        ).map(([value, label]) => (
+          <button
+            key={value}
+            role="tab"
+            aria-selected={tab === value}
+            onClick={() => setTab(value)}
+            className={`px-3 py-1.5 rounded-lg font-semibold cursor-pointer ${
+              tab === value
+                ? "bg-stone-800 text-white dark:bg-stone-200 dark:text-stone-900"
+                : "text-stone-600 dark:text-stone-300 hover:bg-stone-200/60 dark:hover:bg-[#2C2C29]"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      )}
+
+      {!draft && importText === null && tab === "installed" && (
+        <div className={`${px}pb-3 flex flex-wrap items-center gap-1.5`}>
+          <button onClick={() => setDraft(draftOf(emptyConfig()))} className={btn}>
+            <Plus className="w-3.5 h-3.5" /> 서버 추가
+          </button>
+          <button onClick={() => setImportText("")} className={btn}>
+            <ClipboardPaste className="w-3.5 h-3.5" /> 설정 JSON 붙여넣기
+          </button>
+        </div>
+      )}
+
+      {(error || notice) && (
+        <div
+          className={`${mx}mb-3 px-3 py-2 rounded-lg whitespace-pre-wrap ${
+            error ? "bg-red-50 dark:bg-red-900/20 text-red-800 dark:text-red-300" : "bg-emerald-50 dark:bg-emerald-900/20 text-emerald-800 dark:text-emerald-300"
+          }`}
+          role={error ? "alert" : "status"}
+        >
+          {error || notice}
+        </div>
+      )}
+
+      <div className={`${embedded ? "" : "flex-1 min-h-0 overflow-y-auto px-5 "}pb-4`}>
+        {draft ? (
+          form
+        ) : importText !== null ? (
+          importPanel
+        ) : tab === "browse" ? (
+          <McpCatalog
+            installed={servers ?? []}
+            onInstalled={(id, name, needsLogin) => {
+              setError("");
+              setNotice(`'${name}' 서버를 추가했습니다. 연결 상태와 도구 목록은 여기서 확인하세요.`);
+              setOpen((o) => ({ ...o, [id]: true }));
+              setTab("installed");
+              void refresh();
+              // 로그인이 필요한 서버는 바로 브라우저 로그인을 시작한다.
+              if (needsLogin) void login(id, name);
+            }}
+          />
+        ) : servers === null ? (
+          <div className="py-8 text-center text-stone-500">불러오는 중...</div>
+        ) : servers.length === 0 ? (
+          <div className="py-6 text-stone-500 dark:text-stone-400 leading-relaxed space-y-1">
+            <p>아직 연결한 MCP 서버가 없습니다.</p>
+            <p>
+              쓰려는 MCP 서버의 안내 문서에 있는 설정 JSON을 [설정 JSON 붙여넣기]로 넣는 것이 가장 쉽습니다. 내 PC에서 실행하는 서버는 대부분 Node.js(npx)나 uv(uvx)가 설치되어 있어야 합니다.
+            </p>
+          </div>
+        ) : (
+          <ul className="space-y-1.5">{servers.map(card)}</ul>
+        )}
+      </div>
+
+      <div className={`${px}py-3 border-t border-stone-200 dark:border-[#34342F] text-[11px] text-stone-500 dark:text-stone-400 flex items-start gap-1.5`}>
+        <AlertTriangle className="w-3.5 h-3.5 mt-px shrink-0 text-amber-600" />
+        <span>
+          내 PC에서 실행하는 MCP 서버는 이 컴퓨터의 파일과 네트워크에 접근할 수 있는 프로그램입니다. 믿을 수 있는 서버만 추가하세요. 도구는 기본적으로 실행할 때마다 승인을 묻습니다.
+        </span>
+      </div>
+    </>
+  );
+
+  if (embedded) {
+    return <div className="text-xs flex flex-col">{inner}</div>;
+  }
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div role="dialog" aria-label="MCP 서버" className="bg-[#FAF9F5] dark:bg-[#262624] border border-stone-200 dark:border-[#3A3A36] rounded-2xl w-full max-w-2xl max-h-[85vh] flex flex-col shadow-xl text-xs">
-        <div className="flex items-start justify-between gap-3 px-5 pt-5 pb-3">
-          <div>
-            <h3 className="text-sm font-bold text-stone-900 dark:text-stone-100 flex items-center gap-1.5">
-              <Plug className="w-4 h-4 text-[#A50034] dark:text-[#FF5C8D]" /> MCP 서버
-              {draft && <span className="font-normal text-stone-500">· {draft.config.id ? "편집" : "추가"}</span>}
-            </h3>
-            <p className="mt-1 text-stone-500 dark:text-stone-400 leading-relaxed">
-              외부 도구 서버를 연결하면 모델이 그 도구를 쓸 수 있습니다. 모든 화면(채팅·프로젝트·코드)에서 쓰입니다.
-              {connected > 0 && <> 지금 <b className="text-stone-700 dark:text-stone-200">{connected}개</b> 연결됨.</>}
-            </p>
-          </div>
-          <button onClick={onClose} aria-label="닫기" className="p-1 cursor-pointer">
-            <X className="w-4 h-4 text-stone-400" />
-          </button>
-        </div>
-
-        {!draft && importText === null && (
-        <div className="px-5 pb-3 flex gap-1" role="tablist">
-          {(
-            [
-              ["installed", "내 서버"],
-              ["browse", "찾아보기"],
-            ] as const
-          ).map(([value, label]) => (
-            <button
-              key={value}
-              role="tab"
-              aria-selected={tab === value}
-              onClick={() => setTab(value)}
-              className={`px-3 py-1.5 rounded-lg font-semibold cursor-pointer ${
-                tab === value
-                  ? "bg-stone-800 text-white dark:bg-stone-200 dark:text-stone-900"
-                  : "text-stone-600 dark:text-stone-300 hover:bg-stone-200/60 dark:hover:bg-[#2C2C29]"
-              }`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-        )}
-
-        {!draft && importText === null && tab === "installed" && (
-          <div className="px-5 pb-3 flex flex-wrap items-center gap-1.5">
-            <button onClick={() => setDraft(draftOf(emptyConfig()))} className={btn}>
-              <Plus className="w-3.5 h-3.5" /> 서버 추가
-            </button>
-            <button onClick={() => setImportText("")} className={btn}>
-              <ClipboardPaste className="w-3.5 h-3.5" /> 설정 JSON 붙여넣기
-            </button>
-          </div>
-        )}
-
-        {(error || notice) && (
-          <div
-            className={`mx-5 mb-3 px-3 py-2 rounded-lg whitespace-pre-wrap ${
-              error ? "bg-red-50 dark:bg-red-900/20 text-red-800 dark:text-red-300" : "bg-emerald-50 dark:bg-emerald-900/20 text-emerald-800 dark:text-emerald-300"
-            }`}
-            role={error ? "alert" : "status"}
-          >
-            {error || notice}
-          </div>
-        )}
-
-        <div className="flex-1 min-h-0 overflow-y-auto px-5 pb-4">
-          {draft ? (
-            form
-          ) : importText !== null ? (
-            importPanel
-          ) : tab === "browse" ? (
-            <McpCatalog
-              installed={servers ?? []}
-              onInstalled={(id, name, needsLogin) => {
-                setError("");
-                setNotice(`'${name}' 서버를 추가했습니다. 연결 상태와 도구 목록은 여기서 확인하세요.`);
-                setOpen((o) => ({ ...o, [id]: true }));
-                setTab("installed");
-                void refresh();
-                // 로그인이 필요한 서버는 바로 브라우저 로그인을 시작한다.
-                if (needsLogin) void login(id, name);
-              }}
-            />
-          ) : servers === null ? (
-            <div className="py-8 text-center text-stone-500">불러오는 중...</div>
-          ) : servers.length === 0 ? (
-            <div className="py-6 text-stone-500 dark:text-stone-400 leading-relaxed space-y-1">
-              <p>아직 연결한 MCP 서버가 없습니다.</p>
-              <p>
-                쓰려는 MCP 서버의 안내 문서에 있는 설정 JSON을 [설정 JSON 붙여넣기]로 넣는 것이 가장 쉽습니다. 내 PC에서 실행하는 서버는 대부분 Node.js(npx)나 uv(uvx)가 설치되어 있어야 합니다.
-              </p>
-            </div>
-          ) : (
-            <ul className="space-y-1.5">{servers.map(card)}</ul>
-          )}
-        </div>
-
-        <div className="px-5 py-3 border-t border-stone-200 dark:border-[#34342F] text-[11px] text-stone-500 dark:text-stone-400 flex items-start gap-1.5">
-          <AlertTriangle className="w-3.5 h-3.5 mt-px shrink-0 text-amber-600" />
-          <span>
-            내 PC에서 실행하는 MCP 서버는 이 컴퓨터의 파일과 네트워크에 접근할 수 있는 프로그램입니다. 믿을 수 있는 서버만 추가하세요. 도구는 기본적으로 실행할 때마다 승인을 묻습니다.
-          </span>
-        </div>
+        {inner}
       </div>
     </div>
   );

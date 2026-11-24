@@ -1486,10 +1486,103 @@ pub(crate) async fn run_approved_tool<R: tauri::Runtime>(
     ApprovedRun { status, output, snapshot: new_snap, produced }
 }
 
+// ---------------------------------------------------------------------------
+// 자동 업데이트
+// 깃허브 릴리스의 latest.json을 읽어 새 버전이 있으면 알려 주고, 사용자가 누르면 내려받아 설치한다.
+// 설치 파일은 이 앱의 서명 키로 서명된 것만 받아들인다 (tauri.conf.json의 plugins.updater.pubkey).
+// ---------------------------------------------------------------------------
+
+pub const UPDATE_PROGRESS_EVENT: &str = "update-progress";
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateInfo {
+    current_version: String,
+    version: String,
+    /// 릴리스 노트
+    notes: Option<String>,
+    date: Option<String>,
+}
+
 /// 지금 실행 중인 앱의 버전
 #[tauri::command]
 fn app_version(app: AppHandle) -> String {
     app.package_info().version.to_string()
+}
+
+fn shutdown_background_for_update<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(s) = app.try_state::<AppState>() {
+        s.runs.cancel_all();
+    }
+    if let Some(m) = app.try_state::<Arc<mcp::McpManager>>() {
+        m.shutdown_all();
+    }
+    if let Some(t) = app.try_state::<terminal::TerminalManager>() {
+        t.close_all();
+    }
+    if let Some(g) = app.try_state::<single_instance::ListenerGuard>() {
+        g.shutdown();
+    }
+}
+
+async fn find_update(app: &AppHandle) -> Result<Option<tauri_plugin_updater::Update>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let before_exit = app.clone();
+    let updater = app
+        .updater_builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .on_before_exit(move || {
+            shutdown_background_for_update(&before_exit);
+            before_exit.cleanup_before_exit();
+        })
+        .build()
+        .map_err(|e| format!("업데이트 확인을 준비하지 못했습니다: {}", e))?;
+    updater
+        .check()
+        .await
+        .map_err(|e| format!("새 버전이 있는지 확인하지 못했습니다: {}", e))
+}
+
+/// 새 버전이 있으면 그 정보를, 최신이면 null을 돌려준다.
+#[tauri::command]
+async fn check_update(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
+    Ok(find_update(&app).await?.map(|u| UpdateInfo {
+        current_version: u.current_version.clone(),
+        version: u.version.clone(),
+        notes: u.body.clone(),
+        date: u.date.map(|d| d.to_string()),
+    }))
+}
+
+/// 새 버전을 내려받아 설치한다. 설치가 시작되면 앱이 닫히고, 설치가 끝나면 새 버전으로 다시 열린다.
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    let mut update = find_update(&app)
+        .await?
+        .ok_or_else(|| "이미 최신 버전입니다.".to_string())?;
+    update.timeout = Some(std::time::Duration::from_secs(180));
+    let progress = app.clone();
+    let mut downloaded: u64 = 0;
+    let bytes = update
+        .download(
+            move |chunk, total| {
+                downloaded += chunk as u64;
+                let _ = progress.emit(
+                    UPDATE_PROGRESS_EVENT,
+                    serde_json::json!({ "downloaded": downloaded, "total": total }),
+                );
+            },
+            || {},
+        )
+        .await
+        .map_err(|e| format!("새 버전을 내려받지 못했습니다: {}", e))?;
+    // 설치 프로그램이 앱을 닫기 전에 진행 중인 작업·로컬 MCP 서버·터미널·단일 인스턴스 포트를 먼저 정리한다.
+    shutdown_background_for_update(&app);
+    update
+        .install(bytes)
+        .map_err(|e| format!("새 버전을 설치하지 못했습니다: {}", e))?;
+    // Windows에서는 설치 프로그램이 앱을 닫고 다시 연다. 그렇지 않은 환경에서는 직접 다시 시작한다.
+    app.restart();
 }
 
 /// 프로젝트에서 묻지 않고 실행할 도구를 켜거나 끈다.
@@ -2529,6 +2622,7 @@ pub fn run() {
     };
     tauri::Builder::default()
         .plugin(navigation_guard())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             if let Some(listener) = instance.take() {
                 let handle = app.handle().clone();
@@ -2628,6 +2722,8 @@ pub fn run() {
             open_skill_location,
             set_project_auto_approve,
             app_version,
+            check_update,
+            install_update,
             runtime_status,
             runtime_install,
             runtime_remove,
@@ -2916,8 +3012,12 @@ mod tests {
         assert_eq!(conf["productName"], "Any LM Desktop");
         assert_eq!(conf["identifier"], "io.github.kidarigun.anylm-desktop");
         assert_eq!(conf["version"], "0.1.0");
-        assert!(conf["plugins"].get("updater").is_none());
-        assert_eq!(conf["bundle"]["createUpdaterArtifacts"], serde_json::Value::Null);
+        assert_eq!(
+            conf["plugins"]["updater"]["endpoints"],
+            serde_json::json!(["https://github.com/kidarigun/any-lm-desktop/releases/latest/download/latest.json"])
+        );
+        assert!(conf["plugins"]["updater"]["pubkey"].as_str().is_some_and(|s| !s.trim().is_empty()));
+        assert_eq!(conf["bundle"]["createUpdaterArtifacts"], serde_json::json!(true));
         let text = include_str!("../tauri.conf.json");
         assert!(!text.contains("EXAONE") && !text.contains("exaone"));
     }

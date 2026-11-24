@@ -134,9 +134,9 @@ Any LM Desktop은 아래 오픈소스 라이브러리를 사용합니다. 각 �
 | w3c-keyname | 2.2.8 | MIT | https://github.com/marijnh/w3c-keyname |
 | xmlbuilder | 10.1.1 | MIT | git://github.com/oozcitak/xmlbuilder-js |
 
-## 앱 본체 (Rust) — 309개
+## 앱 본체 (Rust) — 321개
 
-라이선스 분포: MIT OR Apache-2.0 148개, MIT 61개, Apache-2.0 OR MIT 27개, Unicode-3.0 18개, MIT/Apache-2.0 10개, Unlicense OR MIT 8개, MPL-2.0 5개, BSD-3-Clause 3개, MIT OR Apache-2.0 OR Zlib 3개, Apache-2.0 3개, Zlib 2개, Apache-2.0 OR ISC OR MIT 2개, MIT OR Zlib OR Apache-2.0 2개, ISC 2개, Unlicense/MIT 2개, 0BSD OR MIT OR Apache-2.0 1개, BSD-3-Clause AND MIT 1개, BSD-3-Clause/MIT 1개, Apache-2.0 AND MIT 1개, CC0-1.0 OR MIT-0 OR Apache-2.0 1개, Apache-2.0 / MIT 1개, Apache-2.0 AND ISC 1개, Apache-2.0 OR BSL-1.0 1개, BSD-2-Clause OR Apache-2.0 1개, Apache-2.0/MIT 1개, Zlib OR Apache-2.0 OR MIT 1개, (MIT OR Apache-2.0) AND Unicode-3.0 1개, CDLA-Permissive-2.0 1개
+라이선스 분포: MIT OR Apache-2.0 154개, MIT 63개, Apache-2.0 OR MIT 30개, Unicode-3.0 18개, MIT/Apache-2.0 10개, Unlicense OR MIT 8개, MPL-2.0 5개, BSD-3-Clause 3개, MIT OR Apache-2.0 OR Zlib 3개, Apache-2.0 3개, CC0-1.0 OR MIT-0 OR Apache-2.0 2개, Zlib 2개, Apache-2.0 OR ISC OR MIT 2개, MIT OR Zlib OR Apache-2.0 2개, ISC 2개, Unlicense/MIT 2개, 0BSD OR MIT OR Apache-2.0 1개, BSD-3-Clause AND MIT 1개, BSD-3-Clause/MIT 1개, Apache-2.0 AND MIT 1개, Apache-2.0 / MIT 1개, Apache-2.0 AND ISC 1개, Apache-2.0 OR BSL-1.0 1개, BSD-2-Clause OR Apache-2.0 1개, Apache-2.0/MIT 1개, Zlib OR Apache-2.0 OR MIT 1개, (MIT OR Apache-2.0) AND Unicode-3.0 1개, CDLA-Permissive-2.0 1개
 
 | 이름 | 버전 | 라이선스 | 저장소 |
 |---|---|---|---|
@@ -171,6 +171,7 @@ Any LM Desktop은 아래 오픈소스 라이브러리를 사용합니다. 각 �
 | cfg_aliases | 0.2.2 | MIT | https://github.com/katharostech/cfg_aliases |
 | chacha20 | 0.10.2 | MIT OR Apache-2.0 | https://github.com/RustCrypto/stream-ciphers |
 | chrono | 0.4.45 | MIT OR Apache-2.0 | https://github.com/chronotope/chrono |
+| constant_time_eq | 0.6.1 | CC0-1.0 OR MIT-0 OR Apache-2.0 | https://codeberg.org/cesarb/constant_time_eq |
 | cookie | 0.18.2 | MIT OR Apache-2.0 | https://github.com/SergioBenitez/cookie-rs |
 | cpufeatures | 0.2.17 | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils |
 | cpufeatures | 0.3.1 | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils |
@@ -267,6 +268,7 @@ Any LM Desktop은 아래 오픈소스 라이브러리를 사용합니다. 각 �
 | markup5ever | 0.39.0 | MIT OR Apache-2.0 | https://github.com/servo/html5ever |
 | memchr | 2.8.3 | Unlicense OR MIT | https://github.com/BurntSushi/memchr |
 | mime | 0.3.18 | MIT OR Apache-2.0 | https://github.com/hyperium/mime |
+| minisign-verify | 0.3.0 | MIT | https://github.com/jedisct1/rust-minisign-verify |
 | miniz_oxide | 0.8.9 | MIT OR Zlib OR Apache-2.0 | https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide |
 | miniz_oxide | 0.9.1 | MIT OR Zlib OR Apache-2.0 | https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide |
 | mio | 1.2.4 | MIT | https://github.com/tokio-rs/mio |
@@ -308,12 +310,15 @@ Any LM Desktop은 아래 오픈소스 라이브러리를 사용합니다. 각 �
 | regex-automata | 0.4.18 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | regex-syntax | 0.8.11 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | reqwest | 0.12.28 | MIT OR Apache-2.0 | https://github.com/seanmonstar/reqwest |
+| reqwest | 0.13.5 | MIT OR Apache-2.0 | https://github.com/seanmonstar/reqwest |
 | ring | 0.17.14 | Apache-2.0 AND ISC | https://github.com/briansmith/ring |
 | rustc-hash | 2.1.3 | Apache-2.0 OR MIT | https://github.com/rust-lang/rustc-hash |
 | rustc_version | 0.4.1 | MIT OR Apache-2.0 | https://github.com/djc/rustc-version-rs |
 | rustls | 0.23.46 | Apache-2.0 OR ISC OR MIT | https://github.com/rustls/rustls |
 | rustls-pki-types | 1.16.0 | MIT OR Apache-2.0 | https://github.com/rustls/pki-types |
+| rustls-platform-verifier | 0.7.1 | MIT OR Apache-2.0 | https://github.com/rustls/rustls-platform-verifier |
 | rustls-webpki | 0.103.17 | ISC | https://github.com/rustls/webpki |
+| rustversion | 1.0.23 | MIT OR Apache-2.0 | https://github.com/dtolnay/rustversion |
 | ryu | 1.0.23 | Apache-2.0 OR BSL-1.0 | https://github.com/dtolnay/ryu |
 | same-file | 1.0.6 | Unlicense/MIT | https://github.com/BurntSushi/same-file |
 | schemars | 0.8.22 | MIT | https://github.com/GREsau/schemars |
@@ -363,10 +368,13 @@ Any LM Desktop은 아래 오픈소스 라이브러리를 사용합니다. 각 �
 | tauri-build | 2.7.4 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
 | tauri-codegen | 2.7.4 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
 | tauri-macros | 2.7.4 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
+| tauri-plugin | 2.7.4 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
+| tauri-plugin-updater | 2.14.1 | Apache-2.0 OR MIT | https://github.com/tauri-apps/plugins-workspace |
 | tauri-runtime | 2.12.2 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
 | tauri-runtime-wry | 2.12.3 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
-| tauri-utils | 2.10.2 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
+| tauri-utils | 2.10.4 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
 | tauri-winres | 0.3.7 | MIT | https://github.com/tauri-apps/winres |
+| tempfile | 3.27.0 | MIT OR Apache-2.0 | https://github.com/Stebalien/tempfile |
 | tendril | 0.5.1 | MIT OR Apache-2.0 | https://github.com/servo/html5ever |
 | thiserror | 1.0.69 | MIT OR Apache-2.0 | https://github.com/dtolnay/thiserror |
 | thiserror | 2.0.21 | MIT OR Apache-2.0 | https://github.com/dtolnay/thiserror |
@@ -394,6 +402,7 @@ Any LM Desktop은 아래 오픈소스 라이브러리를 사용합니다. 각 �
 | trash | 5.3.0 | MIT | https://github.com/ArturKovacs/trash |
 | tray-icon | 0.25.1 | MIT OR Apache-2.0 | https://github.com/tauri-apps/tray-icon |
 | try-lock | 0.2.5 | MIT | https://github.com/seanmonstar/try-lock |
+| typed-path | 0.13.0 | MIT OR Apache-2.0 | https://github.com/chipsenkbeil/typed-path |
 | typeid | 1.0.3 | MIT OR Apache-2.0 | https://github.com/dtolnay/typeid |
 | typenum | 1.20.1 | MIT OR Apache-2.0 | https://github.com/paholg/typenum |
 | unicode-ident | 1.0.27 | (MIT OR Apache-2.0) AND Unicode-3.0 | https://github.com/dtolnay/unicode-ident |
@@ -425,6 +434,7 @@ Any LM Desktop은 아래 오픈소스 라이브러리를 사용합니다. 각 �
 | windows-interface | 0.59.3 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-link | 0.2.1 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-numerics | 0.3.1 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
+| windows-registry | 0.6.1 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-result | 0.4.1 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-strings | 0.5.1 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-sys | 0.60.2 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
@@ -442,10 +452,12 @@ Any LM Desktop은 아래 오픈소스 라이브러리를 사용합니다. 각 �
 | zerofrom | 0.1.8 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zerofrom-derive | 0.1.8 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zeroize | 1.9.1 | Apache-2.0 OR MIT | https://github.com/RustCrypto/utils |
+| zeroize_derive | 1.5.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/utils |
 | zerotrie | 0.2.5 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zerovec | 0.11.9 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zerovec-derive | 0.11.7 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zip | 2.6.1 | MIT | https://github.com/zip-rs/zip2.git |
+| zip | 9.8.2 | MIT | https://github.com/zip-rs/zip2 |
 | zlib-rs | 0.6.8 | Zlib | https://github.com/trifectatechfoundation/zlib-rs |
 | zmij | 1.0.23 | MIT | https://github.com/dtolnay/zmij |
 | zopfli | 0.8.4 | Apache-2.0 | https://github.com/zopfli-rs/zopfli |

@@ -69,8 +69,8 @@
     "publisher": "kidarigun",
     "copyright": "© 2026 김기군",
     "category": "Productivity",
-    "shortDescription": "LM Studio 로컬 모델용 작업 앱",
-    "longDescription": "LM Studio의 로컬 모델로 문서를 쓰고, 프로젝트 파일을 다루고, Skill과 MCP로 기능을 넓히는 데스크톱 앱입니다.",
+    "shortDescription": "로컬 LLM(LM Studio · Ollama · OpenAI 호환) 작업 앱",
+    "longDescription": "LM Studio, Ollama, OpenAI 호환 로컬 모델로 문서를 쓰고, 프로젝트 파일을 다루고, Skill과 MCP로 기능을 넓히는 데스크톱 앱입니다.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -90,6 +90,18 @@
         ],
         "displayLanguageSelector": false,
         "installerIcon": "icons/icon.ico"
+      }
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFCRDEyRUZBMEZBNTdBNkUKUldSdWVxVVAraTdScTZvUkJZZ2hLTnNBSktSbnVwLytwQ0RZcDA4dDFsZmtpV0c1TGVYcEFOM0IK",
+      "endpoints": [
+        "https://github.com/kidarigun/any-lm-desktop/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

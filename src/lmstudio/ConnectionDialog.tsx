@@ -26,9 +26,11 @@ interface Props {
   onClose: () => void;
   /** 토큰 삭제처럼 대화상자 안에서 설정이 바뀐 경우 */
   onSettingsChanged?: (settings: AppSettings) => void;
+  /** 통합 설정 창 탭 안에 내장될 때 true (외곽 모달·제목·실행 환경을 숨긴다) */
+  embedded?: boolean;
 }
 
-export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged }: Props) {
+export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged, embedded = false }: Props) {
   const [draft, setDraft] = useState<AppSettings>(() => syncDraftActiveProfile(settings));
   const [running, setRunning] = useState<boolean | null>(null);
   const [models, setModels] = useState<LmModel[]>([]);
@@ -193,17 +195,18 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged 
     }
   }
 
-  return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div className="bg-white dark:bg-[#262624] border border-stone-200 dark:border-[#3A3A36] rounded-2xl w-full max-w-xl max-h-[90vh] overflow-y-auto p-6 shadow-xl space-y-4">
+  const content = (
+    <div className="space-y-4">
+      {!embedded && (
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-bold text-stone-900 dark:text-stone-100">로컬 LLM 연결</h3>
           <button onClick={onClose} aria-label="닫기">
             <X className="w-4 h-4 text-stone-400" />
           </button>
         </div>
+      )}
 
-        <div className="space-y-3 text-xs">
+      <div className="space-y-3 text-xs">
           <div>
             <label className="font-semibold text-stone-700 dark:text-stone-300 block mb-1.5">
               LLM 공급자
@@ -475,10 +478,12 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged 
           </label>
         </div>
 
-        <div className="pt-3 border-t border-stone-200 dark:border-[#34342F] text-xs space-y-2">
-          <h4 className="font-bold text-stone-900 dark:text-stone-100">실행 환경</h4>
-          <RuntimePanel />
-        </div>
+        {!embedded && (
+          <div className="pt-3 border-t border-stone-200 dark:border-[#34342F] text-xs space-y-2">
+            <h4 className="font-bold text-stone-900 dark:text-stone-100">실행 환경</h4>
+            <RuntimePanel />
+          </div>
+        )}
 
         {error && (
           <div className="rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 px-3 py-2 text-xs text-red-700 dark:text-red-300 flex items-center justify-between gap-3">
@@ -508,6 +513,15 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged 
             저장
           </button>
         </div>
+    </div>
+  );
+
+  if (embedded) return content;
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+      <div className="bg-white dark:bg-[#262624] border border-stone-200 dark:border-[#3A3A36] rounded-2xl w-full max-w-xl max-h-[90vh] overflow-y-auto p-6 shadow-xl">
+        {content}
       </div>
     </div>
   );

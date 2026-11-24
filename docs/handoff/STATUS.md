@@ -5,7 +5,7 @@
 
 ## 진행 중
 - 계획 파일: `docs/superpowers/plans/2026-11-23-any-lm-desktop.md`
-- 후속 계획: `docs/superpowers/plans/2026-11-24-resume-and-agent-loop.md`, `docs/superpowers/plans/2026-11-24-multi-local-providers.md`
+- 후속 계획: `docs/superpowers/plans/2026-11-24-resume-and-agent-loop.md`, `docs/superpowers/plans/2026-11-24-multi-local-providers.md`, `docs/superpowers/plans/2026-11-24-updater-settings-release.md`
 - 작업 1(저장소 만들기와 인계 체계): 완료. 단계 6은 사용자 승인 뒤 2026-11-23에 GitHub 비공개 저장소 `kidarigun/any-lm-desktop`을 만들고 `origin`으로 `main`을 push했다.
 - 작업 2(정체성 분리와 업데이트 제거): 완료. 제품명·identifier·버전·크레이트명·자격 증명 서비스명·단일 실행 포트(45789 → 최종 검토 뒤 45790, MCP OAuth 포트도 45789 → 45791)·미리보기 호스트·대화상자 환경 변수·localStorage 접두어(`anylm_`)·기본 작업 폴더(`문서\AnyLM`)를 바꾸고, 업데이트 기능(`tauri-plugin-updater`, UpdatePanel, `check_update`/`install_update`, `checkUpdates` 설정, `make_latest_json.py`)과 `migrate_old_data_dir`을 삭제했다.
 
@@ -42,6 +42,7 @@
 - 에이전트 루프: 고정 도구 라운드 상한 제거. 현재 턴과 완료된 턴 모두에서 오래된 도구 교환을 묶음 단위로 줄인다. 중지·승인과 도구별 되돌리기 기록을 저장한다(결정 0009).
 - 원본 잔재: 저장 파일·LM Studio 토큰 계정·런타임 표식·카탈로그 기본 주소·테스트 정리. 같은 Any LM 앱 데이터 안의 이전 저장 파일을 새 이름으로 불러온 실제 파일의 해시가 일치했다(결정 0011).
 - 멀티 로컬 LLM 공급자(LM Studio · Ollama · OpenAI 호환, 설계 `docs/superpowers/specs/2026-11-24-multi-local-providers-design.md`, 계획 `docs/superpowers/plans/2026-11-24-multi-local-providers.md`, 결정 0012): 완료. `store.rs`(`LlmProvider`·`ProviderProfile`·최상위 필드 하위 호환 동기화), `secrets.rs`(공급자별 Windows 자격 증명 계정 `lm-studio-api-token`·`ollama-api-token`·`openai-compat-api-token`), `src-tauri/src/providers/`(`mod.rs` 공통 로컬 URL 검증·`ProviderCapabilities`·공급자별 오류 문구·라우팅, `ollama.rs` `/api/tags`·`/api/ps`·`/api/show`·`/api/generate` 로드/언로드·`ollama serve` 분리 실행, `openai_compat.rs` 경로 정규화·`/v1/models`·즉시 `Ready` `plan_load`·빈 목록 시 수동 모델 ID 허용), `exaone.rs`(공급자별 채팅 URL·오류 문구 일반화·Ollama/llama.cpp/vLLM 컨텍스트 초과 패턴 추가), `harness.rs`(`ANYLM_PROVIDER`), 프런트엔드 `src/lmstudio/providerMeta.ts`·`ConnectionDialog.tsx`(3종 공급자 전환 탭·전환 대기 안내·기능별 버튼 표시)·`ModelPicker.tsx`·`App.tsx`(사이드바 `{공급자} 연결`·오류 띠 `[서버 시작]` 조건부 표시). LM Studio 기존 구현과 테스트는 그대로 유지하고 모의 HTTP 서버로 Ollama·OpenAI 호환 전 흐름을 검증함. 실제 Ollama/llama.cpp 데몬 실측은 아래 수동 확인 목록에 남긴다.
+- 라이브 업데이트(자동 업데이트) · 통합 `[설정]` 메뉴 · 배포 NSIS 빌드 · 공개 저장소 전환(설계 `docs/superpowers/specs/2026-11-24-updater-settings-release-design.md`, 계획 `docs/superpowers/plans/2026-11-24-updater-settings-release.md`, 결정 0013): 완료. Any LM Desktop 전용 서명 키(`%USERPROFILE%\.tauri\any-lm-desktop.key`, 비밀키는 로컬에만 보관)를 생성해 `tauri-plugin-updater` v2(`kidarigun/any-lm-desktop`, `createUpdaterArtifacts: true`)와 `check_update`/`install_update`(종료 직전 `terminal.close_all()` 포함)·`AppSettings.check_updates`·`src/update/UpdatePanel.tsx`·`scripts/make_latest_json.py`를 복구했다. 좌측 하단의 Skill·MCP 서버·연결 3개 버튼을 연결 상태 점이 포함된 단일 `[설정]` 버튼으로 통합하고, `src/settings/SettingsDialog.tsx`(4개 탭: 연결·모델 / Skill / MCP 서버 / 환경·업데이트)와 각 다이얼로그 `embedded` 모드를 구현했다. `THIRD_PARTY_NOTICES.md`를 재생성하고 서명된 NSIS 설치 파일(`Any LM Desktop_0.1.0_x64-setup.exe`, 17.76 MiB) 및 `release/latest.json`을 생성했으며, 저장소를 공개(Public)로 전환하고 `main`을 푸시한다.
 
 ## 다음 할 일
 1. **남은 화면 QA**: 아래 수동 확인 목록의 기존 기능과 공급자 로그인·계정 확인을 이어서 점검한다. Windows 개발 앱에서 이번 변경의 터미널·로컬 미리보기·연결 창은 확인했다.
@@ -58,6 +59,8 @@
    - 그 밖에 검토의 "Can stay" 목록(서버 상태는 아무 HTTP 응답이면 켜짐으로 봄 등).
 
 ## 마지막 확인
+2026-11-24, 자동 업데이트 복구 · `[설정]` 메뉴 통합 · NSIS 배포 빌드 뒤: `npm test` 통과(31 파일, 185 통과·1 건너뜀), `npx tsc --noEmit` 오류 없음, `cd src-tauri && cargo test --lib` 293 통과·0 실패·10 무시(실행 중인 개발 앱 파일 잠금 회피를 위해 분리 타깃 폴더에서 실행), `cargo check --all-targets` 경고·오류 없음, `npm run build` 성공, `THIRD_PARTY_NOTICES.md` 갱신(npm 111개·Rust 321개), `npm run tauri build`로 `Any LM Desktop_0.1.0_x64-setup.exe`(17.76 MiB)·`.sig` 및 `release/latest.json` 생성 성공.
+
 2026-11-24, 멀티 로컬 LLM 공급자(LM Studio · Ollama · OpenAI 호환) 구현 뒤: `npm test` 통과(30 파일, 183 통과·1 건너뜀), `npx tsc --noEmit` 오류 없음, `cd src-tauri && cargo test --lib` 293 통과·0 실패·10 무시(Ollama·OpenAI 호환 모의 HTTP, 설정 마이그레이션, 로컬 URL 보안, 컨텍스트 초과 문구, 하니스 `ANYLM_PROVIDER` 테스트 포함), `cargo check --all-targets` 경고·오류 없음, `npm run build` 성공.
 
 2026-11-24, 루프와 미리보기 리뷰 보완 뒤: `npm test` 181 통과·1 건너뜀, `npx tsc --noEmit` 통과, `cargo test --lib` 280 통과·10 무시, `npm run build` 성공. 후속 턴의 큰 도구 인자 줄이기, 실행 직전 자동 승인 확인, 점유된 포트와 서버 시작 취소를 회귀 검증했다. 실제 앱에서 9B와 35B가 32K로 표시되는 것, 로컬 모듈 실행과 부모 접근·Tauri 명령 거부를 확인했다.
@@ -108,7 +111,7 @@
 | 9 | 인계 연습 | 통과 | 작업 12 단계 2. Codex가 인계 문서와 실제 Git을 대조하고 후속 작업을 커밋했다. |
 
 ## 결정 필요
-- 최종 원격 푸시는 사용자 승인 후 진행한다.
+- (없음 — 2026-11-24 사용자 지시에 따라 공개 저장소 전환 및 원격 푸시 진행.)
 
 ## 기준 상태
 작업을 시작하기 전(복제 직후, e885b02)의 테스트 결과다. 이후 실패가 나오면 이 기준과 비교해 새로 깬 것인지 구분한다.
@@ -195,3 +198,9 @@
 - Ollama가 꺼져 있을 때 [서버 시작]으로 `ollama serve`가 뜨는지, 모델 목록·로드 상태(`/api/ps`)·비전/도구/추론 배지(`/api/show`)·로드(num_ctx)·언로드(`keep_alive: 0`)·대화/도구 호출·추론 끄기가 실제 Ollama에서 정상 동작하는지
 - OpenAI 호환 로컬 서버(llama.cpp `llama-server` 또는 vLLM 등) 연결 시 [서버 시작]·[로드]·[언로드] 버튼이 숨겨지고, 대화창 모델 선택기가 단일 목록으로 표시되며, 입력한 컨텍스트 길이가 자동 압축 비율 계산에 반영되는지
 - 외부 주소(`https://api.openai.com/v1` 또는 LAN IP) 입력 시 로컬 전용 보안 오류 메시지로 차단되는지
+
+### 통합 설정 창 · 자동 업데이트
+- 좌측 사이드바 하단에 `[설정]` 버튼 하나만 표시되고 오른쪽에 활성 공급자 이름과 연결 점이 맞는지
+- `[설정]` 창 4개 탭(`연결 · 모델`, `Skill`, `MCP 서버`, `환경 · 업데이트`) 전환과 각 탭 동작이 매끄럽고, `MCP 서버`에서 서버 추가 폼이나 JSON 붙여넣기 화면을 연 채 `Esc`를 누르면 설정 창 전체가 아니라 편집 화면만 닫히는지
+- `환경 · 업데이트` 탭에서 현재 버전 `0.1.0`, [업데이트 확인], 자동 확인 체크가 정상 동작하는지(GitHub 릴리스가 올라간 이후 실제 업데이트 알림·설치 확인)
+- 빌드된 `Any LM Desktop_0.1.0_x64-setup.exe` 설치 및 실행 확인

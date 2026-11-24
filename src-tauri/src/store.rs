@@ -106,6 +106,13 @@ pub struct AppSettings {
     pub skill_auto_load: bool,
     /// 작업 패널 터미널의 셸: "powershell"(기본) | "pwsh" | "cmd" (결정 0008)
     pub terminal_shell: String,
+    /// 앱을 켤 때 새 버전이 있는지 확인할지 (확인만 하고, 설치는 사용자가 누를 때 한다)
+    #[serde(default = "default_true")]
+    pub check_updates: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for AppSettings {
@@ -122,6 +129,7 @@ impl Default for AppSettings {
             providers: BTreeMap::new(),
             skill_auto_load: true,
             terminal_shell: "powershell".to_string(),
+            check_updates: true,
         }
     }
 }
@@ -620,6 +628,9 @@ mod tests {
         assert!(back.auto_compact);
         assert_eq!(back.writing_style, "default");
         assert!(back.skill_auto_load, "예전 설정 파일에는 없으니 기본으로 켠다");
+        assert!(back.check_updates, "예전 설정 파일에는 없으니 기본으로 켠다");
+        let off: AppSettings = serde_json::from_str(r#"{"checkUpdates":false}"#).unwrap();
+        assert!(!off.check_updates);
     }
 
     #[test]
