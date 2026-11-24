@@ -1,6 +1,6 @@
 //! 실제 LM Studio 서버로 앱의 에이전트 루프를 그대로 돌려 보는 테스트 하니스.
 //!
-//! 앱과 같은 코드(`run_exaone_turn`, 도구 실행, 승인 처리)를 쓰고, 화면 대신 시나리오 파일이 사용자를 맡는다.
+//! 앱과 같은 코드(`run_agent_turn`, 도구 실행, 승인 처리)를 쓰고, 화면 대신 시나리오 파일이 사용자를 맡는다.
 //! 앱 설정 파일이나 자격 증명 관리자는 읽지 않는다. 서버 주소와 모델은 환경 변수로만 받는다.
 //!
 //! 실행 (PowerShell, 저장소 루트에서):
@@ -25,7 +25,7 @@
 //!
 //! 이 하니스는 모델을 로드하거나 내리지 않는다. LM Studio에서 모델을 미리 로드해 둘 것.
 
-use crate::exaone::{self, RoundTrace, TurnRequest, Tuning};
+use crate::agent::{self, RoundTrace, TurnRequest, Tuning};
 use crate::store::{AppSettings, ChatMessage, LlmProvider, Project};
 use crate::{doc_bridge, knowledge, mcp, providers, run_approved_tool, runtime, skills};
 use serde::{Deserialize, Serialize};
@@ -499,7 +499,7 @@ async fn live() {
         app.manage(crate::terminal::TerminalManager::new(Arc::new(|_| {})));
         app.manage(crate::dev_servers::DevServers::default());
     }
-    exaone::trace_start();
+    agent::trace_start();
     let mut stop_reason: Option<String> = None;
 
     for sc in &scenarios {
@@ -564,7 +564,7 @@ async fn live() {
         if let Some(on) = sc.skill_auto_load {
             settings.skill_auto_load = on;
         }
-        exaone::set_tuning(sc.tuning.clone());
+        agent::set_tuning(sc.tuning.clone());
 
         println!("\n=== {} [{}] {}", sc.id, sc.mode, sc.note);
         let mcp_conn = connect_mcp_servers(&mcp_manager, &sc.mcp_servers).await;
@@ -618,7 +618,7 @@ async fn live() {
             // 승인 대기로 멈추면 승인/거부를 처리하고 같은 메시지를 이어 간다 (앱의 승인 흐름과 같다).
             let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
             loop {
-                let turn = exaone::run_exaone_turn(
+                let turn = agent::run_agent_turn(
                     app.handle(),
                     TurnRequest {
                         settings: &settings,
@@ -645,7 +645,7 @@ async fn live() {
                         break;
                     }
                 };
-                let traces = exaone::trace_take();
+                let traces = agent::trace_take();
                 log.traces.extend(traces);
 
                 let mut msg = match res {
@@ -721,7 +721,7 @@ async fn live() {
                     t.finish_reason,
                     usage_num(t, "prompt_tokens"),
                     usage_num(t, "completion_tokens"),
-                    t.usage.as_ref().and_then(crate::exaone::reasoning_tokens_of).unwrap_or(0),
+                    t.usage.as_ref().and_then(crate::agent::reasoning_tokens_of).unwrap_or(0),
                     t.error.as_deref().map(|e| format!("오류: {}", e.chars().take(120).collect::<String>())).unwrap_or_default(),
                 );
             }
@@ -770,7 +770,7 @@ async fn live() {
             "toolErrors": turns.iter().filter_map(|t| t.message.as_ref()).flat_map(|m| m.tool_records.iter()).filter(|r| r.status == "error").count(),
             "promptTokens": all_traces.iter().map(|t| usage_num(t, "prompt_tokens")).max().unwrap_or(0),
             "completionTokens": all_traces.iter().map(|t| usage_num(t, "completion_tokens")).sum::<u64>(),
-            "reasoningTokens": all_traces.iter().map(|t| t.usage.as_ref().and_then(crate::exaone::reasoning_tokens_of).unwrap_or(0)).sum::<u64>(),
+            "reasoningTokens": all_traces.iter().map(|t| t.usage.as_ref().and_then(crate::agent::reasoning_tokens_of).unwrap_or(0)).sum::<u64>(),
             "reasoningChars": all_traces.iter().map(|t| t.reasoning_chars).sum::<usize>(),
             "contentChars": all_traces.iter().map(|t| t.content_chars).sum::<usize>(),
             "maxGapMs": all_traces.iter().map(|t| t.max_gap_ms).max().unwrap_or(0),

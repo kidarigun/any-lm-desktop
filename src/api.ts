@@ -903,11 +903,11 @@ export const BackendAPI = {
     return () => {};
   },
 
-  async onExaoneStream(
+  async onAgentStream(
     handler: (payload: StreamChunkPayload) => void
   ): Promise<UnlistenFn> {
     if (isTauri()) {
-      return await listen<StreamChunkPayload>("exaone-stream", (event) => {
+      return await listen<StreamChunkPayload>("anylm-stream", (event) => {
         handler(event.payload);
       });
     }

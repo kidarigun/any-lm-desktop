@@ -7,7 +7,7 @@
 //! 필요한 기능(연결·도구 목록·도구 실행)만 구현한다. 환경 변수·헤더 값(API 키 등)은
 //! 설정 파일이 아니라 Windows 자격 증명 관리자에 둔다.
 
-use crate::exaone::SseDecoder;
+use crate::agent::SseDecoder;
 use crate::mcp_oauth::{self, OAuthSettings, TokenSet};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};

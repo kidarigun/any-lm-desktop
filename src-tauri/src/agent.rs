@@ -20,7 +20,7 @@ pub const MAX_TOOL_ROUNDS: usize = 50;
 /// 모델에게 되돌려 주는 도구 출력의 최대 길이(문자).
 pub const MAX_TOOL_OUTPUT_CHARS: usize = 40_000;
 
-pub const STREAM_EVENT: &str = "exaone-stream";
+pub const STREAM_EVENT: &str = "anylm-stream";
 
 // ---------------------------------------------------------------------------
 // 측정(trace)과 실험용 설정
@@ -1974,7 +1974,7 @@ impl RoundStreamer {
     }
 }
 
-pub async fn run_exaone_turn<R: Runtime>(
+pub async fn run_agent_turn<R: Runtime>(
     app: &AppHandle<R>,
     req: TurnRequest<'_>,
     cancel_flag: Arc<AtomicBool>,
@@ -3660,7 +3660,7 @@ mod tests {
         let settings = test_settings(url);
         let project = test_project(dir.path());
         let history = vec![msg("user", "입력 파일 55개를 순서대로 확인해 줘")];
-        let (out, _) = run_exaone_turn(app.handle(), TurnRequest {
+        let (out, _) = run_agent_turn(app.handle(), TurnRequest {
             settings: &settings, model_key: "m", model_display_name: "", reasoning_options: &[],
             context_length: 8192, project: Some(&project), conversation_id: "round-cap",
             history: &history, compaction: None, continue_from: None, mode: "project",
@@ -3698,7 +3698,7 @@ mod tests {
         let settings = test_settings(url);
         let project = test_project(dir.path());
         let history = vec![msg("user", "f0.txt, f1.txt, f2.txt를 읽고 종합해 줘")];
-        let (out, _) = run_exaone_turn(app.handle(), TurnRequest {
+        let (out, _) = run_agent_turn(app.handle(), TurnRequest {
             settings: &settings, model_key: "m", model_display_name: "", reasoning_options: &[],
             context_length: 8192, project: Some(&project), conversation_id: "no-amnesia",
             history: &history, compaction: None, continue_from: None, mode: "project",
@@ -3732,7 +3732,7 @@ mod tests {
         let settings = test_settings(url);
         let project = test_project(dir.path());
         let history = vec![msg("user", "a.txt를 고쳐 줘")];
-        let (out, _) = run_exaone_turn(app.handle(), TurnRequest {
+        let (out, _) = run_agent_turn(app.handle(), TurnRequest {
             settings: &settings, model_key: "m", model_display_name: "", reasoning_options: &[],
             context_length: 32768, project: Some(&project), conversation_id: "err-loop",
             history: &history, compaction: None, continue_from: None, mode: "project",
@@ -3779,7 +3779,7 @@ mod tests {
         let settings = test_settings(url);
         let project = test_project(dir.path());
         let history = vec![msg("user", "a.txt 읽고 b.txt 수정해 줘")];
-        let (out, _) = run_exaone_turn(app.handle(), TurnRequest {
+        let (out, _) = run_agent_turn(app.handle(), TurnRequest {
             settings: &settings, model_key: "m", model_display_name: "", reasoning_options: &[],
             context_length: 32768, project: Some(&project), conversation_id: "read-loop",
             history: &history, compaction: None, continue_from: None, mode: "project",
@@ -3848,7 +3848,7 @@ mod tests {
             }
             true
         };
-        let (result, snapshots) = run_exaone_turn(app.handle(), TurnRequest {
+        let (result, snapshots) = run_agent_turn(app.handle(), TurnRequest {
             checkpoint: Some(&checkpoint),
             ..turn_req(&settings, Some(&project), &history)
         }, cancelled.clone()).await.unwrap();
@@ -3876,7 +3876,7 @@ mod tests {
         let app = tauri::test::mock_app();
         let settings = test_settings(url);
         let project = test_project(root.path());
-        let (out, _) = run_exaone_turn(app.handle(), TurnRequest {
+        let (out, _) = run_agent_turn(app.handle(), TurnRequest {
             context_length: 8192,
             ..turn_req(&settings, Some(&project), &history)
         }, Arc::new(AtomicBool::new(false))).await.unwrap();
@@ -4032,7 +4032,7 @@ mod tests {
         project.knowledge_folders.push(dir.path().to_string_lossy().to_string());
         let history = vec![msg("user", "첫 질문"), msg("assistant", "첫 답"), msg("user", "질문")];
         let section = "[참고 자료]\n안내\n\n### 출처: C:/kb/a.md\n조각 글";
-        run_exaone_turn(
+        run_agent_turn(
             app.handle(),
             TurnRequest { settings: &settings, model_key: "m", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "project", checkpoint: None, knowledge: section, auto_skill: None },
             Arc::new(AtomicBool::new(false)),
@@ -4121,7 +4121,7 @@ mod tests {
         let project = test_project(dir.path());
         let history = vec![msg("user", "이번 주 주간 업무 보고서를 만들어 줘")];
         let skill = auto_skill("weekly-report");
-        let (out, _) = run_exaone_turn(
+        let (out, _) = run_agent_turn(
             app.handle(),
             TurnRequest { settings: &settings, model_key: "m", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "project", checkpoint: None, knowledge: "[참고 자료]\n자료", auto_skill: Some(&skill) },
             Arc::new(AtomicBool::new(false)),
@@ -4177,7 +4177,7 @@ mod tests {
         let run = |cont: ChatMessage, history: Vec<ChatMessage>| {
             let (app, settings, project, skill) = (app.handle().clone(), settings.clone(), project.clone(), skill.clone());
             async move {
-                run_exaone_turn(
+                run_agent_turn(
                     &app,
                     TurnRequest { settings: &settings, model_key: "m", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history: &history, compaction: None, continue_from: Some(cont), mode: "project", checkpoint: None, knowledge: "", auto_skill: Some(&skill) },
                     Arc::new(AtomicBool::new(false)),
@@ -4236,7 +4236,7 @@ mod tests {
         let settings = test_settings(url);
         let project = test_project(dir.path());
         let history = vec![msg("user", "메모 요약해 줘")];
-        let (out, _) = run_exaone_turn(app.handle(), turn_req(&settings, Some(&project), &history), Arc::new(AtomicBool::new(false))).await.unwrap();
+        let (out, _) = run_agent_turn(app.handle(), turn_req(&settings, Some(&project), &history), Arc::new(AtomicBool::new(false))).await.unwrap();
         assert_eq!(out.content, "최종 답입니다.");
         let b = bodies.lock().unwrap();
         assert_eq!(b.len(), 3);
@@ -4252,7 +4252,7 @@ mod tests {
         let app = tauri::test::mock_app();
         let settings = test_settings(url);
         let history = vec![msg("user", "질문")];
-        let (out, _) = run_exaone_turn(app.handle(), turn_req(&settings, None, &history), Arc::new(AtomicBool::new(false))).await.unwrap();
+        let (out, _) = run_agent_turn(app.handle(), turn_req(&settings, None, &history), Arc::new(AtomicBool::new(false))).await.unwrap();
         assert!(out.content.trim().is_empty());
         let b = bodies.lock().unwrap();
         assert_eq!(b.len(), 2, "다시 시키는 것은 한 번뿐");
@@ -4292,7 +4292,7 @@ mod tests {
         let settings = test_settings(url);
         let history = vec![msg("user", "안녕")];
         let started = Instant::now();
-        let (out, _) = run_exaone_turn(
+        let (out, _) = run_agent_turn(
             app.handle(),
             TurnRequest {
                 settings: &settings,
@@ -4381,7 +4381,7 @@ mod tests {
         let settings = test_settings(url);
         let project = test_project(dir.path());
         let history = vec![msg("user", "보고서 써줘")];
-        let (out, snaps) = run_exaone_turn(
+        let (out, snaps) = run_agent_turn(
             app.handle(),
             TurnRequest {
                 settings: &settings,
@@ -4446,7 +4446,7 @@ mod tests {
         let user = msg("user", "빌드해줘");
 
         // 1) 승인이 필요한 도구에서 멈춘다.
-        let (mut paused, _) = run_exaone_turn(
+        let (mut paused, _) = run_agent_turn(
             app.handle(),
             TurnRequest {
                 settings: &settings,
@@ -4472,7 +4472,7 @@ mod tests {
         paused.tool_records[0].status = "completed".into();
         paused.tool_records[0].output = "[Exit Code: 0]\nhi".into();
         let history = vec![user, paused.clone()];
-        let (resumed, _) = run_exaone_turn(
+        let (resumed, _) = run_agent_turn(
             app.handle(),
             TurnRequest {
                 settings: &settings,
@@ -4522,7 +4522,7 @@ mod tests {
         });
 
         let started = Instant::now();
-        let (out, _) = run_exaone_turn(
+        let (out, _) = run_agent_turn(
             app.handle(),
             TurnRequest {
                 settings: &settings,
@@ -4749,7 +4749,7 @@ mod tests {
         let settings = test_settings(url);
         let project = test_project(dir.path());
         let history = vec![msg("user", "a.txt 읽어 줘")];
-        let (out, _) = run_exaone_turn(
+        let (out, _) = run_agent_turn(
             app.handle(),
             TurnRequest { settings: &settings, model_key: "qwen3.5-9b", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "", auto_skill: None },
             Arc::new(AtomicBool::new(false)),
@@ -4781,7 +4781,7 @@ mod tests {
         settings.model_prefs.insert("qwen3.5-9b".into(), crate::store::ModelPref { context_length: None, reasoning: Some("off".into()) });
         for o in [&opts[..], &[][..]] {
             let req = TurnRequest { settings: &settings, model_key: "qwen3.5-9b", model_display_name: "", reasoning_options: o, context_length: 32768, project: None, conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "", auto_skill: None };
-            run_exaone_turn(app.handle(), req, Arc::new(AtomicBool::new(false))).await.unwrap();
+            run_agent_turn(app.handle(), req, Arc::new(AtomicBool::new(false))).await.unwrap();
         }
         let b = bodies.lock().unwrap();
         assert_eq!(b[0]["reasoning_effort"], "none");
@@ -4952,7 +4952,7 @@ content-length: {}
             saved.lock().unwrap().push(m.clone());
             true
         };
-        let (out, _) = run_exaone_turn(
+        let (out, _) = run_agent_turn(
             app.handle(),
             TurnRequest {
                 settings: &settings,
@@ -4998,7 +4998,7 @@ content-length: {}
         let run = |project: Project| {
             let (app, settings, history) = (&app, &settings, &history);
             async move {
-                run_exaone_turn(
+                run_agent_turn(
                     app.handle(),
                     TurnRequest { settings, model_key: "qwen3.5-9b", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "", auto_skill: None },
                     Arc::new(AtomicBool::new(false)),
@@ -5076,7 +5076,7 @@ content-length: {}
     async fn turn(url: String, history: Vec<ChatMessage>) -> Result<ChatMessage, String> {
         let app = tauri::test::mock_app();
         let settings = test_settings(url);
-        run_exaone_turn(
+        run_agent_turn(
             app.handle(),
             TurnRequest { settings: &settings, model_key: "qwen3.5-9b", model_display_name: "", reasoning_options: &[], context_length: 32768, project: None, conversation_id: "conv-r", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "", auto_skill: None },
             Arc::new(AtomicBool::new(false)),
@@ -5234,7 +5234,7 @@ content-length: {}
         let settings = test_settings(url);
         let project = test_project(dir.path());
         let history = vec![msg("user", "a.txt 써줘")];
-        let (out, _) = run_exaone_turn(
+        let (out, _) = run_agent_turn(
             app.handle(),
             TurnRequest { settings: &settings, model_key: "qwen3.5-9b", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c-eof", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "", auto_skill: None },
             Arc::new(AtomicBool::new(false)),
@@ -5264,7 +5264,7 @@ content-length: {}
         let settings = test_settings(url);
         let project = test_project(dir.path());
         let history = vec![msg("user", "긴 문서 써줘")];
-        let (out, _) = run_exaone_turn(
+        let (out, _) = run_agent_turn(
             app.handle(),
             TurnRequest { settings: &settings, model_key: "qwen3.5-9b", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c-trunc", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "", auto_skill: None },
             Arc::new(AtomicBool::new(false)),

@@ -561,7 +561,7 @@ pub(crate) async fn dev_server_start<R: Runtime>(
         live.dev_servers.insert(0, config.clone());
         let updated = live.clone();
         state.store.save(&db)?;
-        let _ = app.emit(crate::exaone::PROJECT_UPDATED_EVENT, updated);
+        let _ = app.emit(crate::agent::PROJECT_UPDATED_EVENT, updated);
     }
     start(&app, &project, &shell, &config)
 }

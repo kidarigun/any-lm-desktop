@@ -926,7 +926,7 @@ export default function App() {
     let cancelled = false;
     let unlistenFn: (() => void) | null = null;
 
-    BackendAPI.onExaoneStream((payload) => {
+    BackendAPI.onAgentStream((payload) => {
       if (cancelled) return;
       setRuns((prev) => applyChunk(prev, payload));
       if (payload.toolRecord) {

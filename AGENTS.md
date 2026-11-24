@@ -10,7 +10,7 @@ Any LM Desktop은 사용자가 만든 K-EXAONE Desktop 0.4.4(Tauri v2 + React/Ty
 
 Rust (`src-tauri/src/`)
 - `lib.rs` — Tauri 앱 조립과 명령 등록. `main.rs` — 진입점.
-- `exaone.rs` — 모델 호출·에이전트 루프(`run_exaone_turn`)·도구 실행·스트림 처리·대화 압축 요약(이름은 원본 그대로).
+- `agent.rs` — 모델 호출·에이전트 루프(`run_agent_turn`, 이벤트 `"anylm-stream"`)·도구 실행·스트림 처리·대화 압축 요약(결정 0016에서 `exaone.rs`에서 변경).
 - `lmstudio.rs` — LM Studio 연결: 서버 주소 검증(`server_urls`, localhost만, 경로는 버림)·인증 헤더·오류 안내, 모델 목록·로드 계획(`plan_load`)·로드/언로드, 서버 상태·`lms server start`, 추론 끄기 필드, 턴 시작 모델 정보(`turn_model_info`).
 - `providers/` — 멀티 로컬 LLM 공급자 어댑터(결정 0012): `mod.rs`(공통 로컬 URL 보안 검증·`ProviderCapabilities`·공급자별 오류/메시지·라우팅), `ollama.rs`(`/api/tags`·`/api/ps`·`/api/show`·`/api/generate` 로드/언로드·`ollama serve` 분리 시작), `openai_compat.rs`(경로 정규화·`/v1/models` 파싱·즉시 Ready `plan_load`).
 - `context_budget.rs` — 로드된 컨텍스트에 맞춘 줄이기 기준·도구 결과 상한·사용 비율(70%, 1토큰 = 1.5자).
@@ -59,7 +59,7 @@ Rust (`src-tauri/src/`)
 - 저장소는 `C:\DOCS\any-lm-desktop`. 원본 `C:\DOCS\EXAONE`와 그 GitHub 저장소에는 아무것도 쓰지 않는다(커밋·푸시·파일 수정 금지).
 - 앱 이름 `Any LM Desktop`, identifier `io.github.kidarigun.anylm-desktop`, 버전 `0.1.0`.
 - 포트: 중복 실행 방지 `45790`(`single_instance::PORT`), 원격 MCP OAuth 로그인 결과 `45791`(`mcp_oauth::CALLBACK_PORT`, 리디렉션 URI `http://localhost:45791/oauth2callback`). 원본 앱은 45788·45789를 쓰므로 이 값들과 겹치면 안 된다(테스트 `ports_do_not_collide_with_each_other_or_the_original_app`).
-- 내부 파일·함수·이벤트 이름(`exaone.rs`, `run_exaone_turn`, `onExaoneStream`, `"exaone-stream"`)은 바꾸지 않는다. 사용자에게 보이는 문자열과 스펙 6.2 표의 충돌 요소만 바꾼다.
+- 핵심 에이전트 모듈·스트림 심볼(결정 0016): `agent.rs`, `run_agent_turn`, `onAgentStream`, `"anylm-stream"`을 사용한다. 사용자에게 보이는 문자열과 스펙 6.2 표의 충돌 요소에는 "EXAONE"/"K-EXAONE"/"LG"를 쓰지 않는다. (원본 `upstream`에서 `exaone.rs`를 수정하는 커밋을 가져올 때는 `agent.rs`로 매핑해 반영한다.)
 - 화면 문구는 한국어. 사용자에게 보이는 곳에 "EXAONE"/"K-EXAONE"/"LG"를 쓰지 않는다(NOTICE·README의 출처 설명만 예외).
 - 로컬 LLM 서버 주소는 모든 공급자(LM Studio · Ollama · OpenAI 호환)에서 `http://localhost`, `http://127.0.0.1`, `http://[::1]`만 허용. 기본값은 `lmstudio` `http://localhost:1234`, `ollama` `http://localhost:11434`, `openai_compat` `http://localhost:8080`.
 - 기본 원하는 컨텍스트 `32768`. 자동 요약 압축 기준 `0.70`(로드된 컨텍스트 대비). 글자→토큰 추정 `1토큰 = 1.5자`(`chars()` 기준).
@@ -94,5 +94,5 @@ git log --oneline main..upstream/main      # 가져올 후보 확인
 git cherry-pick <hash>                     # 필요한 커밋만 하나씩
 ```
 
-- 충돌이 나면 이 앱의 LM Studio 전용 동작을 우선해 해결하고, 어떻게 풀었는지 `docs/handoff/LOG.md`에 남긴다.
+- 충돌이 나면 이 앱의 LM Studio 전용 동작을 우선해 해결하고, 원본 `src-tauri/src/exaone.rs` 변경분은 `src-tauri/src/agent.rs`로 매핑하며, 어떻게 풀었는지 `docs/handoff/LOG.md`에 남긴다.
 - 가져온 뒤에는 3절의 세 명령을 모두 통과시킨다. 커밋 트레일러(`Agent: ...`)를 잊지 않는다.

@@ -1,7 +1,7 @@
 pub mod catalog;
 pub mod context_budget;
 pub mod doc_bridge;
-pub mod exaone;
+pub mod agent;
 mod dev_servers;
 pub mod fs_ops;
 pub mod html_preview;
@@ -24,7 +24,7 @@ pub mod terminal;
 #[cfg(test)]
 mod harness;
 
-use exaone::TurnRequest;
+use agent::TurnRequest;
 use fs_ops::FileNode;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -180,7 +180,7 @@ async fn read_attachments<R: tauri::Runtime>(
             Ok(t) => block.push_str(&format!(
                 "\n### 파일: `{}`\n```\n{}\n```\n",
                 display_name,
-                fs_ops::truncate_for_model(&t, exaone::MAX_TOOL_OUTPUT_CHARS * 2)
+                fs_ops::truncate_for_model(&t, agent::MAX_TOOL_OUTPUT_CHARS * 2)
             )),
             Err(e) => block.push_str(&format!("\n### 파일: `{}`\n(읽기 실패: {})\n", display_name, e)),
         }
@@ -645,7 +645,7 @@ fn update_knowledge_folders(
         state.store.save(&db)?;
         updated
     };
-    let _ = app.emit(exaone::PROJECT_UPDATED_EVENT, &updated);
+    let _ = app.emit(agent::PROJECT_UPDATED_EVENT, &updated);
     Ok(updated)
 }
 
@@ -992,7 +992,7 @@ fn should_auto_compact_with(
         }
         (_, Some(c)) => {
             let active = &conv.messages[c.covered_messages.min(conv.messages.len())..];
-            let active_chars = exaone::conversation_source_chars(Some(c), active);
+            let active_chars = agent::conversation_source_chars(Some(c), active);
             context_budget::usage_ratio(None, active_chars + new_user_chars + extra_system_chars, context_length)
         }
         (_, None) => context_budget::usage_ratio(None, new_user_chars + extra_system_chars, context_length),
@@ -1059,15 +1059,15 @@ async fn run_auto_compaction(
     cancel_flag: &std::sync::atomic::AtomicBool,
 ) -> Option<store::ContextCompaction> {
     emit_auto_compaction(app, conversation_id, "started");
-    let source_chars = exaone::conversation_source_chars(job.prev.as_ref(), &job.slice);
-    let (summary, phase) = match exaone::summarize_for_compaction(
+    let source_chars = agent::conversation_source_chars(job.prev.as_ref(), &job.slice);
+    let (summary, phase) = match agent::summarize_for_compaction(
         settings, job.prev.as_ref(), &job.slice, None, reasoning_options, cancel_flag,
     )
     .await
     {
         Ok(s) => (s, "done"),
         Err(_) => (
-            exaone::build_local_compaction_summary(job.prev.as_ref(), &job.slice, None),
+            agent::build_local_compaction_summary(job.prev.as_ref(), &job.slice, None),
             "fallback",
         ),
     };
@@ -1200,7 +1200,7 @@ async fn send_chat_message(
         }
     }
 
-    let turn_res = exaone::run_exaone_turn(
+    let turn_res = agent::run_agent_turn(
         &app,
         TurnRequest {
             settings: &settings,
@@ -1321,7 +1321,7 @@ async fn edit_and_resend_message(
     let knowledge = knowledge::context_for_turn(&app, project.as_ref(), &new_content, context_length).await;
     let auto_skill = auto_skill_for_turn(&settings, project.as_ref(), &new_content, &history_for_api, context_length);
     let knowledge = fit_knowledge(knowledge, auto_skill.as_ref(), context_length);
-    let turn_res = exaone::run_exaone_turn(
+    let turn_res = agent::run_agent_turn(
         &app,
         TurnRequest {
             settings: &settings,
@@ -1473,7 +1473,7 @@ pub(crate) async fn run_approved_tool<R: tauri::Runtime>(
         }
         // 보호된 설정 폴더(.git, .vscode 등)에 대한 쓰기
         "write_file" | "modify_file" => {
-            let (rec, snap, _) = exaone::execute_tool_now(app, &root, &project_id, tool_id, tool_name, args).await;
+            let (rec, snap, _) = agent::execute_tool_now(app, &root, &project_id, tool_id, tool_name, args).await;
             new_snap = snap;
             if rec.status == "completed" {
                 ("completed", format!("승인 완료: {}", rec.output))
@@ -1593,7 +1593,7 @@ fn set_project_auto_approve(
     tool: String,
     enabled: bool,
 ) -> Result<Project, String> {
-    if !exaone::AUTO_APPROVABLE.contains(&tool.as_str()) {
+    if !agent::AUTO_APPROVABLE.contains(&tool.as_str()) {
         return Err(format!("'{}' 도구는 항상 허용으로 둘 수 없습니다.", tool));
     }
     let mut db = state.db.lock().map_err(|e| e.to_string())?;
@@ -1657,7 +1657,7 @@ async fn resolve_tool_approval(
 
     // "항상 허용": 이 프로젝트에서는 이 도구를 앞으로 묻지 않고 실행한다 (MCP 도구는 서버 설정에 따로 적는다).
     let mut project = project;
-    if approve && always == Some(true) && exaone::AUTO_APPROVABLE.contains(&tool_name.as_str()) {
+    if approve && always == Some(true) && agent::AUTO_APPROVABLE.contains(&tool_name.as_str()) {
         if let Some(p) = project.as_mut() {
             let mut db = state.db.lock().map_err(|e| e.to_string())?;
             if let Some(stored) = db.projects.iter_mut().find(|x| x.id == p.id) {
@@ -1747,7 +1747,7 @@ async fn resolve_tool_approval(
         })
         .flatten();
     let knowledge = fit_knowledge(knowledge, auto_skill.as_ref(), context_length);
-    let (updated_msg, new_snapshots) = exaone::run_exaone_turn(
+    let (updated_msg, new_snapshots) = agent::run_agent_turn(
         &app,
         TurnRequest {
             settings: &settings,
@@ -1826,7 +1826,7 @@ async fn compact_conversation(
             _ => (None, conv.messages[..covered].to_vec()),
         };
 
-        let source_chars = exaone::conversation_source_chars(prev_ctx.as_ref(), &slice);
+        let source_chars = agent::conversation_source_chars(prev_ctx.as_ref(), &slice);
         // 요약도 이 대화의 모델로 요청한다(대화 모델이 없으면 기본 모델).
         let mut settings = db.settings.clone();
         settings.model = conversation_model(&settings, conv).unwrap_or_default();
@@ -1835,7 +1835,7 @@ async fn compact_conversation(
 
     let summary = if use_ai {
         let reasoning_options = providers::turn_model_info(&settings, &settings.model).await.reasoning_options;
-        exaone::summarize_for_compaction(
+        agent::summarize_for_compaction(
             &settings,
             prev_ctx.as_ref(),
             &slice_to_summarize,
@@ -1845,7 +1845,7 @@ async fn compact_conversation(
         )
         .await?
     } else {
-        exaone::build_local_compaction_summary(
+        agent::build_local_compaction_summary(
             prev_ctx.as_ref(),
             &slice_to_summarize,
             focus_clean.as_deref(),
@@ -2982,9 +2982,9 @@ mod tests {
         let slice: Vec<&str> = job.slice.iter().map(|m| m.content.as_str()).collect();
         assert_eq!(slice, vec!["m2", "m3"], "새로 덮는 메시지만 요약에 넣는다");
         // 로컬 요약(실패 시 대체)도 이전 요약 위에 쌓인다. AI 요약도 같은 prev/slice를 받는다.
-        let summary = exaone::build_local_compaction_summary(job.prev.as_ref(), &job.slice, None);
+        let summary = agent::build_local_compaction_summary(job.prev.as_ref(), &job.slice, None);
         assert!(summary.contains("이전 누적 요약 본문"), "{}", summary);
-        assert_eq!(exaone::conversation_source_chars(job.prev.as_ref(), &job.slice), "이전 누적 요약 본문".chars().count() + 4);
+        assert_eq!(agent::conversation_source_chars(job.prev.as_ref(), &job.slice), "이전 누적 요약 본문".chars().count() + 4);
         // 70% 아래면 압축하지 않는다.
         assert!(auto_compaction_job(&AppSettings::default(), &conv_with(6, 20_000), 0, 32768, 0).is_none());
     }
