@@ -81,7 +81,7 @@ git add -A
 git commit -m "chore: fork K-EXAONE Desktop 0.4.4 as Any LM Desktop and add handoff docs" -m "Agent: claude-code"
 ```
 
-- [ ] **Step 6: GitHub 비공개 저장소 — 사용자에게 먼저 확인**
+- [x] **Step 6: GitHub 비공개 저장소 — 2026-11-23 사용자 승인 후 생성 및 초기 푸시**
 
 사용자에게 "`kidarigun/any-lm-desktop` 비공개 저장소를 만들고 main을 올릴까요?"를 묻고, 승인하면:
 
@@ -101,7 +101,7 @@ Expected: `git remote -v`에 origin(새 저장소)과 upstream(push DISABLED)이
 - Test: `src-tauri/src/lib.rs` 테스트 모듈, `src-tauri/src/single_instance.rs` 테스트 모듈
 
 **Interfaces:**
-- Produces: `secrets::SERVICE = "io.github.kidarigun.anylm-desktop"`, `single_instance::PORT = 45789`, 미리보기 호스트 `anylm-preview.localhost`, 대화상자 환경 변수 `ANYLM_DLG_INIT|NAME|FILTER`, localStorage 접두어 `anylm_`, 기본 작업 폴더 `문서\AnyLM`.
+- Produces: `secrets::SERVICE = "io.github.kidarigun.anylm-desktop"`, `single_instance::PORT = 45790`, `mcp_oauth::CALLBACK_PORT = 45791`, 미리보기 호스트 `anylm-preview.localhost`, 대화상자 환경 변수 `ANYLM_DLG_INIT|NAME|FILTER`, localStorage 접두어 `anylm_`, 기본 작업 폴더 `문서\AnyLM`.
 
 - [x] **Step 1: 실패하는 테스트**
 
@@ -121,7 +121,7 @@ fn identity_is_any_lm_desktop() {
 }
 ```
 
-`single_instance.rs` tests에 `assert_eq!(PORT, 45789); assert_eq!(HELLO, b"ANYLM-DESKTOP-SHOW\n");`. 기존 미리보기 주소 테스트(`lib.rs`의 `exaone-preview.localhost` 단언)는 `anylm-preview.localhost`로 고친다.
+`single_instance.rs` 테스트에서 중복 실행 포트 45790과 MCP OAuth 포트 45791이 원본과 충돌하지 않는지 확인한다. 기존 미리보기 주소 테스트의 값은 `anylm-preview.localhost`로 확인한다.
 
 - [x] **Step 2: 실패 확인** — `cd src-tauri; cargo test --lib identity_is_any_lm_desktop` → FAIL
 
@@ -536,6 +536,6 @@ it("has no K-EXAONE branding in UI sources", () => {
 
 - [x] **Step 1: 스펙 7절 완료 기준 1~8을 하나씩 실측**하고, 기준마다 결과(통과/실패, 근거)를 STATUS "마지막 확인"에 적는다. 실패한 기준은 새 작업으로 이 계획 끝에 추가한다.
 
-- [ ] **Step 2: 인계 연습(완료 기준 9).** 사용자에게 다른 도구(Codex 또는 Antigravity)에서 `docs/handoff/START.md`의 시작 문구로 세션을 열어 달라고 요청한다. 그 도구가 STATUS만 보고 남은 일(또는 작은 연습 작업: README 오탈자 수정 같은 것)을 이어서 커밋하는지, 커밋에 `Agent:` 줄이 붙는지, STATUS·LOG를 갱신하는지 확인한다. 어긋난 점은 `AGENTS.md`에 규칙으로 보탠다.
+- [x] **Step 2: 인계 연습(완료 기준 9).** 2026-11-24에 Codex가 Claude Code의 인계 문서와 Git 상태를 대조한 뒤 포트 표기를 정정하고 후속 작업을 이어받았다. STATUS와 LOG를 갱신하고 `Agent: codex`로 기록한다.
 
 - [ ] **Step 3: 최종 검증과 커밋** — 세 검증 명령 PASS → `docs: record acceptance results and handoff drill`. 사용자 승인을 받은 뒤 `git push origin main`.
