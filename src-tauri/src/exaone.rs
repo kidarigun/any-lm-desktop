@@ -16,6 +16,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 use uuid::Uuid;
 
 /// 한 번의 사용자 요청에서 모델이 도구를 연속 호출할 수 있는 최대 라운드 수.
+pub const MAX_TOOL_ROUNDS: usize = 50;
 /// 모델에게 되돌려 주는 도구 출력의 최대 길이(문자).
 pub const MAX_TOOL_OUTPUT_CHARS: usize = 40_000;
 
@@ -1271,104 +1272,11 @@ fn push_empty_answer_nudge(msgs: &mut Vec<Value>, after_tools: bool) {
 
 fn total_chars(msgs: &[Value]) -> usize {
     msgs.iter()
-        .map(|m| m.get("content").and_then(|c| c.as_str()).map_or(0, |s| s.chars().count()))
+        .map(|m| {
+            m.get("content").and_then(|c| c.as_str()).map_or(0, |s| s.chars().count())
+                + m.get("tool_calls").map_or(0, |v| v.to_string().chars().count())
+        })
         .sum()
-}
-
-fn request_message_chars(m: &Value) -> usize {
-    16 + m["content"].as_str().map_or(0, |s| s.chars().count())
-        + m.get("tool_calls").map_or(0, |v| v.to_string().chars().count())
-}
-
-fn remember_pruned_tool(m: &Value, notes: &mut std::collections::VecDeque<String>) {
-    if let Some(calls) = m["tool_calls"].as_array() {
-        for call in calls {
-            let function = &call["function"];
-            let name = function["name"].as_str().unwrap_or("도구");
-            let args = function["arguments"].as_str().unwrap_or("");
-            let target = serde_json::from_str::<Value>(args).ok()
-                .and_then(|v| ["relative_path", "id", "query"].iter()
-                    .find_map(|key| v[key].as_str().map(|s| s.chars().take(105).collect::<String>())));
-            notes.push_back(match target {
-                Some(target) => format!("- {name} ({target})"),
-                None => format!("- {name}"),
-            });
-        }
-    } else if m["role"] == "tool" {
-        let excerpt: String = m["content"].as_str().unwrap_or("").chars().take(110).collect();
-        notes.push_back(format!("  결과: {}", excerpt.replace(['\n', '\r'], " ")));
-    }
-    while notes.len() > 16 {
-        notes.pop_front();
-    }
-}
-
-/// 완료된 턴의 호출 인자·결과를 먼저 줄인다. 사용자 질문과 답변 원문은 유지한다.
-fn roll_completed_tool_history(
-    messages: &mut Vec<Value>,
-    user_index: usize,
-    budget: usize,
-    notes: &mut std::collections::VecDeque<String>,
-) -> usize {
-    let mut size: usize = messages.iter().map(request_message_chars).sum();
-    if size <= budget || !messages[..user_index].iter().any(|m| m["tool_calls"].is_array()) {
-        return user_index;
-    }
-    let mut old = std::mem::take(messages).into_iter().enumerate().peekable();
-    while old.peek().is_some_and(|(i, _)| *i < user_index) {
-        let (_, message) = old.next().expect("앞 메시지가 있음");
-        if size <= budget || !message["tool_calls"].is_array() {
-            messages.push(message);
-            continue;
-        }
-        size = size.saturating_sub(request_message_chars(&message));
-        remember_pruned_tool(&message, notes);
-        while old.peek().is_some_and(|(i, m)| *i < user_index && m["role"] == "tool") {
-            let (_, result) = old.next().expect("도구 결과가 있음");
-            size = size.saturating_sub(request_message_chars(&result));
-            remember_pruned_tool(&result, notes);
-        }
-        if let Some(text) = message["content"].as_str().filter(|s| !s.is_empty()) {
-            let plain = json!({"role":"assistant","content":text});
-            size += request_message_chars(&plain);
-            messages.push(plain);
-        }
-    }
-    let adjusted = messages.len();
-    messages.extend(old.map(|(_, message)| message));
-    adjusted
-}
-
-/// 진행 중인 턴에서는 가장 최근의 완전한 도구 교환을 남긴다.
-fn roll_tool_history(
-    messages: &mut Vec<Value>,
-    user_index: usize,
-    budget: usize,
-    notes: &mut std::collections::VecDeque<String>,
-) {
-    let mut size: usize = messages.iter().map(request_message_chars).sum();
-    if size <= budget {
-        return;
-    }
-    let start = user_index + 1;
-    let mut groups = messages.iter().enumerate().skip(start)
-        .filter(|(_, m)| m["tool_calls"].is_array()).map(|(i, _)| i);
-    let Some(first) = groups.next() else { return };
-    let mut end = first;
-    for next in groups {
-        size = size.saturating_sub(messages[end..next].iter().map(request_message_chars).sum::<usize>());
-        end = next;
-        if size <= budget {
-            break;
-        }
-    }
-    if end == first {
-        return;
-    }
-    // 첫 호출 이전의 글과 원래 사용자 요청은 그대로 둔다.
-    for m in messages.drain(first..end) {
-        remember_pruned_tool(&m, notes);
-    }
 }
 
 /// 서버 오류가 "보낸 내용이 너무 길다"는 뜻인지
@@ -1396,10 +1304,31 @@ fn shorten_middle(text: &str, cap: usize) -> String {
     format!("{}\n\n[... 대화가 길어 중간 {}자를 줄였습니다. 필요하면 다시 읽으세요 ...]\n\n{}", head, total - head.chars().count() - tail.chars().count(), tail)
 }
 
+fn compact_tool_arguments(args: &str, cap: usize) -> Option<String> {
+    let total = args.chars().count();
+    if total <= cap {
+        return None;
+    }
+    let mut summary = serde_json::Map::new();
+    if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(args) {
+        for key in ["relative_path", "path", "id", "query", "command", "url", "name"] {
+            if let Some(s) = map.get(key).and_then(Value::as_str) {
+                let short: String = s.chars().take(120).collect();
+                summary.insert(key.to_string(), Value::String(short));
+            }
+        }
+    }
+    summary.insert(
+        "_omitted".to_string(),
+        Value::String(format!("이전 도구 인자 생략 ({}자)", total)),
+    );
+    Some(Value::Object(summary).to_string())
+}
+
 /// 보낼 메시지를 줄인다 (원본은 그대로 둔다).
-/// - 1단계: 최근 4개를 뺀 오래된 도구 결과를 3천 자로
-/// - 2단계(컨텍스트 초과 오류 뒤): 최근 2개를 뺀 도구 결과를 8백 자로, 최근 8개를 뺀 대화 글을 2천 자로
-/// - 3단계(긴급 추가 압축): 최근 1개를 뺀 도구 결과를 3백 자로, 최근 4개를 뺀 대화 글을 4백 자로
+/// - 1단계: 지난 턴의 큰 도구 인자를 500자 이하 요약으로 줄이고, 최근 4개를 뺀 오래된 도구 결과를 3천 자로
+/// - 2단계(컨텍스트 초과 오류 뒤): 최근 2개를 뺀 도구 호출 인자·결과를 줄이고, 최근 8개를 뺀 대화 글을 2천 자로
+/// - 3단계(긴급 추가 압축): 최근 1개를 뺀 도구 호출 인자·결과를 줄이고, 최근 4개를 뺀 대화 글을 4백 자로
 fn compact_messages(msgs: &[Value], level: u8) -> Vec<Value> {
     if level == 0 {
         return msgs.to_vec();
@@ -1416,6 +1345,11 @@ fn compact_messages(msgs: &[Value], level: u8) -> Vec<Value> {
         .map(|(i, _)| i)
         .collect();
     let recent_tools: std::collections::HashSet<usize> = tool_idx.iter().rev().take(keep_tools).copied().collect();
+    let earliest_recent_tool = recent_tools.iter().copied().min().unwrap_or(usize::MAX);
+    let last_user_idx = msgs
+        .iter()
+        .rposition(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+        .unwrap_or(0);
     let old_before = if keep_msgs == 0 { 0 } else { msgs.len().saturating_sub(keep_msgs) };
     msgs.iter()
         .enumerate()
@@ -1430,21 +1364,161 @@ fn compact_messages(msgs: &[Value], level: u8) -> Vec<Value> {
             if is_compaction_pair {
                 return m.clone();
             }
+            let mut next = m.clone();
+            let shrink_args = i < last_user_idx || (level >= 2 && i < earliest_recent_tool);
+            if role == "assistant" && shrink_args {
+                if let Some(calls) = next.get_mut("tool_calls").and_then(Value::as_array_mut) {
+                    for call in calls {
+                        if let Some(func) = call.get_mut("function").and_then(Value::as_object_mut) {
+                            if let Some(short) = func
+                                .get("arguments")
+                                .and_then(Value::as_str)
+                                .and_then(|a| compact_tool_arguments(a, 500))
+                            {
+                                func.insert("arguments".to_string(), Value::String(short));
+                            }
+                        }
+                    }
+                }
+            }
             let cap = match role {
                 "tool" if !recent_tools.contains(&i) => Some(tool_cap),
                 "user" | "assistant" if i < old_before => Some(msg_cap),
                 _ => None,
             };
-            match (cap, m.get("content").and_then(|c| c.as_str())) {
-                (Some(cap), Some(text)) if text.chars().count() > cap => {
-                    let mut m2 = m.clone();
-                    m2["content"] = json!(shorten_middle(text, cap));
-                    m2
+            if let (Some(cap), Some(text)) = (cap, next.get("content").and_then(|c| c.as_str())) {
+                if text.chars().count() > cap {
+                    next["content"] = json!(shorten_middle(text, cap));
                 }
-                _ => m.clone(),
             }
+            next
         })
         .collect()
+}
+
+const MAX_CONSECUTIVE_ERROR_ROUNDS: usize = 4;
+const MAX_SAME_ERROR_CALLS: usize = 3;
+const MAX_SAME_READ_CALLS: usize = 4;
+
+fn is_readonly_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "read_file" | "list_directory" | "search_files" | "search_knowledge" | "server_logs" | "load_skill" | "read_skill_file"
+    )
+}
+
+fn canonical_tool_key(name: &str, args_json: &str) -> (String, String) {
+    let canonical = serde_json::from_str::<Value>(args_json)
+        .and_then(|v| serde_json::to_string(&v))
+        .unwrap_or_else(|_| args_json.trim().to_string());
+    (name.to_string(), canonical)
+}
+
+enum ToolLoopAction {
+    Continue,
+    Warn(&'static str),
+    Stop(&'static str),
+}
+
+#[derive(Default)]
+struct ToolLoopGuard {
+    consecutive_error_rounds: usize,
+    error_call_counts: std::collections::HashMap<(String, String), usize>,
+    read_call_counts: std::collections::HashMap<(String, String), usize>,
+}
+
+impl ToolLoopGuard {
+    fn observe_round(&mut self, records: &[&ToolExecutionRecord]) -> ToolLoopAction {
+        let executed: Vec<&ToolExecutionRecord> = records
+            .iter()
+            .copied()
+            .filter(|r| !r.automatic && r.status != "pending_approval")
+            .collect();
+        if executed.is_empty() {
+            return ToolLoopAction::Continue;
+        }
+        // 상태 변경 작업이 성공하면 파일·로그 내용이 달라졌을 수 있으므로 읽기 반복 횟수를 초기화한다.
+        if executed.iter().any(|r| r.status == "completed" && !is_readonly_tool(&r.tool_name)) {
+            self.read_call_counts.clear();
+        }
+        if executed.iter().all(|r| r.status == "error") {
+            self.consecutive_error_rounds += 1;
+        } else if executed.iter().any(|r| r.status == "completed") {
+            self.consecutive_error_rounds = 0;
+        }
+
+        let mut max_err = 0usize;
+        let mut max_read = 0usize;
+        for r in executed {
+            let key = canonical_tool_key(&r.tool_name, &r.arguments_json);
+            if r.status == "error" {
+                let count = self.error_call_counts.entry(key).or_insert(0);
+                *count += 1;
+                max_err = max_err.max(*count);
+            } else if r.status == "completed" && is_readonly_tool(&r.tool_name) {
+                let count = self.read_call_counts.entry(key).or_insert(0);
+                *count += 1;
+                max_read = max_read.max(*count);
+            }
+        }
+
+        if self.consecutive_error_rounds >= MAX_CONSECUTIVE_ERROR_ROUNDS || max_err >= MAX_SAME_ERROR_CALLS {
+            return ToolLoopAction::Stop("같은 도구 오류가 반복되어 무한 루프를 막기 위해 작업을 멈췄습니다. 원인을 확인한 뒤 다시 지시해 주세요.");
+        }
+        if max_read >= MAX_SAME_READ_CALLS {
+            return ToolLoopAction::Stop("같은 파일이나 조회 도구를 변경 없이 반복 호출해 무한 루프를 막기 위해 작업을 멈췄습니다. 진행 방향을 알려 주시거나 \"계속\"이라고 입력해 주세요.");
+        }
+        if self.consecutive_error_rounds >= 2 || max_err >= 2 {
+            return ToolLoopAction::Warn("\n\n[안내: 같은 도구 오류가 반복되고 있습니다. 같은 호출을 되풀이하지 말고 다른 방법을 쓰거나, 해결이 어려우면 원인을 사용자에게 설명하세요.]");
+        }
+        if max_read >= 3 {
+            return ToolLoopAction::Warn("\n\n[안내: 방금과 같은 조회를 변경 없이 여러 번 반복했습니다. 다시 읽지 말고 이미 확인한 내용으로 바로 수정하거나 사용자에게 답하세요.]");
+        }
+        ToolLoopAction::Continue
+    }
+}
+
+/// 마크다운 강조(`*`, `_`)와 공백 차이를 무시하고 끝부분에서 긴 문구가 제자리 반복되는지 탐지한다.
+fn detect_repetition_loop(text: &str) -> bool {
+    let total = text.chars().count();
+    let tail: String = text.chars().skip(total.saturating_sub(2_400)).collect();
+    let mut norm: Vec<char> = Vec::with_capacity(tail.len());
+    let mut prev_space = true;
+    for ch in tail.chars() {
+        if ch == '*' || ch == '_' {
+            continue;
+        }
+        if ch.is_whitespace() {
+            if !prev_space {
+                norm.push(' ');
+                prev_space = true;
+            }
+        } else {
+            norm.push(ch);
+            prev_space = false;
+        }
+    }
+    let n = norm.len();
+    if n < 240 {
+        return false;
+    }
+    for p in 36..=450 {
+        let need = if p >= 120 { 3 } else { 4 };
+        if p * need > n {
+            break;
+        }
+        if p * need < 240 {
+            continue;
+        }
+        if norm[n - (need - 1) * p..n] == norm[n - need * p..n - p] {
+            let distinct: std::collections::HashSet<char> =
+                norm[n - p..n].iter().copied().filter(|c| *c != ' ').collect();
+            if distinct.len() >= 8 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// 메시지 배열의 총 문자 수(시스템/압축 요약 제외 대화 원문 분량 참고용)
@@ -1982,6 +2056,9 @@ pub async fn run_exaone_turn<R: Runtime>(
 
     let mut new_snapshots: Vec<FileSnapshot> = Vec::new();
     let mut cancelled = false;
+    let mut hit_round_limit = false;
+    let mut stuck_loop_reason: Option<&'static str> = None;
+    let mut repetition_stopped = false;
     // 도중에 실패하면 이유를 담는다. 그때까지 받은 글·생각·도구 결과는 버리지 않고 저장한다.
     let mut failure: Option<String> = None;
     let mut first_failure: Option<String> = None;
@@ -1989,6 +2066,7 @@ pub async fn run_exaone_turn<R: Runtime>(
     let mut continuing = false;
     let mut continues_used = 0usize;
     let mut recoveries_used = 0usize;
+    let mut tool_rounds_used = 0usize;
     let mut length_cut = false;
     // 보낼 메시지 줄이기 단계 (컨텍스트 초과 오류를 받으면 2단계로 올린다)
     let mut compact_level = 0u8;
@@ -1996,8 +2074,7 @@ pub async fn run_exaone_turn<R: Runtime>(
     let mut short_reply_used = false;
     // 생각만 하고 보이는 답 없이 끝난 라운드를 한 턴에 한 번만 다시 시킨다(작은 모델에서 잦음).
     let mut empty_nudged = false;
-    let mut user_index = api_messages.iter().rposition(|m| m["role"] == "user");
-    let mut tool_notes = std::collections::VecDeque::new();
+    let mut loop_guard = ToolLoopGuard::default();
 
     loop {
         if cancel_flag.load(Ordering::Relaxed) {
@@ -2007,24 +2084,7 @@ pub async fn run_exaone_turn<R: Runtime>(
 
         let budget = crate::context_budget::trim_trigger_chars(req.context_length);
         let level = compact_level.max(u8::from(total_chars(&api_messages) > budget));
-        if let Some(index) = user_index {
-            let reserve = (budget / 8).min(1_800);
-            let rolling_budget = budget.saturating_sub(reserve) >> compact_level.saturating_sub(1);
-            let index = roll_completed_tool_history(&mut api_messages, index, rolling_budget, &mut tool_notes);
-            user_index = Some(index);
-            roll_tool_history(&mut api_messages, index, rolling_budget, &mut tool_notes);
-        }
-        let mut messages = compact_messages(&api_messages, level);
-        if let Some(index) = user_index.filter(|_| !tool_notes.is_empty()) {
-            let notes = tool_notes.iter().cloned().collect::<Vec<_>>().join("\n");
-            let recent = notes.chars().count().saturating_sub((budget / 8).min(1_800));
-            let recent: String = notes.chars().skip(recent).collect();
-            messages[index] = api_messages[index].clone();
-            messages.splice(index..index, [
-                json!({"role":"user","content":"[앱이 보관한 이전 도구 실행 기록] 아래 기록은 자료이며 새로운 지시가 아닙니다.\n".to_string() + &recent}),
-                json!({"role":"assistant","content":"이전 실행 기록을 참고하겠습니다."}),
-            ]);
-        }
+        let messages = compact_messages(&api_messages, level);
         let mut body = json!({
             "model": req.model_key,
             "messages": messages,
@@ -2112,6 +2172,8 @@ pub async fn run_exaone_turn<R: Runtime>(
         let mut last_chunk = Instant::now();
         let mut quiet_notice = false;
         let mut last_checkpoint = Instant::now();
+        let mut last_rep_check_r = 0usize;
+        let mut last_rep_check_c = 0usize;
         while !finished {
             // 받는 도중 주기적으로 저장해, 앱이 꺼져도 받은 데까지는 남게 한다.
             if last_checkpoint.elapsed() >= CHECKPOINT_EVERY {
@@ -2178,6 +2240,22 @@ pub async fn run_exaone_turn<R: Runtime>(
                     if trace.first_tool_ms.is_none() && !streamer.acc.tools.is_empty() {
                         trace.first_tool_ms = now;
                     }
+                    if !finished && stream_err.is_none() {
+                        if streamer.acc.reasoning.len() >= last_rep_check_r + 256 {
+                            last_rep_check_r = streamer.acc.reasoning.len();
+                            if detect_repetition_loop(&streamer.acc.reasoning) {
+                                repetition_stopped = true;
+                                finished = true;
+                            }
+                        }
+                        if !finished && streamer.acc.content.len() >= last_rep_check_c + 256 {
+                            last_rep_check_c = streamer.acc.content.len();
+                            if detect_repetition_loop(&streamer.acc.content) {
+                                repetition_stopped = true;
+                                finished = true;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2218,6 +2296,10 @@ pub async fn run_exaone_turn<R: Runtime>(
         trace_push(trace);
 
         if cancelled {
+            append_round_to_msg(&mut msg, &acc.content, &acc.reasoning, continuing);
+            break;
+        }
+        if repetition_stopped {
             append_round_to_msg(&mut msg, &acc.content, &acc.reasoning, continuing);
             break;
         }
@@ -2277,6 +2359,11 @@ pub async fn run_exaone_turn<R: Runtime>(
         append_round_to_msg(&mut msg, &acc.content, &acc.reasoning, continuing);
         continuing = false;
 
+        if detect_repetition_loop(&acc.reasoning) || detect_repetition_loop(&acc.content) {
+            repetition_stopped = true;
+            break;
+        }
+
         let finished_with_length = acc.finish_reason.as_deref() == Some("length");
         let calls: Vec<PendingToolCall> =
             acc.tools.into_iter().filter(|t| !t.name.is_empty()).collect();
@@ -2305,8 +2392,10 @@ pub async fn run_exaone_turn<R: Runtime>(
             if !empty_nudged
                 && acc.finish_reason.as_deref() == Some("stop")
                 && acc.content.trim().is_empty()
+                && tool_rounds_used < MAX_TOOL_ROUNDS
             {
                 empty_nudged = true;
+                tool_rounds_used += 1;
                 // 앱이 넣은 자동 Skill 카드는 모델이 실행한 도구가 아니다.
                 push_empty_answer_nudge(&mut api_messages, msg.tool_records.iter().any(|r| !r.automatic));
                 continue;
@@ -2318,6 +2407,7 @@ pub async fn run_exaone_turn<R: Runtime>(
             break;
         }
 
+        tool_rounds_used += 1;
         continues_used = 0;
 
         let first_record = msg.tool_records.len();
@@ -2484,14 +2574,52 @@ pub async fn run_exaone_turn<R: Runtime>(
             &refs,
             tool_cap,
         );
+        if !cancelled && !paused_for_approval {
+            match loop_guard.observe_round(&refs) {
+                ToolLoopAction::Continue => {}
+                ToolLoopAction::Warn(hint) => {
+                    if let Some(last_tool) = api_messages.iter_mut().rev().find(|m| m["role"] == "tool") {
+                        if let Some(prev) = last_tool["content"].as_str().map(str::to_string) {
+                            last_tool["content"] = json!(format!("{}{}", prev, hint));
+                        }
+                    }
+                }
+                ToolLoopAction::Stop(reason) => {
+                    stuck_loop_reason = Some(reason);
+                    break;
+                }
+            }
+        }
         cancelled |= cancel_flag.load(Ordering::Relaxed);
         if cancelled || paused_for_approval {
+            break;
+        }
+        if tool_rounds_used >= MAX_TOOL_ROUNDS {
+            hit_round_limit = true;
             break;
         }
     }
 
     if length_cut {
         let note = "_(답변이 출력 길이 제한에 걸려 멈췄습니다. 이어서 쓰려면 \"계속\"이라고 입력하세요.)_";
+        sink.content(&format!("\n\n{}", note));
+        msg.round_contents.push(note.to_string());
+    }
+    if hit_round_limit {
+        let note = format!(
+            "_(도구 호출 한도({}회)에 도달해 멈췄습니다. 이어서 진행하려면 \"계속\"이라고 입력하세요.)_",
+            MAX_TOOL_ROUNDS
+        );
+        sink.content(&format!("\n\n{}", note));
+        msg.round_contents.push(note);
+    }
+    if let Some(reason) = stuck_loop_reason {
+        let note = format!("_({})_", reason);
+        sink.content(&format!("\n\n{}", note));
+        msg.round_contents.push(note);
+    }
+    if repetition_stopped {
+        let note = "_(모델이 같은 내용을 반복해 무한 루프를 막기 위해 생성을 멈췄습니다. 질문을 나누어 보내거나 [컨텍스트 압축] 후 다시 시도해 주세요.)_";
         sink.content(&format!("\n\n{}", note));
         msg.round_contents.push(note.to_string());
     }
@@ -3514,12 +3642,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_finishes_after_more_than_fifty_tool_rounds() {
+    async fn stops_at_max_tool_rounds_limit() {
         let dir = tempfile::tempdir().unwrap();
         let mut responses = Vec::new();
         for i in 0..55 {
             let path = format!("input-{i}.txt");
-            std::fs::write(dir.path().join(&path), format!("검증 데이터 {i}\n").repeat(40)).unwrap();
+            std::fs::write(dir.path().join(&path), format!("검증 데이터 {i}")).unwrap();
             responses.push(vec![
                 sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":format!("call_{i}"),
                     "function":{"name":"read_file","arguments":json!({"relative_path":path}).to_string()}}]},
@@ -3527,7 +3655,6 @@ mod tests {
                 sse_done(),
             ]);
         }
-        responses.push(vec![sse(json!({"choices":[{"delta":{"content":"55개 확인 완료"},"finish_reason":"stop"}]})), sse_done()]);
         let (url, bodies) = mock_server(responses, 0).await;
         let app = tauri::test::mock_app();
         let settings = test_settings(url);
@@ -3535,25 +3662,166 @@ mod tests {
         let history = vec![msg("user", "입력 파일 55개를 순서대로 확인해 줘")];
         let (out, _) = run_exaone_turn(app.handle(), TurnRequest {
             settings: &settings, model_key: "m", model_display_name: "", reasoning_options: &[],
-            context_length: 8192, project: Some(&project), conversation_id: "long-turn",
+            context_length: 8192, project: Some(&project), conversation_id: "round-cap",
             history: &history, compaction: None, continue_from: None, mode: "project",
             checkpoint: None, knowledge: "", auto_skill: None,
         }, Arc::new(AtomicBool::new(false))).await.unwrap();
 
-        assert_eq!(out.tool_records.len(), 55);
-        assert!(out.tool_records.iter().all(|r| r.status == "completed"));
-        assert_eq!(out.content, "55개 확인 완료");
-        let bodies = bodies.lock().unwrap();
-        assert_eq!(bodies.len(), 56);
-        let sent = bodies.last().unwrap()["messages"].as_array().unwrap();
-        assert!(sent.iter().any(|m| m["content"].as_str().is_some_and(|s|
-            s.starts_with("입력 파일 55개를 순서대로 확인해 줘"))));
-        assert_eq!(sent.last().unwrap()["tool_call_id"], "call_54");
-        assert!(sent.iter().filter(|m| m["role"] == "tool").count() < 55);
-        for result in sent.iter().filter(|m| m["role"] == "tool") {
-            assert!(sent.iter().any(|m| m["tool_calls"].as_array().is_some_and(|calls|
-                calls.iter().any(|call| call["id"] == result["tool_call_id"]))));
+        assert_eq!(out.tool_records.len(), MAX_TOOL_ROUNDS);
+        assert_eq!(bodies.lock().unwrap().len(), MAX_TOOL_ROUNDS);
+        assert!(out.content.contains("도구 호출 한도(50회)에 도달해 멈췄습니다"));
+    }
+
+    #[tokio::test]
+    async fn active_turn_keeps_multiple_recent_files_without_amnesia_rolling() {
+        let dir = tempfile::tempdir().unwrap();
+        for (i, marker) in ["MARKER_ALPHA", "MARKER_BETA", "MARKER_GAMMA"].iter().enumerate() {
+            let body = format!("{}_{}", marker, "x".repeat(3_400));
+            std::fs::write(dir.path().join(format!("f{i}.txt")), body).unwrap();
         }
+        let mut responses: Vec<Vec<Vec<u8>>> = (0..3)
+            .map(|i| {
+                vec![
+                    sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":format!("rf_{i}"),
+                        "function":{"name":"read_file","arguments":json!({"relative_path":format!("f{i}.txt")}).to_string()}}]},
+                        "finish_reason":"tool_calls"}]})),
+                    sse_done(),
+                ]
+            })
+            .collect();
+        responses.push(vec![
+            sse(json!({"choices":[{"delta":{"content":"세 파일 모두 확인 완료"},"finish_reason":"stop"}]})),
+            sse_done(),
+        ]);
+        let (url, bodies) = mock_server(responses, 0).await;
+        let app = tauri::test::mock_app();
+        let settings = test_settings(url);
+        let project = test_project(dir.path());
+        let history = vec![msg("user", "f0.txt, f1.txt, f2.txt를 읽고 종합해 줘")];
+        let (out, _) = run_exaone_turn(app.handle(), TurnRequest {
+            settings: &settings, model_key: "m", model_display_name: "", reasoning_options: &[],
+            context_length: 8192, project: Some(&project), conversation_id: "no-amnesia",
+            history: &history, compaction: None, continue_from: None, mode: "project",
+            checkpoint: None, knowledge: "", auto_skill: None,
+        }, Arc::new(AtomicBool::new(false))).await.unwrap();
+
+        assert_eq!(out.content, "세 파일 모두 확인 완료");
+        let sent = bodies.lock().unwrap()[3]["messages"].as_array().unwrap().clone();
+        let joined: String = sent.iter().filter_map(|m| m["content"].as_str()).collect::<Vec<_>>().join("\n");
+        assert!(joined.contains("MARKER_ALPHA"), "첫 번째 읽은 파일 내용이 사라지면 안 된다");
+        assert!(joined.contains("MARKER_BETA"), "두 번째 읽은 파일 내용이 사라지면 안 된다");
+        assert!(joined.contains("MARKER_GAMMA"), "세 번째 읽은 파일 내용이 사라지면 안 된다");
+        assert!(!joined.contains("앱이 보관한 이전 도구 실행 기록"));
+    }
+
+    #[tokio::test]
+    async fn stuck_loop_stops_after_repeated_tool_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hello world\n").unwrap();
+        let mut responses = Vec::new();
+        for i in 0..8 {
+            responses.push(vec![
+                sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":format!("err_{i}"),
+                    "function":{"name":"modify_file","arguments":json!({"relative_path":"a.txt","target":"MISSING_TARGET","replacement":"new"}).to_string()}}]},
+                    "finish_reason":"tool_calls"}]})),
+                sse_done(),
+            ]);
+        }
+        let (url, bodies) = mock_server(responses, 0).await;
+        let app = tauri::test::mock_app();
+        let settings = test_settings(url);
+        let project = test_project(dir.path());
+        let history = vec![msg("user", "a.txt를 고쳐 줘")];
+        let (out, _) = run_exaone_turn(app.handle(), TurnRequest {
+            settings: &settings, model_key: "m", model_display_name: "", reasoning_options: &[],
+            context_length: 32768, project: Some(&project), conversation_id: "err-loop",
+            history: &history, compaction: None, continue_from: None, mode: "project",
+            checkpoint: None, knowledge: "", auto_skill: None,
+        }, Arc::new(AtomicBool::new(false))).await.unwrap();
+
+        assert_eq!(out.tool_records.len(), MAX_SAME_ERROR_CALLS);
+        assert!(out.tool_records.iter().all(|r| r.status == "error"));
+        assert!(out.content.contains("같은 도구 오류가 반복되어 무한 루프를 막기 위해 작업을 멈췄습니다"));
+        let sent_third = bodies.lock().unwrap()[2]["messages"].as_array().unwrap().clone();
+        assert!(sent_third.last().unwrap()["content"].as_str().unwrap().contains("같은 도구 오류가 반복되고 있습니다"));
+    }
+
+    #[tokio::test]
+    async fn stuck_loop_stops_after_repeated_identical_reads_without_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "contents\n").unwrap();
+        let mut responses = Vec::new();
+        // 동일 read_file 3회 -> 3번째에 경고, 이어서 write_file 성공 -> 읽기 카운터 초기화, 이후 동일 read_file 4회 -> 4번째에 중단
+        for i in 0..3 {
+            responses.push(vec![
+                sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":format!("r1_{i}"),
+                    "function":{"name":"read_file","arguments":json!({"relative_path":"a.txt"}).to_string()}}]},
+                    "finish_reason":"tool_calls"}]})),
+                sse_done(),
+            ]);
+        }
+        responses.push(vec![
+            sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"w1",
+                "function":{"name":"write_file","arguments":json!({"relative_path":"b.txt","content":"updated"}).to_string()}}]},
+                "finish_reason":"tool_calls"}]})),
+            sse_done(),
+        ]);
+        for i in 0..6 {
+            responses.push(vec![
+                sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":format!("r2_{i}"),
+                    "function":{"name":"read_file","arguments":json!({"relative_path":"a.txt"}).to_string()}}]},
+                    "finish_reason":"tool_calls"}]})),
+                sse_done(),
+            ]);
+        }
+        let (url, bodies) = mock_server(responses, 0).await;
+        let app = tauri::test::mock_app();
+        let settings = test_settings(url);
+        let project = test_project(dir.path());
+        let history = vec![msg("user", "a.txt 읽고 b.txt 수정해 줘")];
+        let (out, _) = run_exaone_turn(app.handle(), TurnRequest {
+            settings: &settings, model_key: "m", model_display_name: "", reasoning_options: &[],
+            context_length: 32768, project: Some(&project), conversation_id: "read-loop",
+            history: &history, compaction: None, continue_from: None, mode: "project",
+            checkpoint: None, knowledge: "", auto_skill: None,
+        }, Arc::new(AtomicBool::new(false))).await.unwrap();
+
+        assert_eq!(out.tool_records.len(), 3 + 1 + MAX_SAME_READ_CALLS);
+        assert!(out.content.contains("같은 파일이나 조회 도구를 변경 없이 반복 호출해"));
+        let sent_after_third = bodies.lock().unwrap()[3]["messages"].as_array().unwrap().clone();
+        assert!(sent_after_third.last().unwrap()["content"].as_str().unwrap().contains("방금과 같은 조회를 변경 없이 여러 번 반복했습니다"));
+    }
+
+    #[test]
+    fn detect_repetition_loop_catches_real_alternating_markdown_loop_without_false_positives() {
+        let block_a = "문제를 파악했습니다:\n\n1. Vue CDN이 index.php에 로드되어 있는지 확인 필요\n2. 컴포넌트 파일들이 window 객체에 제대로 등록되는지 확인 필요\n3. 스크립트 로딩 순서 문제 - 컴포넌트들이 app.js보다 먼저 로드되어야 함\n\nindex.php의 head 부분을 다시 확인하겠습니다.\n\n";
+        let block_b = "문제를 파악했습니다:\n\n1. **Vue CDN이 index.php에 로드되어 있는지 확인 필요**\n2. **컴포넌트 파일들이 window 객체에 제대로 등록되는지 확인 필요**\n3. **스크립트 로딩 순서 문제 - 컴포넌트들이 app.js보다 먼저 로드되어야 함**\n\nindex.php의 head 부분을 다시 확인하겠습니다.\n\n";
+        let looped = format!("앞부분 일반 분석입니다.\n\n{}{}{}{}", block_a, block_b, block_a, block_b);
+        assert!(detect_repetition_loop(&looped));
+
+        let normal_prose = "첫 번째로 index.php에서 Vue CDN 스크립트 태그 위치를 확인했습니다. 두 번째로 home.js와 board.js가 window.AppComponents에 등록되는 순서를 검증했습니다. 세 번째로 app.js가 마운트되기 전에 모든 컴포넌트가 준비되도록 script defer 속성을 조정했습니다. 마지막으로 PHP 개발 서버를 8081 포트에서 실행하고 브라우저에서 화면이 정상 렌더링되는지 확인했습니다.";
+        assert!(!detect_repetition_loop(normal_prose));
+
+        let dividers = format!("{}\n{}", "=".repeat(300), "-".repeat(300));
+        assert!(!detect_repetition_loop(&dividers));
+    }
+
+    #[tokio::test]
+    async fn stream_repetition_loop_aborts_turn_cleanly() {
+        let block_a = "문제를 파악했습니다: 1. Vue CDN 확인 필요 2. 컴포넌트 등록 확인 필요 3. 스크립트 로딩 순서 확인 필요. index.php를 다시 확인하겠습니다. ";
+        let block_b = "**문제를 파악했습니다**: 1. **Vue CDN 확인 필요** 2. **컴포넌트 등록 확인 필요** 3. **스크립트 로딩 순서 확인 필요**. index.php를 다시 확인하겠습니다. ";
+        let chunks = vec![
+            sse(json!({"choices":[{"delta":{"reasoning_content": block_a}}]})),
+            sse(json!({"choices":[{"delta":{"reasoning_content": block_b}}]})),
+            sse(json!({"choices":[{"delta":{"reasoning_content": block_a}}]})),
+            sse(json!({"choices":[{"delta":{"reasoning_content": block_b}}]})),
+            sse(json!({"choices":[{"delta":{},"finish_reason":"length"}]})),
+            sse_done(),
+        ];
+        let (url, bodies) = mock_server(vec![chunks], 0).await;
+        let out = turn(url, vec![msg("user", "원인을 찾아 줘")]).await.unwrap();
+        assert_eq!(bodies.lock().unwrap().len(), 1, "반복 루프로 끊기면 continue_prompt로 이어 받지 않는다");
+        assert!(out.content.contains("모델이 같은 내용을 반복해 무한 루프를 막기 위해 생성을 멈췄습니다"));
     }
 
     #[tokio::test]

@@ -81,6 +81,7 @@ import {
 } from "./lmstudio/sendFlow";
 import { StartServerButton } from "./lmstudio/StartServerButton";
 import { statsLineText } from "./chat/statsLine";
+import { isNearBottom } from "./chat/reasoningScroll";
 import { UpdateBanner, useUpdater } from "./update/UpdatePanel";
 import { WorkPanelToggle } from "./workpanel/WorkPanelToggle";
 import { useWorkPanel } from "./workpanel/useWorkPanel";
@@ -502,6 +503,8 @@ export default function App() {
   const [editingCompactionSummary, setEditingCompactionSummary] = useState<string | null>(null);
 
   const chatEndRef = useRef<HTMLDivElement | null>(null);
+  const reasoningBoxRef = useRef<HTMLDivElement | null>(null);
+  const reasoningStickToBottomRef = useRef<boolean>(true);
 
   const instructionsEditorProject = useMemo(
     () => (instructionsEditorId ? projects.find((p) => p.id === instructionsEditorId) : undefined),
@@ -1040,6 +1043,22 @@ export default function App() {
     const distance = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
     if (distance < 240) end.scrollIntoView({ behavior: "auto" });
   }, [streamingReasoning, streamingContent, streamingTools]);
+
+  // 대화 전환 시 생각 창 자동 추적 상태를 초기화한다.
+  useEffect(() => {
+    reasoningStickToBottomRef.current = true;
+  }, [shownConvId]);
+
+  // 실시간 생각 창은 사용자가 위로 올려 읽고 있지 않을 때만 자동으로 맨 아래를 따라간다.
+  useEffect(() => {
+    if (!streamingReasoning) {
+      reasoningStickToBottomRef.current = true;
+      return;
+    }
+    const el = reasoningBoxRef.current;
+    if (!el || !reasoningStickToBottomRef.current) return;
+    el.scrollTop = el.scrollHeight;
+  }, [streamingReasoning, shownConvId]);
 
   async function handleSwitchMode(mode: "chat" | "project" | "code") {
     setActiveMode(mode);
@@ -2870,7 +2889,18 @@ export default function App() {
                     </div>
 
                     {streamingReasoning && (
-                      <div className="p-3 rounded-xl bg-[#FAF9F5] dark:bg-[#1E1E1C] border border-stone-200 dark:border-[#383834] text-xs text-stone-500 dark:text-stone-400 whitespace-pre-wrap max-h-40 overflow-y-auto leading-relaxed">
+                      <div
+                        ref={reasoningBoxRef}
+                        onScroll={(e) => {
+                          const el = e.currentTarget;
+                          reasoningStickToBottomRef.current = isNearBottom(
+                            el.scrollTop,
+                            el.clientHeight,
+                            el.scrollHeight
+                          );
+                        }}
+                        className="p-3 rounded-xl bg-[#FAF9F5] dark:bg-[#1E1E1C] border border-stone-200 dark:border-[#383834] text-xs text-stone-500 dark:text-stone-400 whitespace-pre-wrap max-h-40 overflow-y-auto leading-relaxed"
+                      >
                         {streamingReasoning}
                       </div>
                     )}
