@@ -1478,6 +1478,20 @@ impl ToolLoopGuard {
     }
 }
 
+/// 추론("생각하기")이 켜진 모델에 반복 사고 루프를 억제하는 `presence_penalty`를 정한다.
+/// 코딩 모드("code")는 문법 토큰(괄호·키워드 등) 훼손을 줄이기 위해 0.8, 그 외 모드는 1.2를 쓴다.
+/// 추론 선택지가 없거나 추론을 끈 경우("off")에는 넣지 않는다.
+fn thinking_presence_penalty(reasoning_options: &[String], pref: Option<&str>, mode: &str) -> Option<f64> {
+    if reasoning_options.is_empty() || pref == Some("off") {
+        return None;
+    }
+    if mode == "code" {
+        Some(0.8)
+    } else {
+        Some(1.2)
+    }
+}
+
 /// 마크다운 강조(`*`, `_`)와 공백 차이를 무시하고 끝부분에서 긴 문구가 제자리 반복되는지 탐지한다.
 fn detect_repetition_loop(text: &str) -> bool {
     let total = text.chars().count();
@@ -1514,6 +1528,151 @@ fn detect_repetition_loop(text: &str) -> bool {
             let distinct: std::collections::HashSet<char> =
                 norm[n - p..n].iter().copied().filter(|c| *c != ' ').collect();
             if distinct.len() >= 8 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// 사고(`reasoning`) 속 한 절에서 목록 기호·강조·한국어 전환 추임새를 걷어 내 비교 가능한 형태로 정규화한다.
+fn normalize_thinking_clause(raw: &str) -> String {
+    const FILLERS: &[&str] = &[
+        "아, 잠깐",
+        "아 잠깐",
+        "잠깐만",
+        "잠깐",
+        "근데",
+        "그런데",
+        "하지만",
+        "그러나",
+        "실은",
+        "사실",
+        "아니면",
+        "아니",
+        "일단",
+        "이제",
+        "그럼",
+        "그러면",
+        "또",
+        "그리고",
+        "즉",
+    ];
+    let stripped = raw.trim_start_matches(|c: char| {
+        c.is_whitespace() || matches!(c, '-' | '*' | '•' | '·' | '.' | ')' | '(') || c.is_ascii_digit()
+    });
+    let mut collapsed = String::with_capacity(stripped.len());
+    let mut prev_space = true;
+    for ch in stripped.chars() {
+        if matches!(ch, '*' | '_' | '`' | '"' | '\'') {
+            continue;
+        }
+        if ch.is_whitespace() {
+            if !prev_space {
+                collapsed.push(' ');
+                prev_space = true;
+            }
+        } else {
+            for lc in ch.to_lowercase() {
+                collapsed.push(lc);
+            }
+            prev_space = false;
+        }
+    }
+    let mut s = collapsed.trim().to_string();
+    loop {
+        let trimmed = s
+            .trim_start_matches(|c: char| {
+                c.is_whitespace() || matches!(c, ',' | '.' | '…' | ':' | '-' | '!' | '?')
+            })
+            .to_string();
+        let mut matched = None;
+        for &filler in FILLERS {
+            if let Some(rest) = trimmed.strip_prefix(filler) {
+                let boundary_ok = match rest.chars().next() {
+                    None => true,
+                    Some(c) => c.is_whitespace() || matches!(c, ',' | '.' | '…' | ':' | '-' | '!' | '?'),
+                };
+                if boundary_ok {
+                    matched = Some(
+                        rest.trim_start_matches(|c: char| {
+                            c.is_whitespace() || matches!(c, ',' | '.' | '…' | ':' | '-' | '!' | '?')
+                        })
+                        .to_string(),
+                    );
+                    break;
+                }
+            }
+        }
+        if let Some(next) = matched {
+            s = next;
+        } else {
+            s = trimmed;
+            break;
+        }
+    }
+    s.trim_matches(|c: char| c.is_whitespace() || matches!(c, ',' | '.' | '…' | ':' | '-'))
+        .to_string()
+}
+
+/// 추론(`<think>`) 내부의 원문 제자리 반복뿐 아니라 말투·추임새를 바꾼 의역 자기검열 무한 루프까지 탐지한다.
+fn detect_thinking_loop(text: &str) -> bool {
+    if detect_repetition_loop(text) {
+        return true;
+    }
+    let total = text.chars().count();
+    if total < 600 {
+        return false;
+    }
+    let tail: String = text.chars().skip(total.saturating_sub(4_500)).collect();
+
+    let mut clause_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for raw in tail.split(|c: char| matches!(c, '\n' | '.' | '!' | '?' | '。' | '→' | ':')) {
+        let norm = normalize_thinking_clause(raw);
+        if norm.chars().count() < 16 {
+            continue;
+        }
+        let distinct: std::collections::HashSet<char> =
+            norm.chars().filter(|c| !c.is_whitespace()).collect();
+        if distinct.len() < 7 {
+            continue;
+        }
+        let count = clause_counts.entry(norm).or_insert(0);
+        *count += 1;
+        if *count >= 4 {
+            return true;
+        }
+    }
+    if clause_counts.values().filter(|&&c| c >= 3).count() >= 2 {
+        return true;
+    }
+
+    let lowered = tail.to_lowercase();
+    let words: Vec<&str> = lowered
+        .split(|c: char| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    '*' | '_' | '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ':' | '.' | '!' | '?' | '→' | '-'
+                )
+        })
+        .filter(|w| !w.is_empty())
+        .collect();
+    if words.len() >= 40 {
+        let mut shingle_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for w in words.windows(5) {
+            let shingle = w.join(" ");
+            if shingle.chars().count() < 18 {
+                continue;
+            }
+            let distinct: std::collections::HashSet<char> =
+                shingle.chars().filter(|c| !c.is_whitespace()).collect();
+            if distinct.len() < 8 {
+                continue;
+            }
+            let count = shingle_counts.entry(shingle).or_insert(0);
+            *count += 1;
+            if *count >= 5 {
                 return true;
             }
         }
@@ -2075,6 +2234,11 @@ pub async fn run_agent_turn<R: Runtime>(
     // 생각만 하고 보이는 답 없이 끝난 라운드를 한 턴에 한 번만 다시 시킨다(작은 모델에서 잦음).
     let mut empty_nudged = false;
     let mut loop_guard = ToolLoopGuard::default();
+    const MAX_THINKING_LOOP_RETRIES: usize = 2;
+    let mut thinking_loop_retries_used = 0usize;
+    let mut round_thinking_retried = false;
+    let mut force_reasoning_off = false;
+    let mut clear_notice_on_chunk = false;
 
     loop {
         if cancel_flag.load(Ordering::Relaxed) {
@@ -2096,8 +2260,13 @@ pub async fn run_agent_turn<R: Runtime>(
             body["max_tokens"] = json!(n);
         }
         let pref = req.settings.model_prefs.get(req.model_key).and_then(|p| p.reasoning.as_deref());
-        for (k, v) in crate::lmstudio::reasoning_fields(req.reasoning_options, pref) {
+        let retry_without_reasoning = std::mem::take(&mut force_reasoning_off);
+        let effective_pref = if retry_without_reasoning { Some("off") } else { pref };
+        for (k, v) in crate::lmstudio::reasoning_fields(req.reasoning_options, effective_pref) {
             body[k] = v;
+        }
+        if let Some(penalty) = thinking_presence_penalty(req.reasoning_options, effective_pref, req.mode) {
+            body["presence_penalty"] = json!(penalty);
         }
         if let Some(tools) = &tools {
             body["tools"] = tools.clone();
@@ -2161,12 +2330,14 @@ pub async fn run_agent_turn<R: Runtime>(
 
         let mut streamer = RoundStreamer {
             acc: RoundAccumulator::default(),
-            needs_separator: !continuing && msg.round_contents.iter().any(|c| !c.is_empty()),
+            needs_separator: msg.round_contents.iter().any(|c| !c.is_empty())
+                && (!continuing || msg.round_contents.last().is_some_and(|c| c.is_empty())),
             provider_label: settings.provider.label(),
         };
         let mut stream = response.bytes_stream();
         let mut decoder = SseDecoder::default();
         let mut finished = false;
+        let mut thinking_loop_detected = false;
         let mut stream_err: Option<String> = None;
 
         let mut last_chunk = Instant::now();
@@ -2212,8 +2383,9 @@ pub async fn run_agent_turn<R: Runtime>(
                 Raced::Done(Some(Ok(bytes))) => {
                     trace.max_gap_ms = trace.max_gap_ms.max(last_chunk.elapsed().as_millis() as u64);
                     last_chunk = Instant::now();
-                    if quiet_notice {
+                    if quiet_notice || clear_notice_on_chunk {
                         quiet_notice = false;
+                        clear_notice_on_chunk = false;
                         sink.notice(String::new());
                     }
                     for line in decoder.push(&bytes) {
@@ -2243,8 +2415,8 @@ pub async fn run_agent_turn<R: Runtime>(
                     if !finished && stream_err.is_none() {
                         if streamer.acc.reasoning.len() >= last_rep_check_r + 256 {
                             last_rep_check_r = streamer.acc.reasoning.len();
-                            if detect_repetition_loop(&streamer.acc.reasoning) {
-                                repetition_stopped = true;
+                            if detect_thinking_loop(&streamer.acc.reasoning) {
+                                thinking_loop_detected = true;
                                 finished = true;
                             }
                         }
@@ -2296,10 +2468,6 @@ pub async fn run_agent_turn<R: Runtime>(
         trace_push(trace);
 
         if cancelled {
-            append_round_to_msg(&mut msg, &acc.content, &acc.reasoning, continuing);
-            break;
-        }
-        if repetition_stopped {
             append_round_to_msg(&mut msg, &acc.content, &acc.reasoning, continuing);
             break;
         }
@@ -2356,13 +2524,48 @@ pub async fn run_agent_turn<R: Runtime>(
         // 라운드가 정상 완료되었으므로 연속 복구 상태를 초기화한다.
         recoveries_used = 0;
         first_failure = None;
-        append_round_to_msg(&mut msg, &acc.content, &acc.reasoning, continuing);
-        continuing = false;
 
-        if detect_repetition_loop(&acc.reasoning) || detect_repetition_loop(&acc.content) {
+        if !thinking_loop_detected && !repetition_stopped {
+            if detect_thinking_loop(&acc.reasoning) {
+                thinking_loop_detected = true;
+            } else if detect_repetition_loop(&acc.content) {
+                repetition_stopped = true;
+            }
+        }
+        if thinking_loop_detected {
+            let no_output_yet =
+                acc.content.trim().is_empty() && acc.tools.iter().all(|t| t.name.is_empty());
+            let can_retry_without_reasoning = no_output_yet
+                && !round_thinking_retried
+                && thinking_loop_retries_used < MAX_THINKING_LOOP_RETRIES
+                && req.reasoning_options.iter().any(|o| o == "off");
+            if can_retry_without_reasoning {
+                round_thinking_retried = true;
+                thinking_loop_retries_used += 1;
+                force_reasoning_off = true;
+                let marker = "\n\n[생각 반복이 감지되어 추론을 끄고 바로 진행합니다]\n\n";
+                sink.reasoning(marker);
+                sink.notice("생각 과정이 반복되어 추론을 끄고 바로 진행합니다...".to_string());
+                clear_notice_on_chunk = true;
+                let saved_reasoning = format!("{}{}", acc.reasoning, marker);
+                append_round_to_msg(&mut msg, "", &saved_reasoning, continuing);
+                continuing = true;
+                continue;
+            }
             repetition_stopped = true;
+        }
+        if repetition_stopped {
+            append_round_to_msg(&mut msg, &acc.content, &acc.reasoning, continuing);
             break;
         }
+
+        round_thinking_retried = false;
+        if clear_notice_on_chunk {
+            clear_notice_on_chunk = false;
+            sink.notice(String::new());
+        }
+        append_round_to_msg(&mut msg, &acc.content, &acc.reasoning, continuing);
+        continuing = false;
 
         let finished_with_length = acc.finish_reason.as_deref() == Some("length");
         let calls: Vec<PendingToolCall> =
@@ -5370,5 +5573,213 @@ content-length: {}
         assert_eq!(b[0]["stream"], false);
         assert!(b[0].get("reasoning_effort").is_none());
         assert!(b[0]["messages"][0]["content"].as_str().unwrap().contains("UI 변경점"));
+    }
+
+    #[test]
+    fn thinking_presence_penalty_scales_by_mode_and_reasoning_pref() {
+        let opts = vec!["off".to_string(), "on".to_string()];
+        assert_eq!(thinking_presence_penalty(&[], None, "chat"), None);
+        assert_eq!(thinking_presence_penalty(&[], Some("on"), "code"), None);
+        assert_eq!(thinking_presence_penalty(&opts, Some("off"), "chat"), None);
+        assert_eq!(thinking_presence_penalty(&opts, Some("off"), "code"), None);
+        assert_eq!(thinking_presence_penalty(&opts, None, "code"), Some(0.8));
+        assert_eq!(thinking_presence_penalty(&opts, Some("on"), "code"), Some(0.8));
+        assert_eq!(thinking_presence_penalty(&opts, None, "chat"), Some(1.2));
+        assert_eq!(thinking_presence_penalty(&opts, Some("on"), "project"), Some(1.2));
+        assert_eq!(thinking_presence_penalty(&opts, None, ""), Some(1.2));
+    }
+
+    #[tokio::test]
+    async fn request_body_includes_presence_penalty_only_when_thinking_on() {
+        let ok = vec![sse(json!({"choices":[{"delta":{"content":"네"}}]})), sse_done()];
+        let (url, bodies) = mock_server(vec![ok.clone(), ok.clone(), ok], 0).await;
+        let app = tauri::test::mock_app();
+        let mut settings = test_settings(url);
+        let history = vec![msg("user", "안녕")];
+        let opts = vec!["off".to_string(), "on".to_string()];
+
+        // 1. 코딩 모드 + 추론 ON -> 0.8
+        run_agent_turn(
+            app.handle(),
+            TurnRequest {
+                settings: &settings, model_key: "qwen3.6-35b-a3b", model_display_name: "", reasoning_options: &opts,
+                context_length: 32768, project: None, conversation_id: "c-pp1", history: &history,
+                compaction: None, continue_from: None, mode: "code", checkpoint: None, knowledge: "", auto_skill: None,
+            },
+            Arc::new(AtomicBool::new(false)),
+        ).await.unwrap();
+
+        // 2. 프로젝트 모드 + 추론 ON -> 1.2
+        run_agent_turn(
+            app.handle(),
+            TurnRequest {
+                settings: &settings, model_key: "qwen3.6-35b-a3b", model_display_name: "", reasoning_options: &opts,
+                context_length: 32768, project: None, conversation_id: "c-pp2", history: &history,
+                compaction: None, continue_from: None, mode: "project", checkpoint: None, knowledge: "", auto_skill: None,
+            },
+            Arc::new(AtomicBool::new(false)),
+        ).await.unwrap();
+
+        // 3. 코딩 모드 + 추론 OFF -> presence_penalty 없음
+        settings.model_prefs.insert(
+            "qwen3.6-35b-a3b".into(),
+            crate::store::ModelPref { context_length: None, reasoning: Some("off".into()) },
+        );
+        run_agent_turn(
+            app.handle(),
+            TurnRequest {
+                settings: &settings, model_key: "qwen3.6-35b-a3b", model_display_name: "", reasoning_options: &opts,
+                context_length: 32768, project: None, conversation_id: "c-pp3", history: &history,
+                compaction: None, continue_from: None, mode: "code", checkpoint: None, knowledge: "", auto_skill: None,
+            },
+            Arc::new(AtomicBool::new(false)),
+        ).await.unwrap();
+
+        let b = bodies.lock().unwrap();
+        assert_eq!(b[0]["presence_penalty"], 0.8);
+        assert!(b[0].get("reasoning_effort").is_none());
+        assert_eq!(b[1]["presence_penalty"], 1.2);
+        assert!(b[1].get("reasoning_effort").is_none());
+        assert_eq!(b[2]["reasoning_effort"], "none");
+        assert!(b[2].get("presence_penalty").is_none());
+    }
+
+    fn paraphrased_thinking_loop_sample() -> String {
+        [
+            "먼저 index.php와 js/home.js, js/auth.js 구조를 순서대로 살펴보겠습니다. 초기 HTML에는 Vue 마운트 대상이 있고 정적 리소스를 읽어 들입니다.",
+            "아, 잠깐... index.php에 PHP 코드가 전혀 없고 순수 HTML 정적 파일입니다.",
+            "근데 php -S 실행 시 PHP 코드가 없으니 index.php가 그대로 내려옵니다.",
+            "실은 index.php가 이미 순수 HTML이라 별도 템플릿 치환도 없는 상태입니다.",
+            "1. 근데 index.php에 PHP 코드가 전혀 없고 순수 HTML 정적 파일입니다.",
+            "하지만 php -S 실행 시 PHP 코드가 없으니 index.php가 그대로 내려옵니다.",
+            "아니, index.php에 PHP 코드가 전혀 없고 순수 HTML 정적 파일입니다.",
+            "그러니까 지금 당장 app.js와 home.js의 초기화 순서를 다시 짚어야 합니다.",
+            "아 잠깐, php -S 실행 시 PHP 코드가 없으니 index.php가 그대로 내려옵니다.",
+            "실은 **index.php에 PHP 코드가 전혀 없고 순수 HTML 정적 파일입니다**.",
+            "근데 결국 php -S 실행 시 PHP 코드가 없으니 index.php가 그대로 내려옵니다.",
+            "아니면 *index.php가 이미 순수 HTML이라 별도 템플릿 치환도 없는 상태입니다*.",
+            "일단 index.php에 PHP 코드가 전혀 없고 순수 HTML 정적 파일입니다.",
+            "그럼 index.php가 이미 순수 HTML이라 별도 템플릿 치환도 없는 상태입니다.",
+            "또 php -S 실행 시 PHP 코드가 없으니 index.php가 그대로 내려옵니다.",
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn detect_thinking_loop_catches_paraphrased_korean_loops_without_false_positives() {
+        let short = "아, 잠깐... index.php에 PHP 코드가 전혀 없음.\n근데 index.php에 PHP 코드가 전혀 없음.";
+        assert!(short.chars().count() < 600);
+        assert!(!detect_thinking_loop(short));
+
+        let paraphrased = paraphrased_thinking_loop_sample();
+        assert!(paraphrased.chars().count() >= 600);
+        assert!(detect_thinking_loop(&paraphrased));
+
+        let shingle_loop = [
+            "초기 점검을 위해 저장소의 진입 파일과 설정 파일을 순서대로 확인합니다. 정적 HTML 페이지에 Vue 3 CDN이 먼저 선언되어 있고 각 컴포넌트 스크립트와 메인 app.js 파일이 순차적으로 연결되어 있는 구조입니다.",
+            "1단계로 index.php의 헤드 영역에서 스크립트 태그 순서와 전역 객체 초기화를 점검하고, 로그인 세션 검사 이후 홈 화면 컴포넌트를 마운트하는 지점까지 어떤 이벤트가 발생하는지 전반적으로 정리해 봅니다.",
+            "이어서 app.js가 window.AppComponents를 읽어 마운트하는 시점을 추적해 의존성 충돌 여부를 살피며, 네트워크 탭에서 API 응답 본문과 헤더 형식까지 문제가 없는지 차례대로 대조했습니다.",
+            "첫 번째 재점검: script defer 속성과 인라인 초기화 함수 호출 시점이 서로 맞물리지 않는 문제가 계속 남아 있습니다.",
+            "두 번째 재점검: 방금 확인해도 script defer 속성과 인라인 초기화 함수 호출 시점이 계속 엇갈려 정상 마운트가 안 됩니다.",
+            "세 번째 재점검: 파일 경로를 다시 봐도 script defer 속성과 인라인 초기화 함수 호출 시점이 어긋나 초기 로딩이 실패합니다.",
+            "네 번째 재점검: 결국 또 보면 script defer 속성과 인라인 초기화 함수 호출 시점이 여전히 충돌해 오류가 반복됩니다.",
+            "다섯 번째 재점검: 마지막으로 체크해도 script defer 속성과 인라인 초기화 함수 호출 시점이 계속 문제의 핵심으로 보입니다.",
+        ]
+        .join(" ");
+        assert!(shingle_loop.chars().count() >= 600);
+        assert!(detect_thinking_loop(&shingle_loop));
+
+        let healthy = [
+            "사용자가 요청한 PHP + Vue 정적 대시보드 화면이 빈 페이지로 나오는 원인을 단계별로 분석해 봅시다.",
+            "1. read_file로 index.php를 확인한 결과 head 태그 안에 vue.global.prod.js CDN과 js/home.js, js/board.js가 일반 script 태그로 순서대로 선언되어 있습니다.",
+            "2. js/home.js에서는 window.AppComponents.HomePage 객체를 정의하고 mounted 훅에서 /api/summary.php를 fetch 호출로 조회해 상태 목록을 갱신합니다.",
+            "3. 반면 js/auth.js에서는 window.AuthService를 export 구문 없이 즉시실행함수(IIFE)로 등록하고 있으나, 토큰 만료 시 redirectToLogin이 window.location.hash를 덮어씁니다.",
+            "4. 이제 js/app.js를 읽어 createApp 호출 시점에 window.AppComponents가 모두 등록되어 있는지, 라우터 가드가 초기 경로에서 무한 리다이렉트를 일으키는지 확인해야 합니다.",
+            "5. 또한 network 응답 헤더에서 api/summary.php가 JSON 대신 HTML 오류 페이지를 반환하는지도 함께 점검하려면 PHP 핸들러 파일까지 read_file로 보는 편이 정확합니다.",
+            "6. 다 읽은 뒤에는 가장 직접적인 버그가 있는 파일 하나만 골라 최소 범위로 수정하고 개발 서버 프리뷰와 로그를 확인하여 회귀 여부를 검증하겠습니다.",
+            "7. 요약하면 지금까지 index.php의 정적 자원 선언과 home.js의 초기 데이터 요청, auth.js의 리다이렉트 처리 흐름이 각각 별개 모듈로 분리되어 있음이 명확합니다.",
+            "8. 다음 도구 호출에서는 js/app.js와 api/summary.php를 차례로 열어 라우터 가드 조건과 JSON Content-Type 헤더 누락 여부를 실제로 확인하겠습니다.",
+        ]
+        .join("\n");
+        assert!(healthy.chars().count() >= 900);
+        assert!(!detect_thinking_loop(&healthy));
+    }
+
+    #[tokio::test]
+    async fn thinking_loop_retries_once_with_reasoning_off_and_succeeds() {
+        let looped = paraphrased_thinking_loop_sample();
+        let half = looped.char_indices().nth(looped.chars().count() / 2).map(|(i, _)| i).unwrap();
+        let r1 = vec![
+            sse(json!({"choices":[{"delta":{"reasoning_content": &looped[..half]}}]})),
+            sse(json!({"choices":[{"delta":{"reasoning_content": &looped[half..]}}]})),
+            sse(json!({"choices":[{"delta":{},"finish_reason":"length"}]})),
+            sse_done(),
+        ];
+        let r2 = vec![
+            sse(json!({"choices":[{"delta":{"content":"수정을 완료했습니다."}}]})),
+            sse(json!({"choices":[{"delta":{},"finish_reason":"stop"}]})),
+            sse_done(),
+        ];
+        let (url, bodies) = mock_server(vec![r1, r2], 0).await;
+        let app = tauri::test::mock_app();
+        let settings = test_settings(url);
+        let history = vec![msg("user", "버그 원인을 고쳐 줘")];
+        let opts = vec!["off".to_string(), "on".to_string()];
+
+        let (out, _) = run_agent_turn(
+            app.handle(),
+            TurnRequest {
+                settings: &settings, model_key: "qwen3.6-35b-a3b", model_display_name: "", reasoning_options: &opts,
+                context_length: 32768, project: None, conversation_id: "c-tloop-ok", history: &history,
+                compaction: None, continue_from: None, mode: "code", checkpoint: None, knowledge: "", auto_skill: None,
+            },
+            Arc::new(AtomicBool::new(false)),
+        ).await.unwrap();
+
+        let b = bodies.lock().unwrap();
+        assert_eq!(b.len(), 2);
+        assert_eq!(b[0]["presence_penalty"], 0.8);
+        assert!(b[0].get("reasoning_effort").is_none());
+        assert_eq!(b[1]["reasoning_effort"], "none");
+        assert!(b[1].get("presence_penalty").is_none());
+        assert_eq!(out.content, "수정을 완료했습니다.");
+        assert!(
+            out.reasoning_content
+                .as_deref()
+                .unwrap_or("")
+                .contains("[생각 반복이 감지되어 추론을 끄고 바로 진행합니다]")
+        );
+    }
+
+    #[tokio::test]
+    async fn thinking_loop_stops_after_single_retry_if_still_looping() {
+        let looped = paraphrased_thinking_loop_sample();
+        let half = looped.char_indices().nth(looped.chars().count() / 2).map(|(i, _)| i).unwrap();
+        let r = vec![
+            sse(json!({"choices":[{"delta":{"reasoning_content": &looped[..half]}}]})),
+            sse(json!({"choices":[{"delta":{"reasoning_content": &looped[half..]}}]})),
+            sse(json!({"choices":[{"delta":{},"finish_reason":"length"}]})),
+            sse_done(),
+        ];
+        let (url, bodies) = mock_server(vec![r.clone(), r.clone(), r], 0).await;
+        let app = tauri::test::mock_app();
+        let settings = test_settings(url);
+        let history = vec![msg("user", "버그 원인을 고쳐 줘")];
+        let opts = vec!["off".to_string(), "on".to_string()];
+
+        let (out, _) = run_agent_turn(
+            app.handle(),
+            TurnRequest {
+                settings: &settings, model_key: "qwen3.6-35b-a3b", model_display_name: "", reasoning_options: &opts,
+                context_length: 32768, project: None, conversation_id: "c-tloop-stop", history: &history,
+                compaction: None, continue_from: None, mode: "code", checkpoint: None, knowledge: "", auto_skill: None,
+            },
+            Arc::new(AtomicBool::new(false)),
+        ).await.unwrap();
+
+        let b = bodies.lock().unwrap();
+        assert_eq!(b.len(), 2, "같은 라운드에서는 추론 끄기 재시도를 최대 1회만 한다");
+        assert_eq!(b[1]["reasoning_effort"], "none");
+        assert!(out.content.contains("모델이 같은 내용을 반복해 무한 루프를 막기 위해 생성을 멈췄습니다"));
     }
 }
