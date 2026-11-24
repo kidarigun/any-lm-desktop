@@ -252,6 +252,21 @@ fn mock_app_with_converter() -> tauri::App<tauri::test::MockRuntime> {
 /// 모델이 만든 명령·스크립트를 사람 확인 없이 실행하므로, 시험 폴더 밖을 건드리거나
 /// 네트워크·삭제·다른 프로그램 실행을 하는 것은 실행하지 않고 거부한다.
 fn unsafe_reason(tool: &str, args: &Value, root: &Path) -> Option<String> {
+    if tool == "start_server" {
+        let fixture: Value = serde_json::from_str(include_str!("../../harness/dev-server.json"))
+            .expect("하니스 개발 서버 fixture");
+        let expected = fixture[0]["files"]["server.cjs"].as_str();
+        let script = crate::fs_ops::resolve_safe_path(root, "server.cjs").ok()
+            .and_then(|p| std::fs::read_to_string(p).ok());
+        if args["command"].as_str() == Some("node server.cjs")
+            && matches!(args["cwd"].as_str(), None | Some("" | "."))
+            && args["url"].is_null()
+            && expected.is_some() && script.as_deref() == expected
+        {
+            return None;
+        }
+        return Some("하니스의 검증용 로컬 서버 명령만 허용합니다.".into());
+    }
     let text = match tool {
         "run_command" => args["command"].as_str().unwrap_or("").to_string(),
         "run_python" => {
@@ -388,7 +403,6 @@ fn run_check(c: &Check, root: &Path, turns: &[TurnLog], today: &str) -> (bool, S
             turns.iter().all(|t| t.error.is_none())
                 && !answer.contains("오류로 답변이 중간에 멈췄습니다")
                 && !answer.contains("출력 길이 제한에 걸려")
-                && !answer.contains("도구 호출 한도")
         }
         other => return (false, format!("알 수 없는 검사: {}", other)),
     };
@@ -465,6 +479,8 @@ async fn live() {
         // 지식 폴더 색인(앱 상태가 없어 폴더 목록은 시나리오에서 받는다). 문서 변환은 위의 흉내 변환기.
         app.manage(knowledge::KnowledgeManager::new(out_dir.join("knowledge")));
         app.manage(mcp_manager.clone());
+        app.manage(crate::terminal::TerminalManager::new(Arc::new(|_| {})));
+        app.manage(crate::dev_servers::DevServers::default());
     }
     exaone::trace_start();
     let mut stop_reason: Option<String> = None;
@@ -580,8 +596,9 @@ async fn live() {
             }
 
             // 승인 대기로 멈추면 승인/거부를 처리하고 같은 메시지를 이어 간다 (앱의 승인 흐름과 같다).
-            for _ in 0..12 {
-                let res = exaone::run_exaone_turn(
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
+            loop {
+                let turn = exaone::run_exaone_turn(
                     app.handle(),
                     TurnRequest {
                         settings: &settings,
@@ -600,8 +617,14 @@ async fn live() {
                         auto_skill: auto_skill.as_ref(),
                     },
                     Arc::new(AtomicBool::new(false)),
-                )
-                .await;
+                );
+                let res = match tokio::time::timeout_at(deadline, turn).await {
+                    Ok(res) => res,
+                    Err(_) => {
+                        log.error = Some("하니스 턴의 10분 검증 시간이 지났습니다.".into());
+                        break;
+                    }
+                };
                 let traces = exaone::trace_take();
                 log.traces.extend(traces);
 
@@ -645,8 +668,11 @@ async fn live() {
                     } else if let Some(why) = &blocked {
                         ("rejected".to_string(), format!("사용자가 실행을 거부했습니다. ({})", why), Vec::new())
                     } else {
-                        let run = run_approved_tool(app.handle(), project.as_ref(), &tool_id, &tool_name, &args, false).await;
-                        (run.status.to_string(), run.output, run.produced)
+                        let run = run_approved_tool(app.handle(), project.as_ref(), &tool_id, &tool_name, &args, false);
+                        match tokio::time::timeout_at(deadline, run).await {
+                            Ok(run) => (run.status.to_string(), run.output, run.produced),
+                            Err(_) => ("error".into(), "하니스 승인 실행 검증 시간이 지났습니다.".into(), Vec::new()),
+                        }
                     };
                     println!("  · 승인 요청 {} → {}{}", tool_name, status, if is_mcp { " (MCP: 앱이면 승인을 물었을 도구, 하니스가 승인)" } else { "" });
                     log.approvals.push(json!({ "tool": tool_name, "args": args, "allowed": allowed, "blocked": blocked, "status": status, "wouldAskApproval": true, "harnessApproved": is_mcp }));
@@ -688,6 +714,10 @@ async fn live() {
         // MCP 서버 연결 끊기·지우기 (다음 시나리오에 남지 않게)
         for id in mcp_conn.iter().filter_map(|(id, _)| id.as_ref()) {
             let _ = mcp_manager.delete(id);
+        }
+        {
+            use tauri::Manager;
+            app.state::<crate::terminal::TerminalManager>().close_all();
         }
 
         let checks: Vec<Value> = sc

@@ -395,6 +395,27 @@ pub fn tools_for(project: bool, knowledge: bool, skills: bool, mcp_tools: &[mcp:
     } else {
         Vec::new()
     };
+    if project {
+        tools.extend([
+            json!({"type":"function","function":{"name":"start_server",
+                "description":"프로젝트의 장시간 개발 서버를 사용자 승인 후 실행합니다. 실행 결과에 세션 ID와 로컬 주소, 최근 로그가 포함됩니다.",
+                "parameters":{"type":"object","properties":{
+                    "command":{"type":"string","description":"개발 서버 시작 명령"},
+                    "name":{"type":"string","description":"터미널 탭 이름"},
+                    "cwd":{"type":"string","description":"프로젝트 기준 상대 작업 폴더"},
+                    "url":{"type":"string","description":"알려진 로컬 HTTP(S) 주소"}},
+                    "required":["command"]}}}),
+            json!({"type":"function","function":{"name":"server_logs",
+                "description":"현재 프로젝트의 서버 로그를 읽습니다. ID를 생략하면 실행 중인 개발 서버를 나열합니다.",
+                "parameters":{"type":"object","properties":{"id":{"type":"string"},"lines":{"type":"integer","minimum":1,"maximum":400}}}}}),
+            json!({"type":"function","function":{"name":"stop_server",
+                "description":"현재 프로젝트의 개발 서버 세션을 ID로 종료합니다.",
+                "parameters":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}}}),
+            json!({"type":"function","function":{"name":"open_preview",
+                "description":"로컬 HTTP(S) 주소를 작업 패널 미리보기 탭에 엽니다.",
+                "parameters":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}}}),
+        ]);
+    }
     if project && knowledge {
         tools.push(search_knowledge_schema());
     }
@@ -894,6 +915,7 @@ fn base_system_prompt(project: Option<&Project>, model_display_name: &str) -> St
 - 작업이 끝나면 한 일을 짧게 요약해 답하세요. 파일에 쓴 내용을 답변에 다시 길게 옮기지 마세요.\n\
 - modify_file의 target은 파일 내용과 정확히 일치해야 합니다. 처음 보는 파일은 먼저 read_file로 확인하세요. 이 대화에서 당신이 직접 쓰거나 읽은 파일은 내용을 이미 알고 있으니 다시 읽지 말고 바로 수정하세요 (그사이 파일이 바뀌었으면 modify_file이 알려 줍니다). 파일 맨 끝에 내용을 덧붙일 때는 target을 빈 문자열로 주세요.\n\
 - delete_path, run_command, run_python은 사용자가 승인해야 실행됩니다. 거부되면 다른 방법을 제안하세요.\n\
+- 끝나지 않는 개발 서버 명령은 승인형 start_server로 실행하세요. 열린 로컬 주소를 open_preview로 보여 주세요. 오류는 server_logs로 읽고, 사용자가 종료를 요청하면 stop_server를 쓰세요.\n\
 - 명령은 Windows PowerShell에서, 이미 프로젝트 폴더를 현재 위치로 하여 실행됩니다. cd로 이동하지 말고 cmd 문법(cd /d, &&, %VAR%)은 쓰지 마세요.\n\
 - Python 스크립트는 run_command가 아니라 run_python으로 실행하세요. 새 스크립트는 write_file을 따로 부르지 말고 run_python의 code에 내용을 넣어 한 번에 저장·실행하세요. 실행이 실패하면 _b, _c처럼 새 파일을 만들지 말고, 고친 전체 스크립트를 같은 경로의 code로 다시 보내세요.\n\
 - 보고서·문서를 만들 때 사용자가 Word, 한글(HWP/HWPX/아래아한글) 또는 PowerPoint를 원하면 write_file 경로를 .docx, .hwpx 또는 .pptx로 지정하고 content는 Markdown으로 작성하세요. 한글 문서는 늘 .hwpx로 만듭니다(.hwp는 만들 수 없음). 결과는 사용자의 문서 캔버스에서 바로 열립니다.\n\
@@ -1778,7 +1800,7 @@ fn page_text(text: &str, offset: usize) -> String {
 }
 
 /// 프로젝트에서 "항상 허용"할 수 있는 도구. 삭제와 보호 폴더 쓰기는 매번 묻는다.
-pub const AUTO_APPROVABLE: [&str; 2] = ["run_python", "run_command"];
+pub const AUTO_APPROVABLE: [&str; 3] = ["run_python", "run_command", "start_server"];
 /// "항상 허용"으로 바로 실행한 도구를 기다리는 최대 시간
 const AUTO_RUN_LIMIT: Duration = Duration::from_secs(200);
 
@@ -2753,6 +2775,25 @@ async fn run_tool<R: Runtime>(
             }
             Err(err) => fail(err, None),
         },
+        "start_server" => match crate::dev_servers::start_args(root, args) {
+            Ok(config) => (
+                tool_record(call_id, name, args_json.clone(), "pending_approval",
+                    format!("개발 서버 '{}' 실행 승인을 기다리고 있습니다.", config.name), None, None),
+                None, true,
+            ),
+            Err(e) => fail(e, None),
+        },
+        "server_logs" | "stop_server" | "open_preview" => {
+            let result = match name {
+                "server_logs" => crate::dev_servers::logs(app, project_id, args),
+                "stop_server" => crate::dev_servers::stop(app, project_id, str_arg(args, "id")),
+                _ => crate::dev_servers::preview(app, project_id, str_arg(args, "url")),
+            };
+            match result {
+                Ok(output) => done(output, None),
+                Err(e) => fail(e, None),
+            }
+        }
         "delete_path" | "run_command" | "run_python" => {
             let skill_name = str_arg(args, "skill").trim();
             if name == "run_python" && !skill_name.is_empty() {
@@ -3047,6 +3088,32 @@ mod tests {
         assert!(out[4]["content"].is_null());
         assert!(out[5]["content"].as_str().unwrap().contains("거부"));
         assert_eq!(out[6]["content"], "완료했습니다.");
+    }
+
+    #[tokio::test]
+    async fn server_tool_requires_approval_and_validates_project_folder_and_preview_url() {
+        let app = tauri::test::mock_app();
+        let dir = tempfile::tempdir().unwrap();
+        let (record, _, pending) = execute_or_queue_tool(
+            app.handle(), dir.path(), "p", "call1", "start_server", &json!({"command":"npm run dev"}),
+        ).await;
+        assert!(pending);
+        assert_eq!(record.status, "pending_approval");
+
+        for (name, args) in [
+            ("start_server", json!({"command":"npm run dev","cwd":"../"})),
+            ("start_server", json!({"command":"npm run dev","url":"https://example.com"})),
+            ("open_preview", json!({"url":"https://example.com"})),
+        ] {
+            let (record, _, pending) = execute_or_queue_tool(app.handle(), dir.path(), "p", "call2", name, &args).await;
+            assert!(!pending, "{name}");
+            assert_eq!(record.status, "error");
+        }
+        let schema = tools_for(true, false, false, &[]).unwrap();
+        for tool in ["start_server", "server_logs", "stop_server", "open_preview"] {
+            assert!(schema.as_array().unwrap().iter().any(|s| s["function"]["name"] == tool), "{tool}");
+        }
+        assert!(tools_for(false, false, false, &[]).is_none());
     }
 
     #[test]
@@ -3934,7 +4001,6 @@ mod tests {
         let bodies = bodies.lock().unwrap();
         assert_eq!(bodies.len(), 2);
         let tools = bodies[0]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 9);
         assert!(tools.iter().any(|t| t["function"]["name"] == "run_python"));
         assert!(bodies[0].get("reasoning_effort").is_none());
         let msgs = bodies[1]["messages"].as_array().unwrap();

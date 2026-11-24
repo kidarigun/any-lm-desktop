@@ -63,10 +63,15 @@ mod tests {
             }
         }).await;
         assert!(list(app.handle(), "other").unwrap().is_empty());
-        app.state::<TerminalManager>().close(&first.terminal.id).unwrap();
+        let args = serde_json::json!({"id":first.terminal.id,"lines":2});
+        assert!(logs(app.handle(), "other", &args).is_err());
+        assert!(stop(app.handle(), "other", &first.terminal.id).is_err());
+        let logged = logs(app.handle(), "p", &args).unwrap();
+        stop(app.handle(), "p", &first.terminal.id).unwrap();
         let ready = result.expect("테스트 서버 시작 시간 초과");
         assert_eq!(ready.status, "ready");
         assert_eq!(ready.url.as_deref(), Some(expected.as_str()));
+        assert!(logged.contains(&expected));
         assert!(!is_listening(&local_url(&expected).unwrap()).await);
     }
 }
@@ -87,6 +92,7 @@ use crate::terminal::{self, OpenRequest, TerminalInfo, TerminalKind, TerminalMan
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 pub(crate) const SERVER_EVENT: &str = "anylm-dev-server";
+const PREVIEW_EVENT: &str = "anylm-open-preview";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -242,6 +248,27 @@ fn validate(root: &Path, config: &DevServerConfig) -> Result<(PathBuf, Option<St
     Ok((folder, url))
 }
 
+pub(crate) fn start_args(root: &Path, args: &serde_json::Value) -> Result<DevServerConfig, String> {
+    #[derive(Deserialize)]
+    struct Args {
+        command: String,
+        name: Option<String>,
+        cwd: Option<String>,
+        url: Option<String>,
+    }
+    let parsed: Args = serde_json::from_value(args.clone())
+        .map_err(|e| format!("서버 실행 인자가 올바르지 않습니다: {e}"))?;
+    let config = DevServerConfig {
+        id: String::new(),
+        name: parsed.name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "개발 서버".into()),
+        command: parsed.command,
+        cwd: parsed.cwd.unwrap_or_default(),
+        url: parsed.url,
+    };
+    validate(root, &config)?;
+    Ok(config)
+}
+
 fn opened<R: Runtime>(
     app: &AppHandle<R>,
     project: &Project,
@@ -269,7 +296,13 @@ fn opened<R: Runtime>(
     };
     let command_shell = terminal::effective_shell(shell, std::env::var_os("PATH").as_deref());
     let env: Vec<_> = runtime::child_env().into_iter().collect();
-    let terminal = terminals.open(&request, &cwd, command_shell, &runtime::path_dirs(), &env)?;
+    let mut dirs = runtime::path_dirs();
+    if runtime::python_installed() {
+        if let Some(bin) = runtime::pyenv_python().parent() {
+            dirs.push(bin.to_path_buf());
+        }
+    }
+    let terminal = terminals.open(&request, &cwd, command_shell, &dirs, &env)?;
     let info = ServerInfo { project_id: project.id.clone(), terminal, config: config.clone(), url, status: "starting" };
     sessions.insert(info.terminal.id.clone(), Session { info: info.clone(), started: Instant::now() });
     Ok((info, true))
@@ -364,6 +397,81 @@ pub(crate) fn list<R: Runtime>(app: &AppHandle<R>, project_id: &str) -> Result<V
     }).collect::<Vec<_>>();
     out.sort_by(|a, b| a.terminal.id.cmp(&b.terminal.id));
     Ok(out)
+}
+
+fn find_server<R: Runtime>(app: &AppHandle<R>, project_id: &str, id: &str) -> Result<ServerInfo, String> {
+    list(app, project_id)?.into_iter().find(|s| s.terminal.id == id)
+        .ok_or_else(|| "이 프로젝트에서 해당 개발 서버 세션을 찾을 수 없습니다.".into())
+}
+
+fn server_output<R: Runtime>(app: &AppHandle<R>, server: &ServerInfo, lines: usize) -> serde_json::Value {
+    let text = app.try_state::<TerminalManager>()
+        .and_then(|terminals| terminals.text(&server.terminal.id).ok()).unwrap_or_default();
+    let mut lines: Vec<_> = text.lines().rev().take(lines).collect();
+    lines.reverse();
+    serde_json::json!({
+        "id": server.terminal.id, "name": server.terminal.title, "status": server.status,
+        "url": server.url, "exitCode": server.terminal.exit_code, "logs": lines.join("\n")
+    })
+}
+
+pub(crate) async fn start_for_model<R: Runtime>(
+    app: &AppHandle<R>, project: &Project, args: &serde_json::Value,
+) -> Result<String, String> {
+    let config = start_args(Path::new(&project.root_path), args)?;
+    let shell = app.try_state::<AppState>().and_then(|state|
+        state.db.lock().ok().map(|db| db.settings.terminal_shell.clone())
+    ).unwrap_or_else(|| "powershell".into());
+    let mut info = start(app, project, &shell, &config)?;
+    let deadline = Instant::now() + START_TIMEOUT;
+    while info.status == "starting" {
+        if Instant::now() >= deadline {
+            info.status = "unconfirmed";
+            break;
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+        info = find_server(app, &project.id, &info.terminal.id)?;
+    }
+    let output = server_output(app, &info, 40).to_string();
+    if info.status == "exited" {
+        return Err(output);
+    }
+    Ok(output)
+}
+
+pub(crate) fn logs<R: Runtime>(
+    app: &AppHandle<R>, project_id: &str, args: &serde_json::Value,
+) -> Result<String, String> {
+    #[derive(Deserialize)]
+    struct Args { id: Option<String>, lines: Option<u32> }
+    let args: Args = serde_json::from_value(args.clone())
+        .map_err(|e| format!("서버 로그 인자가 올바르지 않습니다: {e}"))?;
+    if let Some(id) = args.id {
+        let info = find_server(app, project_id, &id)?;
+        return Ok(server_output(app, &info, args.lines.unwrap_or(80).clamp(1, 400) as usize).to_string());
+    }
+    let servers = list(app, project_id)?;
+    let output: Vec<_> = servers.iter().filter(|s| s.terminal.running)
+        .map(|s| server_output(app, s, 10)).collect();
+    Ok(serde_json::json!(output).to_string())
+}
+
+pub(crate) fn stop<R: Runtime>(app: &AppHandle<R>, project_id: &str, id: &str) -> Result<String, String> {
+    let mut server = find_server(app, project_id, id)?;
+    let terminals = app.try_state::<TerminalManager>().ok_or("터미널을 사용할 수 없습니다.")?;
+    terminals.close(id)?;
+    server.status = "exited";
+    server.terminal.running = false;
+    let _ = app.emit(terminal::EXIT_EVENT, serde_json::json!({"id": id, "code": null}));
+    let _ = app.emit(SERVER_EVENT, &server);
+    Ok(format!("개발 서버 '{}'을(를) 종료했습니다.", server.terminal.title))
+}
+
+pub(crate) fn preview<R: Runtime>(app: &AppHandle<R>, project_id: &str, raw: &str) -> Result<String, String> {
+    let url = local_url(raw)?;
+    app.emit(PREVIEW_EVENT, serde_json::json!({"projectId": project_id, "url": url.as_str()}))
+        .map_err(|e| e.to_string())?;
+    Ok(format!("미리보기 탭을 열었습니다: {url}"))
 }
 
 #[tauri::command]

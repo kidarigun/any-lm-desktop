@@ -323,6 +323,7 @@ function conversationToMarkdown(conv: Conversation): string {
 const AUTO_APPROVE_TOOLS = [
   { tool: "run_python", label: "Python 스크립트 실행" },
   { tool: "run_command", label: "PowerShell 명령 실행" },
+  { tool: "start_server", label: "개발 서버 실행" },
 ];
 
 export default function App() {

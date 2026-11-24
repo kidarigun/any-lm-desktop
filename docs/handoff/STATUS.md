@@ -39,7 +39,7 @@
 - 오른쪽 작업 패널 + PTY 터미널(설계 `docs/superpowers/specs/2026-11-24-dev-server-preview-console.md` T1, 결정 0008): 완료. `terminal.rs`(portable-pty/ConPTY, 기본 `powershell.exe -NoLogo`, 설정 `terminalShell`로 pwsh(PATH에 있을 때만)/cmd, PATH 앞에 앱 Node.js·uv, 링 버퍼 256KB, 16ms 모아 보내기·UTF-8 경계 처리, 시작 DSR 백엔드 응답, 한도 8개, 닫기·앱 종료 때 taskkill /T + Job Object로 트리 전체 종료), 명령 `terminal_open/write/resize/close/list/snapshot/busy/shells`, 이벤트 `anylm-terminal-output {id,data,seq}`·`anylm-terminal-exit {id,code}`. 스냅샷은 문자열이 아니라 `{data, seq, running, exitCode}`(이벤트와 겹치지 않게, 결정 0008). 화면 `src/workpanel/`(xterm 6 + fit + web-links, 상단 터미널 버튼·Ctrl+`, 폭 320px~70% 기억, 탭·[+ 새 터미널]·×·종료됨 (코드 n)·[다시 시작], 캔버스 오른쪽·채팅창 400px+캔버스 360px+패널 320px이 안 들어가면 나중에 연 것만, 지연 로딩 실패 시 [다시 시도]). 실제 앱 창(`tauri dev`)에서는 아직 눈으로 보지 못했다 — 브라우저(웹뷰만)에 가짜 명령을 넣어 탭·색상·한글·입력·Ctrl+` 닫기/열기·복원·어두운 테마만 확인. 아래 수동 확인 목록 "작업 패널 · 터미널".
 
 ## 다음 할 일
-0. **모델 도구(T3)**: T2 프로젝트 서버와 로컬 미리보기는 구현·자동 검증 완료. `src-tauri/src/dev_servers.rs`의 `start`·`list`·`local_url`을 재사용해 `start_server`/`server_logs`/`stop_server`/`open_preview`를 연결하고 실제 LM Studio 하니스로 확인한다.
+0. **원본 잔재 정리**: 기본 카탈로그, 저장 파일, LM Studio 자격 증명, 런타임과 문서 내보내기 식별자를 점검한다. 기존 사용자의 Any LM 데이터와 자격 증명은 호환 경로를 둔다.
 1. **화면 수동 확인**: 아래 "수동 확인 목록"을 사용자와 함께 앱 화면에서 확인한다(`npm run tauri dev`). 문제가 나오면 고치고 목록에서 지운다.
 2. **인계 연습(완료 기준 9, 작업 12 단계 2)**: 완료. Codex가 인계 문서와 Git 상태를 대조해 포트 표기를 정정하고 후속 작업을 이어받았다. 작업 12 단계 3은 최종 화면 검증 뒤 마감한다.
 3. **GitHub 비공개 저장소**: 완료(2026-11-23, 사용자 승인). `origin` = https://github.com/kidarigun/any-lm-desktop (비공개), `main`이 `origin/main`을 추적. `upstream`(원본 k-exaone-desktop) push 주소는 `DISABLED` 유지. 이후 push는 작업을 마칠 때 사용자가 허락한 경우에만 한다.
@@ -55,6 +55,8 @@
    - 그 밖에 검토의 "Can stay" 목록(서버 상태는 아무 HTTP 응답이면 켜짐으로 봄 등).
 
 ## 마지막 확인
+2026-11-24, 개발 서버 모델 도구(T3) 뒤: `npm test` 180 통과·1 건너뜀, `npx tsc --noEmit` 통과, `cargo test --lib` 275 통과·10 무시. 실제 qwen3.5-9b 8K에서 `harness/dev-server.json` 6/6(승인 → 시작 → 로그 → 미리보기 → 종료 → 최종 답변), 시험 뒤 9B를 32768로 재로드. 실제 앱 창에서 PowerShell 탭과 [서버 실행] 메뉴 표시 확인.
+
 2026-11-24, T2 개발 서버·미리보기 뒤: `npm test` 180 통과·1 건너뜀, `npx tsc --noEmit` 통과, `cargo test --lib` 274 통과·10 무시. Windows ConPTY 테스트에서 시작 로그의 주소 감지, 중복 방지, 프로젝트별 목록 격리, 종료 뒤 포트 해제를 확인했다.
 
 2026-11-24, 도구 라운드 상한 제거와 턴 내 오래된 도구 기록 압축 뒤: `npm test` 178 통과·1 건너뜀, `npx tsc --noEmit` 통과, `cargo test --lib` 271 통과·10 무시. 모의 SSE 테스트는 수정 전 50회에서 멈췄고 수정 뒤 55회와 최종 답변까지 확인했다. Rust는 개발 앱과 대상 폴더를 분리해 실행했다.

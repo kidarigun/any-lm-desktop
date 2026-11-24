@@ -1382,6 +1382,13 @@ pub(crate) async fn run_approved_tool<R: tauri::Runtime>(
                 },
             }
         }
+        "start_server" => match project {
+            Some(project) => match dev_servers::start_for_model(app, project, args).await {
+                Ok(result) => ("completed", result),
+                Err(err) => ("error", err),
+            },
+            None => ("error", "개발 서버는 프로젝트에서만 실행할 수 있습니다.".into()),
+        },
         "run_python" => {
             let rel = args.get("relative_path").and_then(|v| v.as_str()).unwrap_or("");
             let skill = args.get("skill").and_then(|v| v.as_str()).unwrap_or("").trim();
