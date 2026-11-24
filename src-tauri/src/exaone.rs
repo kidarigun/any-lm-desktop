@@ -508,13 +508,18 @@ pub struct RoundAccumulator {
 
 impl RoundAccumulator {
     pub fn apply_chunk(&mut self, val: &Value) -> Result<DeltaOut, String> {
+        self.apply_chunk_for(val, "LM Studio")
+    }
+
+    pub fn apply_chunk_for(&mut self, val: &Value, provider_label: &str) -> Result<DeltaOut, String> {
         if let Some(err) = val.get("error") {
             let msg = err
                 .get("message")
                 .and_then(|m| m.as_str())
+                .or_else(|| err.as_str())
                 .map(str::to_string)
                 .unwrap_or_else(|| err.to_string());
-            return Err(format!("LM Studio 스트림 오류: {}", msg));
+            return Err(format!("{provider_label} 스트림 오류: {}", msg));
         }
 
         let mut out = DeltaOut::default();
@@ -1115,9 +1120,10 @@ async fn send_with_retry<R: Runtime>(
     trace: &mut RoundTrace,
 ) -> Result<Option<reqwest::Response>, SendError> {
     let started = Instant::now();
-    let chat_url = lmstudio::server_urls(&settings.server_url)
-        .map_err(|message| SendError { message, recoverable: false })?
-        .chat;
+    let provider_label = settings.provider.label();
+    let provider_subject = crate::providers::provider_subject(settings.provider);
+    let chat_url = crate::providers::chat_url(settings)
+        .map_err(|message| SendError { message, recoverable: false })?;
     for attempt in 0..=RETRY_DELAYS_SEC.len() {
         trace.attempts = attempt as u32 + 1;
         let req = lmstudio::authorize(client.post(&chat_url), &settings.api_key)
@@ -1129,7 +1135,7 @@ async fn send_with_retry<R: Runtime>(
             Raced::TimedOut => {
                 return Err(SendError {
                     message: format!(
-                        "LM Studio가 {}초 동안 응답하지 않습니다. 잠시 후 다시 시도해 주세요.",
+                        "{provider_subject} {}초 동안 응답하지 않습니다. 잠시 후 다시 시도해 주세요.",
                         RESPONSE_HEADER_TIMEOUT.as_secs()
                     ),
                     recoverable: true,
@@ -1137,7 +1143,7 @@ async fn send_with_retry<R: Runtime>(
             }
             Raced::Done(Err(e)) => {
                 return Err(SendError {
-                    message: lmstudio::friendly_error(&e),
+                    message: crate::providers::friendly_error(settings.provider, &e),
                     recoverable: true,
                 })
             }
@@ -1159,7 +1165,7 @@ async fn send_with_retry<R: Runtime>(
         if is_retryable_status(code) && attempt < RETRY_DELAYS_SEC.len() {
             let wait = server_wait.unwrap_or(RETRY_DELAYS_SEC[attempt]);
             let notice = format!(
-                "LM Studio가 바쁘거나 일시 오류가 발생해 자동으로 다시 시도하는 중입니다... ({}/{}회, {}초 대기)",
+                "{provider_subject} 바쁘거나 일시 오류가 발생해 자동으로 다시 시도하는 중입니다... ({}/{}회, {}초 대기)",
                 attempt + 1,
                 RETRY_DELAYS_SEC.len(),
                 wait
@@ -1173,7 +1179,7 @@ async fn send_with_retry<R: Runtime>(
         if code == 401 || code == 403 {
             return Err(SendError {
                 message: format!(
-                    "LM Studio가 인증을 요구합니다. [LM Studio 연결]에서 API 토큰을 입력해 주세요. ({}) {}",
+                    "{provider_subject} 인증을 요구합니다. [{provider_label} 연결]에서 API 토큰을 입력해 주세요. ({}) {}",
                     status, err_text
                 ),
                 recoverable: false,
@@ -1182,19 +1188,19 @@ async fn send_with_retry<R: Runtime>(
         if is_retryable_status(code) {
             return Err(SendError {
                 message: format!(
-                    "LM Studio가 약 3분 이상 계속 바빠 중단했습니다 ({}). 지금까지 한 작업은 저장되어 있으니, 잠시 후 '계속'이라고 보내면 이어서 진행합니다.",
+                    "{provider_subject} 약 3분 이상 계속 바빠 중단했습니다 ({}). 지금까지 한 작업은 저장되어 있으니, 잠시 후 '계속'이라고 보내면 이어서 진행합니다.",
                     status
                 ),
                 recoverable: false,
             });
         }
         return Err(SendError {
-            message: format!("LM Studio 응답 오류 ({}): {}", status, err_text),
+            message: format!("{provider_label} 응답 오류 ({}): {}", status, err_text),
             recoverable: !(400..500).contains(&code),
         });
     }
     Err(SendError {
-        message: "LM Studio가 계속 바쁩니다. 잠시 후 다시 시도해 주세요.".to_string(),
+        message: format!("{provider_subject} 계속 바쁩니다. 잠시 후 다시 시도해 주세요."),
         recoverable: false,
     })
 }
@@ -1368,9 +1374,14 @@ fn roll_tool_history(
 /// 서버 오류가 "보낸 내용이 너무 길다"는 뜻인지
 fn looks_like_context_overflow(err: &str) -> bool {
     let e = err.to_lowercase();
-    // LM Studio(결정 0004): "request (N tokens) exceeds the available context size (M tokens)" / type exceed_context_size_error.
+    // LM Studio(결정 0004), Ollama, llama.cpp, vLLM의 컨텍스트 초과 문구
     e.contains("exceeds the available context size")
         || e.contains("exceed_context_size_error")
+        || e.contains("prompt is too long")
+        || e.contains("context length exceeded")
+        || e.contains("maximum context length")
+        || e.contains("exceeds the context")
+        || e.contains("n_ctx")
         || ((e.contains("400") || e.contains("413"))
             && ["context", "token", "too long", "maximum", "exceed", "length"].iter().any(|k| e.contains(k)))
 }
@@ -1602,7 +1613,9 @@ pub async fn summarize_for_compaction(
     reasoning_options: &[String],
     cancel_flag: &AtomicBool,
 ) -> Result<String, String> {
-    let chat_url = lmstudio::server_urls(&settings.server_url)?.chat;
+    let provider_label = settings.provider.label();
+    let provider_subject = crate::providers::provider_subject(settings.provider);
+    let chat_url = crate::providers::chat_url(settings)?;
 
     let transcript = compaction_source_transcript(prev, messages, focus);
     let focus_line = focus
@@ -1646,8 +1659,8 @@ pub async fn summarize_for_compaction(
 
     let resp = match race_cancel(req, cancel_flag, RESPONSE_HEADER_TIMEOUT).await {
         Raced::Cancelled => return Err("컨텍스트 압축이 취소되었습니다.".to_string()),
-        Raced::TimedOut => return Err("LM Studio 응답 시간이 초과되었습니다. '빠른 로컬 압축'으로 진행할 수 있습니다.".to_string()),
-        Raced::Done(Err(e)) => return Err(format!("{} '빠른 로컬 압축'을 선택해 보세요.", lmstudio::friendly_error(&e))),
+        Raced::TimedOut => return Err(format!("{provider_label} 응답 시간이 초과되었습니다. '빠른 로컬 압축'으로 진행할 수 있습니다.")),
+        Raced::Done(Err(e)) => return Err(format!("{} '빠른 로컬 압축'을 선택해 보세요.", crate::providers::friendly_error(settings.provider, &e))),
         Raced::Done(Ok(r)) => r,
     };
 
@@ -1656,7 +1669,7 @@ pub async fn summarize_for_compaction(
     if !status.is_success() {
         let code = status.as_u16();
         if code == 401 || code == 403 {
-            return Err("LM Studio가 인증을 요구합니다. [LM Studio 연결]에서 API 토큰을 입력하거나 '빠른 로컬 압축'을 이용하세요.".to_string());
+            return Err(format!("{provider_subject} 인증을 요구합니다. [{provider_label} 연결]에서 API 토큰을 입력하거나 '빠른 로컬 압축'을 이용하세요."));
         }
         return Err(format!("요약 생성 실패 ({}): {}", status, api_error_text(&text_body)));
     }
@@ -1860,6 +1873,7 @@ struct RoundStreamer {
     acc: RoundAccumulator,
     /// 앞 라운드에 이미 텍스트가 있으면 화면에 문단 구분을 한 번 넣는다.
     needs_separator: bool,
+    provider_label: &'static str,
 }
 
 impl RoundStreamer {
@@ -1869,7 +1883,7 @@ impl RoundStreamer {
             SseEvent::Done => Ok(true),
             SseEvent::Skip => Ok(false),
             SseEvent::Data(val) => {
-                let out = self.acc.apply_chunk(&val)?;
+                let out = self.acc.apply_chunk_for(&val, self.provider_label)?;
                 if let Some(r) = out.reasoning {
                     sink.reasoning(&r);
                 }
@@ -1892,7 +1906,7 @@ pub async fn run_exaone_turn<R: Runtime>(
     cancel_flag: Arc<AtomicBool>,
 ) -> Result<(ChatMessage, Vec<FileSnapshot>), String> {
     let settings = req.settings;
-    lmstudio::server_urls(&settings.server_url)?;
+    crate::providers::chat_url(settings)?;
 
     let project_ctx = req.project.map(|p| (p.id.as_str(), Path::new(&p.root_path)));
     let available_skills = skills::available(project_ctx);
@@ -2088,6 +2102,7 @@ pub async fn run_exaone_turn<R: Runtime>(
         let mut streamer = RoundStreamer {
             acc: RoundAccumulator::default(),
             needs_separator: !continuing && msg.round_contents.iter().any(|c| !c.is_empty()),
+            provider_label: settings.provider.label(),
         };
         let mut stream = response.bytes_stream();
         let mut decoder = SseDecoder::default();
@@ -2115,7 +2130,8 @@ pub async fn run_exaone_turn<R: Runtime>(
                     let quiet = last_chunk.elapsed();
                     if quiet >= STREAM_IDLE_TIMEOUT {
                         stream_err = Some(format!(
-                            "LM Studio 응답이 {}분 동안 멈춰 있어 중단했습니다.",
+                            "{} 응답이 {}분 동안 멈춰 있어 중단했습니다.",
+                            settings.provider.label(),
                             STREAM_IDLE_TIMEOUT.as_secs() / 60
                         ));
                         break;
@@ -4742,6 +4758,9 @@ content-length: {}
     fn detects_context_overflow_errors() {
         assert!(looks_like_context_overflow("LM Studio 응답 오류 (400 Bad Request): This model's maximum context length is 131072 tokens"));
         assert!(looks_like_context_overflow("LM Studio 응답 오류 (413 Payload Too Large): request too long"));
+        assert!(looks_like_context_overflow("Ollama 응답 오류 (400 Bad Request): prompt is too long"));
+        assert!(looks_like_context_overflow("OpenAI 호환 스트림 오류: request exceeds the context size (n_ctx = 8192)"));
+        assert!(looks_like_context_overflow("This model's maximum context length is 32768 tokens"));
         assert!(!looks_like_context_overflow("LM Studio 응답 오류 (400 Bad Request): invalid model"));
         assert!(!looks_like_context_overflow("LM Studio가 인증을 요구합니다. (401 Unauthorized)"));
     }

@@ -6,6 +6,7 @@ mod dev_servers;
 pub mod fs_ops;
 pub mod html_preview;
 pub mod lmstudio;
+pub mod providers;
 pub mod knowledge;
 pub mod memory;
 pub mod mcp;
@@ -86,8 +87,10 @@ fn conversation_model(settings: &AppSettings, conv: &Conversation) -> Result<Str
         .and_then(pick)
         .or_else(|| pick(&settings.model))
         .ok_or_else(|| {
-            "사용할 모델을 고르세요. [LM Studio 연결]에서 기본 모델을 정하거나 대화 위의 모델 선택에서 고를 수 있습니다."
-                .to_string()
+            format!(
+                "사용할 모델을 고르세요. [{} 연결]에서 기본 모델을 정하거나 대화 위의 모델 선택에서 고를 수 있습니다.",
+                settings.provider.label()
+            )
         })
 }
 
@@ -235,17 +238,43 @@ fn get_initial_state(state: State<'_, AppState>) -> Result<AppDatabase, String> 
     Ok(db.clone())
 }
 
-/// 설정 저장. `api_key`(LM Studio 토큰)가 비어 있으면 기존 토큰을 그대로 둔다 (키 삭제는 `clear_api_key`).
+/// 설정 저장. `api_key`(활성 공급자 토큰)가 비어 있으면 기존 토큰을 그대로 둔다 (키 삭제는 `clear_api_key`).
 #[tauri::command]
-fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> Result<AppSettings, String> {
-    lmstudio::server_urls(&settings.server_url)?;
+fn save_settings(state: State<'_, AppState>, mut settings: AppSettings) -> Result<AppSettings, String> {
+    settings.sync_active_to_profile();
+    providers::validate_server_url(settings.provider, &settings.server_url)?;
+    for (&p, prof) in &settings.providers {
+        if !prof.server_url.trim().is_empty() {
+            providers::validate_server_url(p, &prof.server_url)?;
+        }
+    }
+
     let new_key = settings.api_key.trim().to_string();
     if !new_key.is_empty() {
-        secrets::store_api_key(&new_key)?;
+        secrets::store_provider_api_key(settings.provider, &new_key)?;
     }
+
     let mut db = state.db.lock().map_err(|e| e.to_string())?;
-    let api_key = if new_key.is_empty() { db.settings.api_key.clone() } else { new_key };
-    db.settings = AppSettings { api_key_set: !api_key.is_empty(), api_key, ..settings };
+    let api_key = if !new_key.is_empty() {
+        new_key
+    } else if settings.provider == db.settings.provider {
+        db.settings.api_key.clone()
+    } else {
+        secrets::load_provider_api_key(settings.provider)?.unwrap_or_default()
+    };
+
+    for p in store::LlmProvider::ALL {
+        if p != settings.provider {
+            if let (Some(prev), Some(next_prof)) = (db.settings.providers.get(&p), settings.providers.get_mut(&p)) {
+                next_prof.api_key_set = prev.api_key_set;
+            }
+        }
+    }
+    settings.api_key_set = !api_key.is_empty();
+    settings.api_key = api_key;
+    settings.sync_active_to_profile();
+
+    db.settings = settings;
     state.store.save(&db)?;
     // api_key는 직렬화되지 않으므로 화면에는 키가 전달되지 않는다.
     Ok(db.settings.clone())
@@ -257,20 +286,13 @@ fn settings_snapshot(state: &State<'_, AppState>) -> Result<AppSettings, String>
 
 #[tauri::command]
 async fn lm_list_models(state: State<'_, AppState>) -> Result<Vec<lmstudio::LmModel>, String> {
-    lmstudio::list_models(&settings_snapshot(&state)?).await
+    providers::list_models(&settings_snapshot(&state)?).await
 }
 
 /// 선택한 모델이 원하는 컨텍스트로 쓸 수 있는지 확인한다(로드는 하지 않는다).
 #[tauri::command]
 async fn lm_plan_load(state: State<'_, AppState>, key: String) -> Result<lmstudio::LoadPlan, String> {
-    let settings = settings_snapshot(&state)?;
-    let models = lmstudio::list_models(&settings).await?;
-    let wanted = models
-        .iter()
-        .find(|m| m.key == key)
-        .map(|m| lmstudio::wanted_context(&settings, m))
-        .unwrap_or(lmstudio::DEFAULT_CONTEXT);
-    Ok(lmstudio::plan_load(&models, &key, wanted))
+    providers::plan_load(&settings_snapshot(&state)?, &key).await
 }
 
 #[tauri::command]
@@ -279,41 +301,51 @@ async fn lm_load_model(
     key: String,
     context_length: u32,
 ) -> Result<lmstudio::LoadedInstance, String> {
-    lmstudio::load_model(&settings_snapshot(&state)?, &key, context_length).await
+    providers::load_model(&settings_snapshot(&state)?, &key, context_length).await
 }
 
 #[tauri::command]
 async fn lm_unload(state: State<'_, AppState>, instance_id: String) -> Result<(), String> {
-    lmstudio::unload_instance(&settings_snapshot(&state)?, &instance_id).await
+    providers::unload_instance(&settings_snapshot(&state)?, &instance_id).await
 }
 
 #[tauri::command]
 async fn lm_server_running(state: State<'_, AppState>) -> Result<bool, String> {
-    Ok(lmstudio::server_running(&settings_snapshot(&state)?).await)
+    Ok(providers::server_running(&settings_snapshot(&state)?).await)
 }
 
 #[tauri::command]
-async fn lm_start_server() -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(lmstudio::start_server)
-        .await
-        .map_err(|e| e.to_string())?
+async fn lm_start_server(state: State<'_, AppState>) -> Result<(), String> {
+    providers::start_server(&settings_snapshot(&state)?).await
 }
 
 #[tauri::command]
-fn clear_api_key(state: State<'_, AppState>) -> Result<AppSettings, String> {
-    secrets::delete_api_key()?;
+fn clear_api_key(state: State<'_, AppState>, provider: Option<store::LlmProvider>) -> Result<AppSettings, String> {
+    let target = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        provider.unwrap_or(db.settings.provider)
+    };
+    secrets::delete_provider_api_key(target)?;
     let mut db = state.db.lock().map_err(|e| e.to_string())?;
-    db.settings.api_key.clear();
-    db.settings.api_key_set = false;
+    db.settings.ensure_provider_profiles();
+    if let Some(prof) = db.settings.providers.get_mut(&target) {
+        prof.api_key_set = false;
+    }
+    if target == db.settings.provider {
+        db.settings.api_key.clear();
+        db.settings.api_key_set = false;
+    }
     state.store.save(&db)?;
     Ok(db.settings.clone())
 }
 
 /// 자격 증명 관리자에서 키를 불러온다. 예전 버전이 설정 파일에 평문으로 남긴 키는 옮기고 파일에서 지운다.
 fn load_api_key_into(store: &StoreManager, db: &mut AppDatabase) {
+    db.settings.ensure_provider_profiles();
+    let active = db.settings.provider;
     let legacy = std::mem::take(&mut db.settings.api_key).trim().to_string();
     if !legacy.is_empty() {
-        match secrets::store_api_key(&legacy) {
+        match secrets::store_provider_api_key(active, &legacy) {
             // api_key는 직렬화되지 않으므로 다시 저장하면 파일에서 평문 키가 사라진다.
             Ok(()) => {
                 if let Err(e) = store.save(db) {
@@ -323,13 +355,28 @@ fn load_api_key_into(store: &StoreManager, db: &mut AppDatabase) {
             Err(e) => eprintln!("{}", e),
         }
         db.settings.api_key = legacy;
-    } else {
-        match secrets::load_api_key() {
-            Ok(k) => db.settings.api_key = k.unwrap_or_default(),
+    }
+    for p in store::LlmProvider::ALL {
+        match secrets::load_provider_api_key(p) {
+            Ok(Some(k)) => {
+                let has_key = !k.is_empty();
+                if let Some(prof) = db.settings.providers.get_mut(&p) {
+                    prof.api_key_set = has_key;
+                }
+                if p == active && db.settings.api_key.is_empty() {
+                    db.settings.api_key = k;
+                }
+            }
+            Ok(None) => {
+                if let Some(prof) = db.settings.providers.get_mut(&p) {
+                    prof.api_key_set = p == active && !db.settings.api_key.is_empty();
+                }
+            }
             Err(e) => eprintln!("{}", e),
         }
     }
     db.settings.api_key_set = !db.settings.api_key.is_empty();
+    db.settings.sync_active_to_profile();
 }
 
 // ---------------------------------------------------------------------------
@@ -1076,7 +1123,7 @@ async fn send_chat_message(
             .ok_or_else(|| "대화 세션을 찾을 수 없습니다.".to_string())?;
         (db.settings.clone(), conversation_model(&db.settings, conv)?)
     };
-    let model_info = lmstudio::turn_model_info(&pre_settings, &pre_model_key).await;
+    let model_info = providers::turn_model_info(&pre_settings, &pre_model_key).await;
     let context_length = context_budget::resolve_context(model_info.loaded_context);
     // 지식 폴더: 빠른 갱신 뒤 이번 사용자 메시지(첨부 내용 제외)로 참고 자료를 찾는다. 자동 압축 판단에도 넣는다.
     let knowledge = knowledge::context_for_turn(&app, attach_project.as_ref(), &user_content, context_length).await;
@@ -1269,7 +1316,7 @@ async fn edit_and_resend_message(
     };
     let checkpoint = |m: &ChatMessage, snapshots: &[FileSnapshot]| save_checkpoint(&state, &conversation_id, m, snapshots);
 
-    let model_info = lmstudio::turn_model_info(&settings, &model_key).await;
+    let model_info = providers::turn_model_info(&settings, &model_key).await;
     let context_length = context_budget::resolve_context(model_info.loaded_context);
     let knowledge = knowledge::context_for_turn(&app, project.as_ref(), &new_content, context_length).await;
     let auto_skill = auto_skill_for_turn(&settings, project.as_ref(), &new_content, &history_for_api, context_length);
@@ -1594,7 +1641,7 @@ async fn resolve_tool_approval(
     // 4) 도구 결과를 모델에 전달해 같은 메시지에 이어서 답변을 받는다.
     let (model_key, settings, history, assistant_msg, turn_mode, compaction) = continuation;
     let checkpoint = |m: &ChatMessage, snapshots: &[FileSnapshot]| save_checkpoint(&state, &conversation_id, m, snapshots);
-    let model_info = lmstudio::turn_model_info(&settings, &model_key).await;
+    let model_info = providers::turn_model_info(&settings, &model_key).await;
     let context_length = context_budget::resolve_context(model_info.loaded_context);
     // 승인 뒤 이어가기도 같은 질문(마지막 사용자 메시지, 첨부 내용 제외)으로 참고 자료와 Skill을 다시 만들어 같은 자리에 넣는다.
     // Skill은 다시 고르지 않고, 멈췄던 답변의 자동 불러오기 카드에 적힌 Skill을 그대로 넣는다(그사이 설정을 껐으면 넣지 않는다).
@@ -1694,7 +1741,7 @@ async fn compact_conversation(
     };
 
     let summary = if use_ai {
-        let reasoning_options = lmstudio::turn_model_info(&settings, &settings.model).await.reasoning_options;
+        let reasoning_options = providers::turn_model_info(&settings, &settings.model).await.reasoning_options;
         exaone::summarize_for_compaction(
             &settings,
             prev_ctx.as_ref(),

@@ -9,10 +9,11 @@
 //!   cargo test --lib harness::live -- --ignored --nocapture
 //!
 //! 환경 변수:
+//!   ANYLM_PROVIDER   공급자 (lmstudio | ollama | openai_compat, 기본: lmstudio)
 //!   ANYLM_MODEL      시험할 모델 key (필수)
-//!   ANYLM_SERVER     LM Studio 서버 주소 (기본: http://localhost:1234)
+//!   ANYLM_SERVER     로컬 LLM 서버 주소 (기본: 공급자 기본 포트)
 //!   ANYLM_CONTEXT    모델이 로드된 컨텍스트 길이 (기본: 32768) — 줄이기 기준 계산에 쓴다
-//!   ANYLM_TOKEN      LM Studio API 토큰 (선택)
+//!   ANYLM_TOKEN      API 토큰 (선택)
 //!   ANYLM_SCENARIOS  시나리오 JSON 파일 (기본: ../harness/scenarios.json)
 //!   ANYLM_OUT        결과 폴더 (기본: ../harness/runs/default)
 //!   ANYLM_ONLY       실행할 시나리오 id를 쉼표로 (없으면 전부)
@@ -25,8 +26,8 @@
 //! 이 하니스는 모델을 로드하거나 내리지 않는다. LM Studio에서 모델을 미리 로드해 둘 것.
 
 use crate::exaone::{self, RoundTrace, TurnRequest, Tuning};
-use crate::store::{AppSettings, ChatMessage, Project};
-use crate::{doc_bridge, knowledge, lmstudio, mcp, run_approved_tool, runtime, skills};
+use crate::store::{AppSettings, ChatMessage, LlmProvider, Project};
+use crate::{doc_bridge, knowledge, mcp, providers, run_approved_tool, runtime, skills};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -179,6 +180,7 @@ fn env_num(name: &str, default: u64) -> u64 {
 /// 하니스 실행 설정. 앱 설정 대신 환경 변수에서 만든다.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HarnessConfig {
+    pub provider: LlmProvider,
     pub server_url: String,
     pub model: String,
     pub context_length: u32,
@@ -188,6 +190,12 @@ pub struct HarnessConfig {
 /// `get`으로 환경 변수를 읽어 설정을 만든다(테스트에서 실제 환경을 건드리지 않으려고 getter를 받는다).
 pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> Result<HarnessConfig, String> {
     let val = |name: &str| get(name).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let provider = match val("ANYLM_PROVIDER") {
+        Some(raw) => LlmProvider::from_id(&raw).ok_or_else(|| {
+            format!("ANYLM_PROVIDER는 lmstudio, ollama, openai_compat 중 하나여야 합니다: {raw}")
+        })?,
+        None => LlmProvider::Lmstudio,
+    };
     let model = val("ANYLM_MODEL")
         .ok_or_else(|| "ANYLM_MODEL 환경 변수에 시험할 모델 key를 넣어 주세요. (예: qwen3.5-9b)".to_string())?;
     let context_length = match val("ANYLM_CONTEXT") {
@@ -195,7 +203,8 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> Result<HarnessCo
         None => 32768,
     };
     Ok(HarnessConfig {
-        server_url: val("ANYLM_SERVER").unwrap_or_else(|| "http://localhost:1234".to_string()),
+        provider,
+        server_url: val("ANYLM_SERVER").unwrap_or_else(|| provider.default_server_url().to_string()),
         model,
         context_length,
         out_dir: PathBuf::from(val("ANYLM_OUT").unwrap_or_else(|| "../harness/runs/default".to_string())),
@@ -455,13 +464,21 @@ async fn live() {
     let base_settings = AppSettings {
         api_key_set: !api_key.trim().is_empty(),
         api_key,
+        provider: config.provider,
         server_url: config.server_url.clone(),
         model: config.model.clone(),
         ..AppSettings::default()
     };
-    let info = lmstudio::turn_model_info(&base_settings, &config.model).await;
+    let info = providers::turn_model_info(&base_settings, &config.model).await;
     let display_name = info.display_name.clone().unwrap_or_else(|| config.model.clone());
-    println!("서버 {} / 모델 {} ({}) / 컨텍스트 {}", config.server_url, config.model, display_name, config.context_length);
+    println!(
+        "공급자 {} / 서버 {} / 모델 {} ({}) / 컨텍스트 {}",
+        config.provider.label(),
+        config.server_url,
+        config.model,
+        display_name,
+        config.context_length
+    );
 
     // 앱이 설치해 둔 Python을 쓰고, 사용자 Skill은 섞이지 않게 빈 폴더를 쓴다.
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
@@ -836,10 +853,39 @@ fn config_requires_model() {
 #[test]
 fn config_defaults() {
     let c = config_from_env(|k| (k == "ANYLM_MODEL").then(|| "qwen3.5-9b".to_string())).unwrap();
+    assert_eq!(c.provider, LlmProvider::Lmstudio);
     assert_eq!(c.server_url, "http://localhost:1234");
     assert_eq!(c.context_length, 32768);
     assert_eq!(c.model, "qwen3.5-9b");
     assert_eq!(c.out_dir, PathBuf::from("../harness/runs/default"));
+}
+
+#[test]
+fn config_reads_provider_and_defaults_server_url() {
+    let ollama = config_from_env(|k| match k {
+        "ANYLM_PROVIDER" => Some("ollama".into()),
+        "ANYLM_MODEL" => Some("qwen3:8b".into()),
+        _ => None,
+    })
+    .unwrap();
+    assert_eq!(ollama.provider, LlmProvider::Ollama);
+    assert_eq!(ollama.server_url, "http://localhost:11434");
+
+    let oai = config_from_env(|k| match k {
+        "ANYLM_PROVIDER" => Some("openai_compat".into()),
+        "ANYLM_MODEL" => Some("local-model".into()),
+        _ => None,
+    })
+    .unwrap();
+    assert_eq!(oai.provider, LlmProvider::OpenaiCompat);
+    assert_eq!(oai.server_url, "http://localhost:8080");
+
+    assert!(config_from_env(|k| match k {
+        "ANYLM_PROVIDER" => Some("anthropic".into()),
+        "ANYLM_MODEL" => Some("x".into()),
+        _ => None,
+    })
+    .is_err());
 }
 
 #[test]

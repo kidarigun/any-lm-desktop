@@ -2,8 +2,15 @@ import React, { useCallback, useEffect, useState } from "react";
 import { X } from "lucide-react";
 import { BackendAPI } from "../api";
 import { RuntimePanel } from "../runtime/RuntimePanel";
-import type { AppSettings, LmModel } from "../types";
+import type { AppSettings, LlmProvider, LmModel } from "../types";
 import { capabilityBadges, describeModel, loadedLabel, normalizeContext } from "./modelText";
+import {
+  PROVIDERS,
+  PROVIDER_META,
+  activeProvider,
+  switchDraftProvider,
+  syncDraftActiveProfile,
+} from "./providerMeta";
 import { isServerOffMessage, smallerContext, smallerContextLabel } from "./sendFlow";
 
 const DEFAULT_CONTEXT = 32768;
@@ -22,7 +29,7 @@ interface Props {
 }
 
 export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged }: Props) {
-  const [draft, setDraft] = useState<AppSettings>(settings);
+  const [draft, setDraft] = useState<AppSettings>(() => syncDraftActiveProfile(settings));
   const [running, setRunning] = useState<boolean | null>(null);
   const [models, setModels] = useState<LmModel[]>([]);
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -30,8 +37,20 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged 
   const [error, setError] = useState<string | null>(null);
   /** 로드에 실패한 모델과 시도한 컨텍스트 (오류 옆에 [N K로 다시 시도]) */
   const [loadFailed, setLoadFailed] = useState<{ key: string; context: number } | null>(null);
+  /** 입력 중인 글자(모델 key별). 없으면 저장된 값을 보여 준다. */
+  const [ctxText, setCtxText] = useState<Record<string, string>>({});
+
+  const savedProvider = activeProvider(settings);
+  const draftProvider = activeProvider(draft);
+  const switchingProvider = draftProvider !== savedProvider;
+  const meta = PROVIDER_META[draftProvider];
 
   const refresh = useCallback(async () => {
+    if (switchingProvider) {
+      setRunning(null);
+      setModels([]);
+      return;
+    }
     let up = false;
     try {
       up = await BackendAPI.serverRunning();
@@ -49,14 +68,11 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged 
       setLoadFailed(null);
       setError(String(err));
     }
-  }, []);
+  }, [switchingProvider]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
-
-  /** 입력 중인 글자(모델 key별). 없으면 저장된 값을 보여 준다. */
-  const [ctxText, setCtxText] = useState<Record<string, string>>({});
 
   const contextOf = (m: LmModel) => {
     const saved = draft.modelPrefs?.[m.key]?.contextLength;
@@ -81,6 +97,23 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged 
     if (raw === undefined) return;
     setDraft((d) => commitContext(d, m, raw));
     setCtxText(({ [m.key]: _drop, ...rest }) => rest);
+  }
+
+  function selectProvider(next: LlmProvider) {
+    if (next === draftProvider) return;
+    setDraft((d) => {
+      let committed = d;
+      if (!switchingProvider) {
+        for (const m of models) {
+          const raw = ctxText[m.key];
+          if (raw !== undefined) committed = commitContext(committed, m, raw);
+        }
+      }
+      return switchDraftProvider(committed, next);
+    });
+    setCtxText({});
+    setLoadFailed(null);
+    setError(null);
   }
 
   async function startServer() {
@@ -145,10 +178,13 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged 
 
   async function save() {
     let next = draft;
-    for (const m of models) {
-      const raw = ctxText[m.key];
-      if (raw !== undefined) next = commitContext(next, m, raw);
+    if (!switchingProvider) {
+      for (const m of models) {
+        const raw = ctxText[m.key];
+        if (raw !== undefined) next = commitContext(next, m, raw);
+      }
     }
+    next = syncDraftActiveProfile(next);
     try {
       await onSave(next);
     } catch (err) {
@@ -161,7 +197,7 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged 
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
       <div className="bg-white dark:bg-[#262624] border border-stone-200 dark:border-[#3A3A36] rounded-2xl w-full max-w-xl max-h-[90vh] overflow-y-auto p-6 shadow-xl space-y-4">
         <div className="flex items-center justify-between">
-          <h3 className="text-sm font-bold text-stone-900 dark:text-stone-100">LM Studio 연결</h3>
+          <h3 className="text-sm font-bold text-stone-900 dark:text-stone-100">로컬 LLM 연결</h3>
           <button onClick={onClose} aria-label="닫기">
             <X className="w-4 h-4 text-stone-400" />
           </button>
@@ -169,33 +205,66 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged 
 
         <div className="space-y-3 text-xs">
           <div>
+            <label className="font-semibold text-stone-700 dark:text-stone-300 block mb-1.5">
+              LLM 공급자
+            </label>
+            <div className="grid grid-cols-3 gap-1.5 p-1 rounded-xl bg-stone-100 dark:bg-[#1E1E1C] border border-stone-200 dark:border-[#34342F]">
+              {PROVIDERS.map((id) => {
+                const selected = id === draftProvider;
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => selectProvider(id)}
+                    className={`py-1.5 px-2 rounded-lg text-xs font-semibold cursor-pointer transition ${
+                      selected
+                        ? "bg-white dark:bg-[#2E2E2A] text-[#A50034] dark:text-[#FF5C8D] shadow-sm"
+                        : "text-stone-600 dark:text-stone-300 hover:text-stone-900 dark:hover:text-stone-100"
+                    }`}
+                  >
+                    {PROVIDER_META[id].label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div>
             <label className="font-semibold text-stone-700 dark:text-stone-300 block mb-1">
-              LM Studio 서버 주소
+              {meta.label} 서버 주소
             </label>
             <div className="flex items-center gap-2">
               <input
                 type="text"
                 value={draft.serverUrl}
+                placeholder={meta.defaultUrl}
                 onChange={(e) => setDraft({ ...draft, serverUrl: e.target.value })}
                 className={`${inputCls} font-mono`}
               />
-              <span
-                className={`shrink-0 flex items-center gap-1 font-semibold ${
-                  running === null
-                    ? "text-stone-400"
-                    : running
-                      ? "text-emerald-700 dark:text-emerald-400"
-                      : "text-red-600 dark:text-red-400"
-                }`}
-              >
+              {switchingProvider ? (
+                <span className="shrink-0 flex items-center gap-1 font-semibold text-amber-700 dark:text-amber-300">
+                  <span className="w-2 h-2 rounded-full bg-amber-500" />
+                  전환 대기
+                </span>
+              ) : (
                 <span
-                  className={`w-2 h-2 rounded-full ${
-                    running === null ? "bg-stone-400" : running ? "bg-emerald-500" : "bg-red-500"
+                  className={`shrink-0 flex items-center gap-1 font-semibold ${
+                    running === null
+                      ? "text-stone-400"
+                      : running
+                        ? "text-emerald-700 dark:text-emerald-400"
+                        : "text-red-600 dark:text-red-400"
                   }`}
-                />
-                {running === null ? "확인 중" : running ? "연결됨" : "꺼져 있음"}
-              </span>
-              {running === false && (
+                >
+                  <span
+                    className={`w-2 h-2 rounded-full ${
+                      running === null ? "bg-stone-400" : running ? "bg-emerald-500" : "bg-red-500"
+                    }`}
+                  />
+                  {running === null ? "확인 중" : running ? "연결됨" : "꺼져 있음"}
+                </span>
+              )}
+              {!switchingProvider && running === false && meta.supportsStartServer && (
                 <button
                   onClick={startServer}
                   disabled={starting}
@@ -206,7 +275,7 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged 
               )}
             </div>
             <p className="mt-1 text-[11px] text-stone-500 dark:text-stone-400">
-              주소를 바꿨다면 저장한 뒤에 연결 상태가 갱신됩니다.
+              {meta.addressHint} 주소를 바꿨다면 저장한 뒤에 연결 상태가 갱신됩니다.
             </p>
           </div>
 
@@ -222,20 +291,26 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged 
               placeholder={
                 draft.apiKeySet
                   ? "저장된 토큰 사용 중 — 바꾸려면 새 토큰 입력"
-                  : "LM Studio에서 인증을 켠 경우에만 입력"
+                  : meta.tokenPlaceholder
               }
               className={inputCls}
             />
             <div className="mt-1 flex items-center justify-between text-[11px] text-stone-500 dark:text-stone-400">
-              <span>토큰은 Windows 자격 증명 관리자에 암호화되어 저장됩니다.</span>
+              <span>토큰은 Windows 자격 증명 관리자에 공급자별로 암호화되어 저장됩니다.</span>
               {draft.apiKeySet && (
                 <button
                   type="button"
                   onClick={async () => {
-                    if (!window.confirm("저장된 토큰을 삭제할까요?")) return;
+                    if (!window.confirm(`${meta.label}의 저장된 토큰을 삭제할까요?`)) return;
                     try {
-                      const saved = await BackendAPI.clearApiKey();
-                      setDraft((d) => ({ ...d, apiKey: "", apiKeySet: saved.apiKeySet }));
+                      const saved = await BackendAPI.clearApiKey(draftProvider);
+                      setDraft((d) => {
+                        const profiles = { ...(d.providers ?? {}) };
+                        if (profiles[draftProvider]) {
+                          profiles[draftProvider] = { ...profiles[draftProvider]!, apiKeySet: false };
+                        }
+                        return { ...d, apiKey: "", apiKeySet: false, providers: profiles };
+                      });
                       onSettingsChanged?.({ ...saved, apiKey: "" });
                       setError(null);
                     } catch (err) {
@@ -252,105 +327,138 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged 
 
           <div>
             <div className="font-semibold text-stone-700 dark:text-stone-300 mb-1">모델</div>
-            {running === false && (
+            {switchingProvider && (
+              <p className="text-stone-500 dark:text-stone-400">
+                [저장]을 누르면 {meta.label} 서버에 연결하고 모델 목록을 불러옵니다.
+              </p>
+            )}
+            {!switchingProvider && running === false && (
               <p className="text-stone-500 dark:text-stone-400">서버가 꺼져 있어 모델 목록을 볼 수 없습니다.</p>
             )}
-            {running && models.length === 0 && (
-              <p className="text-stone-500 dark:text-stone-400">LM Studio에 설치된 모델이 없습니다.</p>
+            {!switchingProvider && running && models.length === 0 && (
+              <div className="space-y-2">
+                <p className="text-stone-500 dark:text-stone-400">{meta.emptyModelsText}</p>
+                {draftProvider === "openai_compat" && (
+                  <div>
+                    <label className="block text-[11px] font-semibold text-stone-600 dark:text-stone-300 mb-1">
+                      기본 모델 ID 직접 입력
+                    </label>
+                    <input
+                      type="text"
+                      value={draft.model}
+                      placeholder="예: qwen3-coder"
+                      onChange={(e) => setDraft({ ...draft, model: e.target.value })}
+                      className={`${inputCls} font-mono`}
+                    />
+                  </div>
+                )}
+              </div>
             )}
-            <div className="space-y-2">
-              {models.map((m) => {
-                const isLoaded = m.loaded.length > 0;
-                const busy = busyKey === m.key;
-                return (
-                  <div
-                    key={m.key}
-                    className="rounded-xl border border-stone-200 dark:border-[#3A3A36] p-3 space-y-2"
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <label className="flex items-start gap-2 cursor-pointer min-w-0">
-                        <input
-                          type="radio"
-                          name="default-model"
-                          checked={draft.model === m.key}
-                          onChange={() => setDraft({ ...draft, model: m.key })}
-                          className="mt-0.5 accent-[#A50034]"
-                        />
-                        <span className="min-w-0">
-                          <span className="block font-semibold text-stone-900 dark:text-stone-100 truncate">
-                            {m.displayName}
-                            {draft.model === m.key && (
-                              <span className="ml-1.5 text-[10px] font-bold text-[#A50034] dark:text-[#FF5C8D]">
-                                기본 모델
-                              </span>
+            {!switchingProvider && (
+              <div className="space-y-2">
+                {models.map((m) => {
+                  const isLoaded = m.loaded.length > 0;
+                  const busy = busyKey === m.key;
+                  const subtitle = describeModel(m);
+                  return (
+                    <div
+                      key={m.key}
+                      className="rounded-xl border border-stone-200 dark:border-[#3A3A36] p-3 space-y-2"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <label className="flex items-start gap-2 cursor-pointer min-w-0">
+                          <input
+                            type="radio"
+                            name="default-model"
+                            checked={draft.model === m.key}
+                            onChange={() => setDraft({ ...draft, model: m.key })}
+                            className="mt-0.5 accent-[#A50034]"
+                          />
+                          <span className="min-w-0">
+                            <span className="block font-semibold text-stone-900 dark:text-stone-100 truncate">
+                              {m.displayName}
+                              {draft.model === m.key && (
+                                <span className="ml-1.5 text-[10px] font-bold text-[#A50034] dark:text-[#FF5C8D]">
+                                  기본 모델
+                                </span>
+                              )}
+                            </span>
+                            {subtitle && (
+                              <span className="block text-stone-500 dark:text-stone-400">{subtitle}</span>
                             )}
                           </span>
-                          <span className="block text-stone-500 dark:text-stone-400">{describeModel(m)}</span>
-                        </span>
-                      </label>
-                      <div className="shrink-0 flex flex-col items-end gap-1">
-                        <span
-                          className={`font-semibold ${
-                            isLoaded ? "text-emerald-700 dark:text-emerald-400" : "text-stone-500 dark:text-stone-400"
-                          }`}
-                        >
-                          {loadedLabel(m)}
-                        </span>
-                        <span className="flex gap-1">
-                          {capabilityBadges(m).map((b) => (
-                            <span
-                              key={b}
-                              className="px-1.5 py-0.5 rounded-md bg-stone-100 dark:bg-[#32322F] text-[10px] text-stone-600 dark:text-stone-300"
-                            >
-                              {BADGE_TEXT[b]}
-                            </span>
-                          ))}
-                        </span>
+                        </label>
+                        <div className="shrink-0 flex flex-col items-end gap-1">
+                          <span
+                            className={`font-semibold ${
+                              isLoaded ? "text-emerald-700 dark:text-emerald-400" : "text-stone-500 dark:text-stone-400"
+                            }`}
+                          >
+                            {loadedLabel(m, meta.supportsLoad)}
+                          </span>
+                          <span className="flex gap-1">
+                            {capabilityBadges(m).map((b) => (
+                              <span
+                                key={b}
+                                className="px-1.5 py-0.5 rounded-md bg-stone-100 dark:bg-[#32322F] text-[10px] text-stone-600 dark:text-stone-300"
+                              >
+                                {BADGE_TEXT[b]}
+                              </span>
+                            ))}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <label className="text-stone-600 dark:text-stone-300">컨텍스트</label>
+                        <input
+                          type="number"
+                          min={1024}
+                          max={m.maxContextLength > 0 ? m.maxContextLength : undefined}
+                          step={1024}
+                          value={ctxText[m.key] ?? String(contextOf(m))}
+                          onChange={(e) => setCtxText({ ...ctxText, [m.key]: e.target.value })}
+                          onBlur={() => blurContext(m)}
+                          className="w-28 bg-white dark:bg-[#1E1E1C] border border-stone-300 dark:border-[#3A3A36] rounded-lg px-2 py-1 font-mono text-stone-900 dark:text-stone-100 focus:outline-none focus:border-[#A50034]"
+                        />
+                        {m.maxContextLength > 0 && (
+                          <span className="text-[11px] text-stone-500 dark:text-stone-400">
+                            최대 {m.maxContextLength.toLocaleString()}
+                          </span>
+                        )}
+                        <span className="flex-1" />
+                        {meta.supportsLoad && (
+                          busy ? (
+                            <span className="text-stone-500 dark:text-stone-400">처리 중…</span>
+                          ) : (
+                            <>
+                              <button
+                                onClick={() => load(m, isLoaded)}
+                                disabled={busyKey !== null}
+                                className="px-3 py-1.5 rounded-lg bg-stone-100 dark:bg-[#32322F] text-stone-700 dark:text-stone-200 font-semibold cursor-pointer disabled:opacity-50"
+                              >
+                                {isLoaded ? "다시 로드" : "로드"}
+                              </button>
+                              {isLoaded && meta.supportsUnload && (
+                                <button
+                                  onClick={() => unload(m)}
+                                  disabled={busyKey !== null}
+                                  className="px-3 py-1.5 rounded-lg bg-stone-100 dark:bg-[#32322F] text-stone-700 dark:text-stone-200 font-semibold cursor-pointer disabled:opacity-50"
+                                >
+                                  언로드
+                                </button>
+                              )}
+                            </>
+                          )
+                        )}
                       </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <label className="text-stone-600 dark:text-stone-300">컨텍스트</label>
-                      <input
-                        type="number"
-                        min={1024}
-                        max={m.maxContextLength}
-                        step={1024}
-                        value={ctxText[m.key] ?? String(contextOf(m))}
-                        onChange={(e) => setCtxText({ ...ctxText, [m.key]: e.target.value })}
-                        onBlur={() => blurContext(m)}
-                        className="w-28 bg-white dark:bg-[#1E1E1C] border border-stone-300 dark:border-[#3A3A36] rounded-lg px-2 py-1 font-mono text-stone-900 dark:text-stone-100 focus:outline-none focus:border-[#A50034]"
-                      />
-                      <span className="text-[11px] text-stone-500 dark:text-stone-400">
-                        최대 {m.maxContextLength.toLocaleString()}
-                      </span>
-                      <span className="flex-1" />
-                      {busy ? (
-                        <span className="text-stone-500 dark:text-stone-400">처리 중…</span>
-                      ) : (
-                        <>
-                          <button
-                            onClick={() => load(m, isLoaded)}
-                            disabled={busyKey !== null}
-                            className="px-3 py-1.5 rounded-lg bg-stone-100 dark:bg-[#32322F] text-stone-700 dark:text-stone-200 font-semibold cursor-pointer disabled:opacity-50"
-                          >
-                            {isLoaded ? "다시 로드" : "로드"}
-                          </button>
-                          {isLoaded && (
-                            <button
-                              onClick={() => unload(m)}
-                              disabled={busyKey !== null}
-                              className="px-3 py-1.5 rounded-lg bg-stone-100 dark:bg-[#32322F] text-stone-700 dark:text-stone-200 font-semibold cursor-pointer disabled:opacity-50"
-                            >
-                              언로드
-                            </button>
-                          )}
-                        </>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+                  );
+                })}
+              </div>
+            )}
+            {!switchingProvider && meta.contextHint && models.length > 0 && (
+              <p className="mt-1.5 text-[11px] text-stone-500 dark:text-stone-400">{meta.contextHint}</p>
+            )}
           </div>
 
           <label className="flex items-center gap-2 cursor-pointer">

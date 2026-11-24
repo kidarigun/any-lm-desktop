@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AppSettings, LmModel } from "../types";
-import { isServerOffMessage, nextSendStep, smallerContext, smallerContextLabel, wantedContext } from "./sendFlow";
+import { canStartServerForError, isServerOffMessage, nextSendStep, smallerContext, smallerContextLabel, wantedContext } from "./sendFlow";
 
 describe("sendFlow", () => {
   it("maps load plans to the next step", () => {
@@ -39,7 +39,12 @@ describe("sendFlow", () => {
   it("recognizes the backend's server-off message", () => {
     expect(isServerOffMessage("LM Studio 서버가 꺼져 있습니다. LM Studio에서 서버를 켜거나 [서버 시작]을 눌러 주세요.")).toBe(true);
     expect(isServerOffMessage("Error: LM Studio 서버가 꺼져 있습니다.")).toBe(true);
+    expect(isServerOffMessage("Ollama 서버가 꺼져 있습니다. Ollama를 실행하거나 [서버 시작]을 눌러 주세요.")).toBe(true);
+    expect(isServerOffMessage("OpenAI 호환 서버가 꺼져 있습니다.")).toBe(true);
     expect(isServerOffMessage("모델을 찾을 수 없습니다.")).toBe(false);
     expect(isServerOffMessage(null)).toBe(false);
+
+    expect(canStartServerForError("Ollama 서버가 꺼져 있습니다.", "ollama")).toBe(true);
+    expect(canStartServerForError("OpenAI 호환 서버가 꺼져 있습니다.", "openai_compat")).toBe(false);
   });
 });

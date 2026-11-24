@@ -10,23 +10,33 @@ interface Props {
   disabled?: boolean;
   /** 프로젝트·코드 화면인지 (도구 사용 경고 대상) */
   needsTools?: boolean;
+  /** 공급자가 모델 로드/언로드 구분을 지원하는지 (기본 true) */
+  supportsLoad?: boolean;
   onOpen?: () => void;
 }
 
 export const NO_TOOLS_WARNING =
   "이 모델은 도구 사용 학습이 안 돼 있어 파일 작업이 불안정할 수 있습니다";
 
-/** 대화 입력창 아래의 모델 선택. 로드된 모델이 위에 온다. */
-export function ModelPicker({ models, value, onChange, disabled, needsTools, onOpen }: Props) {
-  const loaded = models.filter((m) => m.loaded.length > 0);
-  const others = models.filter((m) => m.loaded.length === 0);
+/** 대화 입력창 아래의 모델 선택. 로드 지원 공급자는 로드된 모델이 위에 온다. */
+export function ModelPicker({
+  models,
+  value,
+  onChange,
+  disabled,
+  needsTools,
+  supportsLoad = true,
+  onOpen,
+}: Props) {
+  const loaded = supportsLoad ? models.filter((m) => m.loaded.length > 0) : [];
+  const others = supportsLoad ? models.filter((m) => m.loaded.length === 0) : models;
   const current = models.find((m) => m.key === value);
   const stale = value !== "" && !current;
   const warn = needsTools && current && !current.toolUse;
 
   const option = (m: LmModel) => (
     <option key={m.key} value={m.key}>
-      {m.displayName} · {loadedLabel(m)}
+      {supportsLoad ? `${m.displayName} · ${loadedLabel(m)}` : m.displayName}
     </option>
   );
 
@@ -44,8 +54,14 @@ export function ModelPicker({ models, value, onChange, disabled, needsTools, onO
       >
         {value === "" && <option value="">모델 고르기</option>}
         {stale && <option value={value}>{value} · 찾을 수 없음</option>}
-        {loaded.length > 0 && <optgroup label="로드됨">{loaded.map(option)}</optgroup>}
-        {others.length > 0 && <optgroup label="로드 안 됨">{others.map(option)}</optgroup>}
+        {supportsLoad ? (
+          <>
+            {loaded.length > 0 && <optgroup label="로드됨">{loaded.map(option)}</optgroup>}
+            {others.length > 0 && <optgroup label="로드 안 됨">{others.map(option)}</optgroup>}
+          </>
+        ) : (
+          others.map(option)
+        )}
       </select>
       {warn && (
         <span

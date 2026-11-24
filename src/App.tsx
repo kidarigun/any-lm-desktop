@@ -71,6 +71,7 @@ import { McpDialog } from "./mcp/McpDialog";
 import { ConnectionDialog } from "./lmstudio/ConnectionDialog";
 import { LoadChoiceDialog, type LoadChoice } from "./lmstudio/LoadChoiceDialog";
 import { ModelPicker, ReasoningToggle } from "./lmstudio/ModelPicker";
+import { PROVIDER_META, activeProvider } from "./lmstudio/providerMeta";
 import { reasoningEnabled, withReasoning } from "./lmstudio/modelText";
 import {
   MODEL_MISSING_TEXT,
@@ -373,12 +374,15 @@ export default function App() {
 
   const [settings, setSettings] = useState<AppSettings>({
     apiKey: "",
+    provider: "lmstudio",
     serverUrl: "http://localhost:1234",
     model: "",
     writingStyle: "default",
     autoCompact: true,
     modelPrefs: {},
   });
+  const currentProvider = activeProvider(settings);
+  const providerMeta = PROVIDER_META[currentProvider];
 
   // 3 Core Modes: "chat" | "project" | "code"
   const [activeMode, setActiveMode] = useState<"chat" | "project" | "code">(
@@ -2002,7 +2006,7 @@ export default function App() {
           >
             <span className="flex items-center gap-1.5">
               <Settings className="w-3.5 h-3.5 text-stone-500 dark:text-stone-400" />
-              LM Studio 연결
+              {providerMeta.label} 연결
             </span>
             <span
               className="flex items-center gap-1 text-[11px] font-semibold text-stone-500 dark:text-stone-400"
@@ -2154,7 +2158,7 @@ export default function App() {
           <div className="bg-red-50 dark:bg-red-950/60 border-b border-red-200 dark:border-red-900 px-6 py-2 text-xs text-red-700 dark:text-red-300 flex items-center justify-between gap-3">
             <span className="min-w-0 break-words">{runErrors[shownConvId]}</span>
             <span className="flex items-center gap-3 shrink-0 max-w-[50%]">
-            {(isServerOffMessage(runErrors[shownConvId]) || serverUp === false) && (
+            {providerMeta.supportsStartServer && (isServerOffMessage(runErrors[shownConvId]) || serverUp === false) && (
               <StartServerButton onDone={afterServerStart} />
             )}
             <button
@@ -2178,7 +2182,7 @@ export default function App() {
           <div className="bg-red-50 dark:bg-red-950/60 border-b border-red-200 dark:border-red-900 px-6 py-2 text-xs text-red-700 dark:text-red-300 flex items-center justify-between gap-3">
             <span className="min-w-0 break-words">{errorBanner}</span>
             <span className="flex items-center gap-3 shrink-0 max-w-[50%]">
-              {(isServerOffMessage(errorBanner) || serverUp === false) && (
+              {providerMeta.supportsStartServer && (isServerOffMessage(errorBanner) || serverUp === false) && (
                 <StartServerButton onDone={afterServerStart} />
               )}
               {loadFailure && !isServerOffMessage(errorBanner) && smallerContext(loadFailure.context) !== null && (
@@ -3023,6 +3027,7 @@ export default function App() {
                       onOpen={() => void refreshModels()}
                       disabled={isStreaming || !!modelNotice || !!loadChoice}
                       needsTools={activeMode !== "chat"}
+                      supportsLoad={providerMeta.supportsLoad}
                     />
                     <ReasoningToggle
                       model={models.find((m) => m.key === effectiveModelKey)}
@@ -3246,17 +3251,27 @@ export default function App() {
         />
       )}
 
-      {/* Modal 1: LM Studio 연결 */}
+      {/* Modal 1: 로컬 LLM 연결 */}
       {showSettingsModal && (
         <ConnectionDialog
           settings={settings}
           onSettingsChanged={(saved) => setSettings({ ...saved, apiKey: "" })}
           onSave={async (next) => {
+            const prevProvider = activeProvider(settings);
+            const prevUrl = settings.serverUrl;
             const saved = await BackendAPI.saveSettings(next);
+            const nextProvider = activeProvider(saved);
             setSettings({ ...saved, apiKey: "" });
             setSettingsError(null);
             setShowSettingsModal(false);
+            if (prevProvider !== nextProvider || prevUrl !== saved.serverUrl) {
+              setModels([]);
+              setReloadHint(null);
+              setLoadFailure(null);
+              setErrorBanner(null);
+            }
             void refreshServerStatus();
+            void refreshModels();
           }}
           onClose={closeSettingsModal}
         />

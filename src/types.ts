@@ -1,14 +1,25 @@
+export type LlmProvider = "lmstudio" | "ollama" | "openai_compat";
+
+export interface ProviderProfile {
+  serverUrl: string;
+  model: string;
+  apiKeySet?: boolean;
+  modelPrefs: Record<string, ModelPref>;
+}
+
 export interface ModelPref {
   contextLength?: number;
   reasoning?: "on" | "off";
 }
 
 export interface AppSettings {
-  /** LM Studio API 토큰(선택). 화면에서 새 토큰을 보낼 때만 쓴다. 저장된 토큰은 화면으로 돌아오지 않는다 (비어 있으면 기존 토큰 유지). */
+  /** 활성 공급자의 API 토큰(선택). 화면에서 새 토큰을 보낼 때만 쓴다. 저장된 토큰은 화면으로 돌아오지 않는다 (비어 있으면 기존 토큰 유지). */
   apiKey: string;
   /** 저장된 토큰이 있는지 */
   apiKeySet?: boolean;
-  /** LM Studio 서버 주소 (localhost / 127.0.0.1 / [::1] 만 허용) */
+  /** 현재 활성 로컬 LLM 공급자 (없으면 lmstudio) */
+  provider?: LlmProvider;
+  /** 활성 공급자 서버 주소 (localhost / 127.0.0.1 / [::1] 만 허용) */
   serverUrl: string;
   /** 기본 모델 key. 비어 있으면 아직 고르지 않은 것 */
   model: string;
@@ -21,6 +32,8 @@ export interface AppSettings {
   /** 컨텍스트가 차면 자동으로 요약 압축한다 */
   autoCompact: boolean;
   modelPrefs: Record<string, ModelPref>;
+  /** 공급자별 저장 프로필 */
+  providers?: Partial<Record<LlmProvider, ProviderProfile>>;
   /** 요청에 맞는 Skill을 앱이 골라 미리 넣는다. 없으면 켜짐 */
   skillAutoLoad?: boolean;
   /** 작업 패널 터미널의 셸: "powershell"(기본) | "pwsh" | "cmd" */

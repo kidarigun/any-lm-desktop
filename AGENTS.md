@@ -4,7 +4,7 @@
 
 ## 1. 프로젝트
 
-Any LM Desktop은 사용자가 만든 K-EXAONE Desktop 0.4.4(Tauri v2 + React/TypeScript + Rust, 커밋 `e885b02`)를 이력째 복제해 **LM Studio 전용 데스크톱 작업 앱**으로 바꾸는 비공개 프로젝트다. LM Studio는 채팅만 지원하므로, 이 앱이 문서 작성·캔버스·프로젝트 폴더 작업·코드 작업(에이전트 루프, HWPX/DOCX/PPTX/XLSX, Skill, MCP, 실행 환경 관리, 컨텍스트 압축)을 맡는다. 대상 환경은 RTX 5060 Laptop 8GB, RAM 32GB PC의 로컬 모델(Qwen3.5-9B, Qwen3.6-35B-A3B)이다. 설계 문서는 `docs/superpowers/specs/2026-11-23-any-lm-desktop-design.md`, 구현 계획은 `docs/superpowers/plans/2026-11-23-any-lm-desktop.md`.
+Any LM Desktop은 사용자가 만든 K-EXAONE Desktop 0.4.4(Tauri v2 + React/TypeScript + Rust, 커밋 `e885b02`)를 이력째 복제해 **로컬 LLM(LM Studio · Ollama · OpenAI 호환 로컬 서버) 전용 데스크톱 작업 앱**으로 바꾸는 비공개 프로젝트다. 로컬 LLM 서버는 주로 채팅만 지원하므로, 이 앱이 문서 작성·캔버스·프로젝트 폴더 작업·코드 작업(에이전트 루프, HWPX/DOCX/PPTX/XLSX, Skill, MCP, 실행 환경 관리, 컨텍스트 압축)을 맡는다. 대상 환경은 RTX 5060 Laptop 8GB, RAM 32GB PC의 로컬 모델(Qwen3.5-9B, Qwen3.6-35B-A3B 등)이다. 설계 문서는 `docs/superpowers/specs/2026-11-23-any-lm-desktop-design.md`, 멀티 공급자 설계는 `docs/superpowers/specs/2026-11-24-multi-local-providers-design.md`, 구현 계획은 `docs/superpowers/plans/2026-11-23-any-lm-desktop.md` 및 `docs/superpowers/plans/2026-11-24-multi-local-providers.md`.
 
 ## 2. 폴더 지도
 
@@ -12,6 +12,7 @@ Rust (`src-tauri/src/`)
 - `lib.rs` — Tauri 앱 조립과 명령 등록. `main.rs` — 진입점.
 - `exaone.rs` — 모델 호출·에이전트 루프(`run_exaone_turn`)·도구 실행·스트림 처리·대화 압축 요약(이름은 원본 그대로).
 - `lmstudio.rs` — LM Studio 연결: 서버 주소 검증(`server_urls`, localhost만, 경로는 버림)·인증 헤더·오류 안내, 모델 목록·로드 계획(`plan_load`)·로드/언로드, 서버 상태·`lms server start`, 추론 끄기 필드, 턴 시작 모델 정보(`turn_model_info`).
+- `providers/` — 멀티 로컬 LLM 공급자 어댑터(결정 0012): `mod.rs`(공통 로컬 URL 보안 검증·`ProviderCapabilities`·공급자별 오류/메시지·라우팅), `ollama.rs`(`/api/tags`·`/api/ps`·`/api/show`·`/api/generate` 로드/언로드·`ollama serve` 분리 시작), `openai_compat.rs`(경로 정규화·`/v1/models` 파싱·즉시 Ready `plan_load`).
 - `context_budget.rs` — 로드된 컨텍스트에 맞춘 줄이기 기준·도구 결과 상한·사용 비율(70%, 1토큰 = 1.5자).
 - `testdata/` — 테스트용 LM Studio 응답(`lmstudio_models.json`).
 - `store.rs` — 대화·설정 저장 파일과 스냅샷 자료형.
@@ -27,13 +28,13 @@ Rust (`src-tauri/src/`)
 - `runs.rs` — 대화별 실행 중복 방지와 중지 플래그.
 - `terminal.rs` — 작업 패널 터미널(PTY, `portable-pty`/ConPTY): 세션 관리·링 버퍼·UTF-8 이어 붙이기·ANSI 제거(`plain_text`)·Job Object+taskkill 트리 종료, `terminal_*` 명령과 `anylm-terminal-*` 이벤트(결정 0008, 테스트는 `terminal_tests.rs`).
 - `dev_servers.rs` — 프로젝트 개발 서버 감지·실행·중복 방지·로컬 미리보기, ConPTY 로그와 포트 확인, 승인형 시작·프로젝트별 로그/종료(결정 0010, 하니스 `harness/dev-server.json`).
-- `secrets.rs` — Windows 자격 증명 관리자(LM Studio API 토큰·MCP 비밀 값 보관).
+- `secrets.rs` — Windows 자격 증명 관리자(공급자별 API 토큰 `lm-studio-api-token`·`ollama-api-token`·`openai-compat-api-token`, MCP 비밀 값 보관).
 - `single_instance.rs` — 앱 중복 실행 방지.
-- `harness.rs` — 실제 LM Studio 서버로 에이전트 루프를 돌려 보는 테스트 하니스(`ANYLM_*` 환경 변수, 시나리오 `mcpServers`로 앱의 MCP 관리자 연결).
+- `harness.rs` — 실제 로컬 LLM 서버로 에이전트 루프를 돌려 보는 테스트 하니스(`ANYLM_*` 환경 변수, `ANYLM_PROVIDER`로 공급자 선택, 시나리오 `mcpServers`로 앱의 MCP 관리자 연결).
 
 프런트엔드 (`src/`)
 - `App.tsx`, `main.tsx`, `api.ts`, `types.ts`, `styles.css` — 앱 본체, Tauri 명령 호출, 공용 타입·스타일.
-- `lmstudio/` — LM Studio 연결 창(`ConnectionDialog`), 모델 선택(`ModelPicker`·"생각하기" 토글), 내리고 로드 선택(`LoadChoiceDialog`), 보내기 전 모델 준비 규칙(`sendFlow`: 로드 계획→다음 단계, 원하는 컨텍스트, 작게 다시 시도 값), [서버 시작] 버튼(`StartServerButton`), 모델 설명 글자(`modelText`).
+- `lmstudio/` — 로컬 LLM 연결 창(`ConnectionDialog`, 공급자 3종 탭 전환), 공급자 메타·프로필 동기화(`providerMeta`), 모델 선택(`ModelPicker`·"생각하기" 토글), 내리고 로드 선택(`LoadChoiceDialog`), 보내기 전 모델 준비 규칙(`sendFlow`: 로드 계획→다음 단계, 원하는 컨텍스트, 작게 다시 시도 값), [서버 시작] 버튼(`StartServerButton`), 모델 설명 글자(`modelText`).
 - `chat/` — 대화별 실행 상태와 답변 통계 줄(`statsLine`). `canvas/` — 문서 캔버스(편집기·PDF/PPTX/XLSX/HWPX 뷰어).
 - `docs/` — 문서 형식 변환(docx, hwpx, pptx, pdf, xlsx, markdown)과 Rust 다리 구현.
 - `project/` — 프로젝트 메모리 카드(`ProjectMemoryCard`)와 표시 규칙(`memoryFormat`), 지침 전용 편집기(`InstructionsEditor`)와 글자·토큰 계산·서식 예시(`instructionsFormat`), 지식 폴더 카드(`KnowledgeCard`)와 상태 줄·설정 창 비교 규칙(`knowledgeFormat`).
@@ -58,7 +59,7 @@ Rust (`src-tauri/src/`)
 - 포트: 중복 실행 방지 `45790`(`single_instance::PORT`), 원격 MCP OAuth 로그인 결과 `45791`(`mcp_oauth::CALLBACK_PORT`, 리디렉션 URI `http://localhost:45791/oauth2callback`). 원본 앱은 45788·45789를 쓰므로 이 값들과 겹치면 안 된다(테스트 `ports_do_not_collide_with_each_other_or_the_original_app`).
 - 내부 파일·함수·이벤트 이름(`exaone.rs`, `run_exaone_turn`, `onExaoneStream`, `"exaone-stream"`)은 바꾸지 않는다. 사용자에게 보이는 문자열과 스펙 6.2 표의 충돌 요소만 바꾼다.
 - 화면 문구는 한국어. 사용자에게 보이는 곳에 "EXAONE"/"K-EXAONE"/"LG"를 쓰지 않는다(NOTICE·README의 출처 설명만 예외).
-- LM Studio 서버 주소는 `http://localhost`, `http://127.0.0.1`, `http://[::1]`만 허용. 기본값 `http://localhost:1234`.
+- 로컬 LLM 서버 주소는 모든 공급자(LM Studio · Ollama · OpenAI 호환)에서 `http://localhost`, `http://127.0.0.1`, `http://[::1]`만 허용. 기본값은 `lmstudio` `http://localhost:1234`, `ollama` `http://localhost:11434`, `openai_compat` `http://localhost:8080`.
 - 기본 원하는 컨텍스트 `32768`. 자동 요약 압축 기준 `0.70`(로드된 컨텍스트 대비). 글자→토큰 추정 `1토큰 = 1.5자`(`chars()` 기준).
 - 모델 로드 요청 시간 제한 5분. 응답 헤더 대기 180초, 스트림 무응답 900초(원본 유지).
 - 앱은 사용자가 [내리고 로드]·[다시 로드]·[언로드]를 누를 때만 모델을 내린다.

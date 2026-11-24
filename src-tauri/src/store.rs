@@ -3,6 +3,75 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// 지원하는 로컬 LLM 공급자
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmProvider {
+    #[default]
+    Lmstudio,
+    Ollama,
+    OpenaiCompat,
+}
+
+impl LlmProvider {
+    pub const ALL: [LlmProvider; 3] = [
+        LlmProvider::Lmstudio,
+        LlmProvider::Ollama,
+        LlmProvider::OpenaiCompat,
+    ];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Lmstudio => "lmstudio",
+            Self::Ollama => "ollama",
+            Self::OpenaiCompat => "openai_compat",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Lmstudio => "LM Studio",
+            Self::Ollama => "Ollama",
+            Self::OpenaiCompat => "OpenAI 호환",
+        }
+    }
+
+    pub fn default_server_url(self) -> &'static str {
+        match self {
+            Self::Lmstudio => "http://localhost:1234",
+            Self::Ollama => "http://localhost:11434",
+            Self::OpenaiCompat => "http://localhost:8080",
+        }
+    }
+
+    pub fn secret_account(self) -> &'static str {
+        match self {
+            Self::Lmstudio => "lm-studio-api-token",
+            Self::Ollama => "ollama-api-token",
+            Self::OpenaiCompat => "openai-compat-api-token",
+        }
+    }
+
+    pub fn from_id(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "lmstudio" | "lm-studio" | "lm_studio" => Some(Self::Lmstudio),
+            "ollama" => Some(Self::Ollama),
+            "openai_compat" | "openai-compat" | "openai" => Some(Self::OpenaiCompat),
+            _ => None,
+        }
+    }
+}
+
+/// 공급자별 저장 프로필 (공급자를 바꿔도 주소·기본 모델·토큰 상태·모델 설정을 따로 기억한다).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ProviderProfile {
+    pub server_url: String,
+    pub model: String,
+    pub api_key_set: bool,
+    pub model_prefs: BTreeMap<String, ModelPref>,
+}
+
 /// 모델별 사용자 선택값
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -15,13 +84,15 @@ pub struct ModelPref {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppSettings {
-    /// LM Studio API 토큰(선택). Windows 자격 증명 관리자에 둔다. 설정 파일에도, 화면(웹뷰)에도 내보내지 않는다.
+    /// 활성 공급자의 API 토큰(선택). Windows 자격 증명 관리자에 둔다. 설정 파일에도, 화면(웹뷰)에도 내보내지 않는다.
     /// 화면에서 받을 때만 쓰며, 비어 있으면 "기존 토큰 유지"를 뜻한다.
     #[serde(skip_serializing)]
     pub api_key: String,
     /// 저장된 토큰이 있는지 (화면 표시용)
     pub api_key_set: bool,
-    /// LM Studio 서버 주소 (localhost / 127.0.0.1 / [::1] 만 허용)
+    /// 현재 활성 LLM 공급자
+    pub provider: LlmProvider,
+    /// 활성 공급자 서버 주소 (localhost / 127.0.0.1 / [::1] 만 허용)
     pub server_url: String,
     /// 기본 모델 key. 비어 있으면 아직 고르지 않은 것.
     pub model: String,
@@ -29,6 +100,8 @@ pub struct AppSettings {
     /// 컨텍스트가 차면 자동으로 요약 압축한다.
     pub auto_compact: bool,
     pub model_prefs: BTreeMap<String, ModelPref>,
+    /// 공급자별 설정 프로필. 최상위 server_url/model/api_key_set/model_prefs와 활성 공급자를 동기화한다.
+    pub providers: BTreeMap<LlmProvider, ProviderProfile>,
     /// 요청에 맞는 Skill을 앱이 골라 미리 넣는다(결정 0007). 끄면 모델이 load_skill을 직접 불러야 한다.
     pub skill_auto_load: bool,
     /// 작업 패널 터미널의 셸: "powershell"(기본) | "pwsh" | "cmd" (결정 0008)
@@ -40,13 +113,70 @@ impl Default for AppSettings {
         Self {
             api_key: String::new(),
             api_key_set: false,
-            server_url: "http://localhost:1234".to_string(),
+            provider: LlmProvider::Lmstudio,
+            server_url: LlmProvider::Lmstudio.default_server_url().to_string(),
             model: String::new(),
             writing_style: "executive_report".to_string(),
             auto_compact: true,
             model_prefs: BTreeMap::new(),
+            providers: BTreeMap::new(),
             skill_auto_load: true,
             terminal_shell: "powershell".to_string(),
+        }
+    }
+}
+
+impl AppSettings {
+    /// 모든 공급자 프로필이 존재하고 기본 서버 주소를 갖도록 보장한다.
+    /// 예전 저장 파일(providers 없음)에서 읽은 최상위 값은 활성 공급자 프로필로 이관한다.
+    pub fn ensure_provider_profiles(&mut self) {
+        let had_active = self.providers.contains_key(&self.provider);
+        for p in LlmProvider::ALL {
+            let entry = self.providers.entry(p).or_insert_with(|| ProviderProfile {
+                server_url: p.default_server_url().to_string(),
+                ..Default::default()
+            });
+            if entry.server_url.trim().is_empty() {
+                entry.server_url = p.default_server_url().to_string();
+            }
+        }
+        if !had_active {
+            if let Some(active) = self.providers.get_mut(&self.provider) {
+                if !self.server_url.trim().is_empty() {
+                    active.server_url = self.server_url.clone();
+                }
+                active.model = self.model.clone();
+                active.api_key_set = self.api_key_set;
+                active.model_prefs = self.model_prefs.clone();
+            }
+        }
+        if self.server_url.trim().is_empty() {
+            self.server_url = self.providers[&self.provider].server_url.clone();
+        }
+    }
+
+    /// 최상위 활성 필드(server_url/model/api_key_set/model_prefs)를 활성 공급자 프로필에 저장한다.
+    pub fn sync_active_to_profile(&mut self) {
+        self.ensure_provider_profiles();
+        if self.server_url.trim().is_empty() {
+            self.server_url = self.provider.default_server_url().to_string();
+        }
+        if let Some(active) = self.providers.get_mut(&self.provider) {
+            active.server_url = self.server_url.clone();
+            active.model = self.model.clone();
+            active.api_key_set = self.api_key_set;
+            active.model_prefs = self.model_prefs.clone();
+        }
+    }
+
+    /// 활성 공급자 프로필 값을 최상위 필드로 복사한다.
+    pub fn sync_profile_to_active(&mut self) {
+        self.ensure_provider_profiles();
+        if let Some(active) = self.providers.get(&self.provider).cloned() {
+            self.server_url = active.server_url;
+            self.model = active.model;
+            self.api_key_set = active.api_key_set;
+            self.model_prefs = active.model_prefs;
         }
     }
 }
@@ -304,6 +434,7 @@ impl AppDatabase {
 
     /// 파일에서 읽은 직후의 정리: 실행 중이던 작업, 받다 만 답변, 예전 저장 형식
     fn normalize_after_load(&mut self) {
+        self.settings.ensure_provider_profiles();
         for conv in &mut self.conversations {
             for m in &mut conv.messages {
                 m.migrate_round_reasonings();
@@ -429,8 +560,10 @@ impl StoreManager {
             dev_servers: Vec::new(),
         };
 
+        let mut settings = AppSettings::default();
+        settings.ensure_provider_profiles();
         let db = AppDatabase {
-            settings: AppSettings::default(),
+            settings,
             projects: vec![default_project],
             conversations: Vec::new(),
             snapshots: Vec::new(),
@@ -661,5 +794,40 @@ mod tests {
         let m = &store.load().conversations[0].messages[0];
         assert!(!m.incomplete);
         assert!(m.content.starts_with("쓰다 만 답변") && m.content.contains("앱이 종료되어"), "{}", m.content);
+    }
+
+    #[test]
+    fn legacy_settings_migrate_into_provider_profiles_and_round_trip() {
+        let mut s: AppSettings = serde_json::from_str(
+            r#"{"serverUrl":"http://127.0.0.1:2345","model":"qwen3.5-9b","apiKeySet":true,"modelPrefs":{"qwen3.5-9b":{"contextLength":16384,"reasoning":"off"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(s.provider, LlmProvider::Lmstudio);
+        s.ensure_provider_profiles();
+
+        let lm = &s.providers[&LlmProvider::Lmstudio];
+        assert_eq!(lm.server_url, "http://127.0.0.1:2345");
+        assert_eq!(lm.model, "qwen3.5-9b");
+        assert!(lm.api_key_set);
+        assert_eq!(lm.model_prefs["qwen3.5-9b"].context_length, Some(16384));
+        assert_eq!(s.providers[&LlmProvider::Ollama].server_url, "http://localhost:11434");
+        assert_eq!(s.providers[&LlmProvider::OpenaiCompat].server_url, "http://localhost:8080");
+
+        // Ollama로 전환해 값을 설정한 뒤 다시 LM Studio로 돌아와도 기존 값이 남는다.
+        s.provider = LlmProvider::Ollama;
+        s.sync_profile_to_active();
+        assert_eq!(s.server_url, "http://localhost:11434");
+        assert_eq!(s.model, "");
+        assert!(!s.api_key_set);
+        s.model = "qwen3:8b".to_string();
+        s.model_prefs.insert("qwen3:8b".into(), ModelPref { context_length: Some(32768), reasoning: None });
+        s.sync_active_to_profile();
+
+        s.provider = LlmProvider::Lmstudio;
+        s.sync_profile_to_active();
+        assert_eq!(s.server_url, "http://127.0.0.1:2345");
+        assert_eq!(s.model, "qwen3.5-9b");
+        assert!(s.api_key_set);
+        assert_eq!(s.providers[&LlmProvider::Ollama].model, "qwen3:8b");
     }
 }

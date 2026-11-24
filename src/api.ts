@@ -6,6 +6,7 @@ import {
   Conversation,
   FileNode,
   FileSnapshot,
+  LlmProvider,
   LmModel,
   LoadedInstance,
   LoadPlan,
@@ -41,11 +42,17 @@ function loadFallbackDb(): AppDatabase {
   const initial: AppDatabase = {
     settings: {
       apiKey: "",
+      provider: "lmstudio",
       serverUrl: "http://localhost:1234",
       model: "",
       writingStyle: "executive_report",
       autoCompact: true,
       modelPrefs: {},
+      providers: {
+        lmstudio: { serverUrl: "http://localhost:1234", model: "", modelPrefs: {} },
+        ollama: { serverUrl: "http://localhost:11434", model: "", modelPrefs: {} },
+        openai_compat: { serverUrl: "http://localhost:8080", model: "", modelPrefs: {} },
+      },
     },
     projects: [
       {
@@ -112,12 +119,22 @@ export const BackendAPI = {
   },
 
   /** 저장된 API 키를 Windows 자격 증명 관리자에서 지운다. */
-  async clearApiKey(): Promise<AppSettings> {
+  async clearApiKey(provider?: LlmProvider): Promise<AppSettings> {
     if (isTauri()) {
-      return await invoke<AppSettings>("clear_api_key");
+      return await invoke<AppSettings>("clear_api_key", { provider });
     }
     const db = loadFallbackDb();
-    db.settings = { ...db.settings, apiKey: "", apiKeySet: false };
+    const target = provider ?? db.settings.provider ?? "lmstudio";
+    const providers = { ...db.settings.providers };
+    if (providers[target]) {
+      providers[target] = { ...providers[target]!, apiKeySet: false };
+    }
+    const isActive = target === (db.settings.provider ?? "lmstudio");
+    db.settings = {
+      ...db.settings,
+      providers,
+      ...(isActive ? { apiKey: "", apiKeySet: false } : {}),
+    };
     localStorage.setItem(FALLBACK_STORAGE_KEY, JSON.stringify(db));
     return db.settings;
   },

@@ -1,11 +1,11 @@
 # STATUS — 현재 상태 한 장
 
 ## 지금 목표
-원본 K-EXAONE Desktop 0.4.4를 LM Studio 전용 앱 "Any LM Desktop"(0.1.0)으로 바꾼다. 설계: `docs/superpowers/specs/2026-11-23-any-lm-desktop-design.md`.
+원본 K-EXAONE Desktop 0.4.4를 멀티 로컬 LLM(LM Studio · Ollama · OpenAI 호환) 데스크톱 작업 앱 "Any LM Desktop"(0.1.0)으로 바꾸고 고도화한다. 설계: `docs/superpowers/specs/2026-11-23-any-lm-desktop-design.md`, 멀티 공급자 설계: `docs/superpowers/specs/2026-11-24-multi-local-providers-design.md`.
 
 ## 진행 중
 - 계획 파일: `docs/superpowers/plans/2026-11-23-any-lm-desktop.md`
-- 후속 계획: `docs/superpowers/plans/2026-11-24-resume-and-agent-loop.md`
+- 후속 계획: `docs/superpowers/plans/2026-11-24-resume-and-agent-loop.md`, `docs/superpowers/plans/2026-11-24-multi-local-providers.md`
 - 작업 1(저장소 만들기와 인계 체계): 완료. 단계 6은 사용자 승인 뒤 2026-11-23에 GitHub 비공개 저장소 `kidarigun/any-lm-desktop`을 만들고 `origin`으로 `main`을 push했다.
 - 작업 2(정체성 분리와 업데이트 제거): 완료. 제품명·identifier·버전·크레이트명·자격 증명 서비스명·단일 실행 포트(45789 → 최종 검토 뒤 45790, MCP OAuth 포트도 45789 → 45791)·미리보기 호스트·대화상자 환경 변수·localStorage 접두어(`anylm_`)·기본 작업 폴더(`문서\AnyLM`)를 바꾸고, 업데이트 기능(`tauri-plugin-updater`, UpdatePanel, `check_update`/`install_update`, `checkUpdates` 설정, `make_latest_json.py`)과 `migrate_old_data_dir`을 삭제했다.
 
@@ -41,6 +41,7 @@
 - 개발 서버 T2/T3와 작업 패널 미리보기: 구현과 로컬 검증 완료. 실제 Windows 창에서 PowerShell, [서버 실행] 메뉴, 로컬 HTTP 페이지의 JavaScript 모듈을 확인했다. 프로젝트별 로그·종료, 시작 승인과 취소를 앱과 하니스가 같은 코드에서 처리한다. IPv6 리터럴은 기본 브라우저에서 연다(결정 0010).
 - 에이전트 루프: 고정 도구 라운드 상한 제거. 현재 턴과 완료된 턴 모두에서 오래된 도구 교환을 묶음 단위로 줄인다. 중지·승인과 도구별 되돌리기 기록을 저장한다(결정 0009).
 - 원본 잔재: 저장 파일·LM Studio 토큰 계정·런타임 표식·카탈로그 기본 주소·테스트 정리. 같은 Any LM 앱 데이터 안의 이전 저장 파일을 새 이름으로 불러온 실제 파일의 해시가 일치했다(결정 0011).
+- 멀티 로컬 LLM 공급자(LM Studio · Ollama · OpenAI 호환, 설계 `docs/superpowers/specs/2026-11-24-multi-local-providers-design.md`, 계획 `docs/superpowers/plans/2026-11-24-multi-local-providers.md`, 결정 0012): 완료. `store.rs`(`LlmProvider`·`ProviderProfile`·최상위 필드 하위 호환 동기화), `secrets.rs`(공급자별 Windows 자격 증명 계정 `lm-studio-api-token`·`ollama-api-token`·`openai-compat-api-token`), `src-tauri/src/providers/`(`mod.rs` 공통 로컬 URL 검증·`ProviderCapabilities`·공급자별 오류 문구·라우팅, `ollama.rs` `/api/tags`·`/api/ps`·`/api/show`·`/api/generate` 로드/언로드·`ollama serve` 분리 실행, `openai_compat.rs` 경로 정규화·`/v1/models`·즉시 `Ready` `plan_load`·빈 목록 시 수동 모델 ID 허용), `exaone.rs`(공급자별 채팅 URL·오류 문구 일반화·Ollama/llama.cpp/vLLM 컨텍스트 초과 패턴 추가), `harness.rs`(`ANYLM_PROVIDER`), 프런트엔드 `src/lmstudio/providerMeta.ts`·`ConnectionDialog.tsx`(3종 공급자 전환 탭·전환 대기 안내·기능별 버튼 표시)·`ModelPicker.tsx`·`App.tsx`(사이드바 `{공급자} 연결`·오류 띠 `[서버 시작]` 조건부 표시). LM Studio 기존 구현과 테스트는 그대로 유지하고 모의 HTTP 서버로 Ollama·OpenAI 호환 전 흐름을 검증함. 실제 Ollama/llama.cpp 데몬 실측은 아래 수동 확인 목록에 남긴다.
 
 ## 다음 할 일
 1. **남은 화면 QA**: 아래 수동 확인 목록의 기존 기능과 공급자 로그인·계정 확인을 이어서 점검한다. Windows 개발 앱에서 이번 변경의 터미널·로컬 미리보기·연결 창은 확인했다.
@@ -57,6 +58,8 @@
    - 그 밖에 검토의 "Can stay" 목록(서버 상태는 아무 HTTP 응답이면 켜짐으로 봄 등).
 
 ## 마지막 확인
+2026-11-24, 멀티 로컬 LLM 공급자(LM Studio · Ollama · OpenAI 호환) 구현 뒤: `npm test` 통과(30 파일, 183 통과·1 건너뜀), `npx tsc --noEmit` 오류 없음, `cd src-tauri && cargo test --lib` 293 통과·0 실패·10 무시(Ollama·OpenAI 호환 모의 HTTP, 설정 마이그레이션, 로컬 URL 보안, 컨텍스트 초과 문구, 하니스 `ANYLM_PROVIDER` 테스트 포함), `cargo check --all-targets` 경고·오류 없음, `npm run build` 성공.
+
 2026-11-24, 루프와 미리보기 리뷰 보완 뒤: `npm test` 181 통과·1 건너뜀, `npx tsc --noEmit` 통과, `cargo test --lib` 280 통과·10 무시, `npm run build` 성공. 후속 턴의 큰 도구 인자 줄이기, 실행 직전 자동 승인 확인, 점유된 포트와 서버 시작 취소를 회귀 검증했다. 실제 앱에서 9B와 35B가 32K로 표시되는 것, 로컬 모듈 실행과 부모 접근·Tauri 명령 거부를 확인했다.
 
 최종 LM Studio 9B 32K 실측: 기본 추론의 단일 요청은 첫 도구 호출 전에 하니스 10분 제한에 도달했다. 추론을 끈 단일 요청에서는 모델이 후속 도구들을 제안하고 호출하지 않는 경우가 있었다. `harness/dev-server.json` 최종 시나리오는 추론을 끈 4개 사용자 요청으로 진행해 시작 승인·로그·미리보기·종료 검사 6/6, 호출 8회, 73초였다. 9B는 32K로 로드되어 있다. `harness/report.py`의 추론 토큰 표기도 LM Studio 응답에 맞췄다.
@@ -147,8 +150,8 @@
 - 에이전트 작업 도중 컨텍스트가 넘칠 때 긴급 압축으로 이어 가는지(필요하면 9B를 8192로 로드해 확인)
 
 ## 마지막 작업자
-- 도구: codex
-- 모델: gpt-6.2-sol
+- 도구: antigravity
+- 모델: Gemini 4 Neon (High)
 - 시각: 2026-11-24
 
 ### 프로젝트 화면 · 메모리
@@ -185,3 +188,10 @@
 - 폴더의 파일을 고친 뒤 다시 물으면 고친 내용으로 답하는지(턴 시작 빠른 갱신), [다시 색인]을 누르면 "색인 중…" 뒤 마지막 색인 시각이 바뀌는지
 - [제거] → 확인 창 → 목록에서 빠지고, 그 폴더 내용으로는 더 답하지 않는지. 지식 폴더 안에 앱이 만든 파일이 하나도 없는지
 - 프로젝트 설정 창에서 지침을 고치면 [큰 편집기로 열기] 대신 "큰 편집기: 먼저 저장하세요"가 보이고, 고치지 않았으면 열리며 화면의 프로젝트가 바뀌지 않는지. 지침 편집기에서 바탕을 누른 뒤 Esc로도 닫히는지
+
+### 멀티 로컬 공급자 (Ollama · OpenAI 호환)
+- 연결 창 상단 탭(LM Studio · Ollama · OpenAI 호환)을 전환했을 때 각 공급자의 서버 주소(기본 1234 / 11434 / 8080)·기본 모델·모델별 컨텍스트·토큰 보유 표시가 서로 섞이지 않고 따로 기억되는지
+- 저장 전 다른 공급자 탭을 고르면 상태가 "전환 대기"로 보이고 이전 공급자 모델이 섞여 보이지 않으며, [저장]을 누른 뒤 사이드바 버튼 이름(`[Ollama 연결]`, `[OpenAI 호환 연결]`)과 모델 목록이 바뀌는지
+- Ollama가 꺼져 있을 때 [서버 시작]으로 `ollama serve`가 뜨는지, 모델 목록·로드 상태(`/api/ps`)·비전/도구/추론 배지(`/api/show`)·로드(num_ctx)·언로드(`keep_alive: 0`)·대화/도구 호출·추론 끄기가 실제 Ollama에서 정상 동작하는지
+- OpenAI 호환 로컬 서버(llama.cpp `llama-server` 또는 vLLM 등) 연결 시 [서버 시작]·[로드]·[언로드] 버튼이 숨겨지고, 대화창 모델 선택기가 단일 목록으로 표시되며, 입력한 컨텍스트 길이가 자동 압축 비율 계산에 반영되는지
+- 외부 주소(`https://api.openai.com/v1` 또는 LAN IP) 입력 시 로컬 전용 보안 오류 메시지로 차단되는지

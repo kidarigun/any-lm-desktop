@@ -1,10 +1,12 @@
-//! LM Studio API 토큰을 설정 파일(평문 JSON) 대신 Windows 자격 증명 관리자에 보관한다.
+//! 로컬 LLM 공급자 API 토큰을 설정 파일(평문 JSON) 대신 Windows 자격 증명 관리자에 보관한다.
+
+use crate::store::LlmProvider;
 
 pub const SERVICE: &str = "io.github.kidarigun.anylm-desktop";
 const ACCOUNT: &str = "lm-studio-api-token";
 const LEGACY_ACCOUNT: &str = "exaone-api-key";
 
-/// 저장된 키. 없으면 `None`.
+/// 저장된 LM Studio 키. 없으면 `None`.
 pub fn load_api_key() -> Result<Option<String>, String> {
     let current = load_secret(ACCOUNT)?;
     if current.is_some() {
@@ -27,6 +29,27 @@ pub fn delete_api_key() -> Result<(), String> {
     // 사용자가 삭제하면 이전 이름의 토큰까지 지워야 다시 불러오지 않는다.
     delete_secret(LEGACY_ACCOUNT)?;
     delete_secret(ACCOUNT)
+}
+
+pub fn load_provider_api_key(provider: LlmProvider) -> Result<Option<String>, String> {
+    match provider {
+        LlmProvider::Lmstudio => load_api_key(),
+        _ => load_secret(provider.secret_account()),
+    }
+}
+
+pub fn store_provider_api_key(provider: LlmProvider, key: &str) -> Result<(), String> {
+    match provider {
+        LlmProvider::Lmstudio => store_api_key(key),
+        _ => store_secret(provider.secret_account(), key),
+    }
+}
+
+pub fn delete_provider_api_key(provider: LlmProvider) -> Result<(), String> {
+    match provider {
+        LlmProvider::Lmstudio => delete_api_key(),
+        _ => delete_secret(provider.secret_account()),
+    }
 }
 
 /// MCP 서버의 환경 변수·헤더 값처럼 이름(account)별로 나눠 두는 비밀 값

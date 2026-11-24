@@ -35,10 +35,14 @@ describe("modelText", () => {
   });
   it("skips missing parts", () => {
     expect(describeModel({ ...qwen9b, params: null, quantization: undefined })).toBe("6.1GB");
+    expect(describeModel({ ...qwen9b, params: null, quantization: undefined, sizeBytes: 0 })).toBe("qwen3.5-9b");
+    expect(describeModel({ ...qwen9b, displayName: "qwen3.5-9b", params: null, quantization: undefined, sizeBytes: 0 })).toBe("");
   });
   it("labels load state", () => {
     expect(loadedLabel(qwen9b)).toBe("로드됨 · 32K");
     expect(loadedLabel(qwen35)).toBe("로드 안 됨");
+    expect(loadedLabel(qwen9b, false)).toBe("사용 가능 · 32K");
+    expect(loadedLabel(qwen35, false)).toBe("사용 가능");
   });
   it("lists capability badges", () => {
     expect(capabilityBadges(qwen9b)).toEqual(["vision", "tools", "reasoning"]);
