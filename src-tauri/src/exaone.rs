@@ -961,7 +961,7 @@ pub struct TurnRequest<'a> {
     /// 메시지를 보낸 화면 ("chat" | "project" | "code"). 화면에 맞는 지침을 고른다. 모르면 빈 문자열.
     pub mode: &'a str,
     /// 답변과 새 작업의 되돌리기 기록을 함께 저장한다.
-    pub checkpoint: Option<&'a (dyn Fn(&ChatMessage, &[FileSnapshot]) + Send + Sync)>,
+    pub checkpoint: Option<&'a (dyn Fn(&ChatMessage, &[FileSnapshot]) -> bool + Send + Sync)>,
     /// 턴 시작 때 지식 폴더에서 찾은 `[참고 자료]` 절(`knowledge::context_for_turn`). 시스템 프롬프트 뒤에 붙는다. 없으면 빈 문자열.
     pub knowledge: &'a str,
     /// 턴 시작 때 앱이 이번 메시지에 맞춰 고른 Skill(`skills::auto_for_turn`). 참고 자료 쌍 뒤, 마지막 사용자 메시지 바로 앞에 넣는다.
@@ -1269,19 +1269,78 @@ fn total_chars(msgs: &[Value]) -> usize {
         .sum()
 }
 
-/// 현재 요청 도중 누적된 오래된 도구 교환을 요청에서만 줄인다.
-/// assistant의 호출 묶음과 모든 tool 결과는 함께 남기거나 함께 뺀다.
+fn request_message_chars(m: &Value) -> usize {
+    16 + m["content"].as_str().map_or(0, |s| s.chars().count())
+        + m.get("tool_calls").map_or(0, |v| v.to_string().chars().count())
+}
+
+fn remember_pruned_tool(m: &Value, notes: &mut std::collections::VecDeque<String>) {
+    if let Some(calls) = m["tool_calls"].as_array() {
+        for call in calls {
+            let function = &call["function"];
+            let name = function["name"].as_str().unwrap_or("도구");
+            let args = function["arguments"].as_str().unwrap_or("");
+            let target = serde_json::from_str::<Value>(args).ok()
+                .and_then(|v| ["relative_path", "id", "query"].iter()
+                    .find_map(|key| v[key].as_str().map(|s| s.chars().take(105).collect::<String>())));
+            notes.push_back(match target {
+                Some(target) => format!("- {name} ({target})"),
+                None => format!("- {name}"),
+            });
+        }
+    } else if m["role"] == "tool" {
+        let excerpt: String = m["content"].as_str().unwrap_or("").chars().take(110).collect();
+        notes.push_back(format!("  결과: {}", excerpt.replace(['\n', '\r'], " ")));
+    }
+    while notes.len() > 16 {
+        notes.pop_front();
+    }
+}
+
+/// 완료된 턴의 호출 인자·결과를 먼저 줄인다. 사용자 질문과 답변 원문은 유지한다.
+fn roll_completed_tool_history(
+    messages: &mut Vec<Value>,
+    user_index: usize,
+    budget: usize,
+    notes: &mut std::collections::VecDeque<String>,
+) -> usize {
+    let mut size: usize = messages.iter().map(request_message_chars).sum();
+    if size <= budget || !messages[..user_index].iter().any(|m| m["tool_calls"].is_array()) {
+        return user_index;
+    }
+    let mut old = std::mem::take(messages).into_iter().enumerate().peekable();
+    while old.peek().is_some_and(|(i, _)| *i < user_index) {
+        let (_, message) = old.next().expect("앞 메시지가 있음");
+        if size <= budget || !message["tool_calls"].is_array() {
+            messages.push(message);
+            continue;
+        }
+        size = size.saturating_sub(request_message_chars(&message));
+        remember_pruned_tool(&message, notes);
+        while old.peek().is_some_and(|(i, m)| *i < user_index && m["role"] == "tool") {
+            let (_, result) = old.next().expect("도구 결과가 있음");
+            size = size.saturating_sub(request_message_chars(&result));
+            remember_pruned_tool(&result, notes);
+        }
+        if let Some(text) = message["content"].as_str().filter(|s| !s.is_empty()) {
+            let plain = json!({"role":"assistant","content":text});
+            size += request_message_chars(&plain);
+            messages.push(plain);
+        }
+    }
+    let adjusted = messages.len();
+    messages.extend(old.map(|(_, message)| message));
+    adjusted
+}
+
+/// 진행 중인 턴에서는 가장 최근의 완전한 도구 교환을 남긴다.
 fn roll_tool_history(
     messages: &mut Vec<Value>,
     user_index: usize,
     budget: usize,
     notes: &mut std::collections::VecDeque<String>,
 ) {
-    let cost = |m: &Value| -> usize {
-        16 + m["content"].as_str().map_or(0, |s| s.chars().count())
-            + m.get("tool_calls").map_or(0, |v| v.to_string().chars().count())
-    };
-    let mut size: usize = messages.iter().map(cost).sum();
+    let mut size: usize = messages.iter().map(request_message_chars).sum();
     if size <= budget {
         return;
     }
@@ -1291,7 +1350,7 @@ fn roll_tool_history(
     let Some(first) = groups.next() else { return };
     let mut end = first;
     for next in groups {
-        size = size.saturating_sub(messages[end..next].iter().map(cost).sum::<usize>());
+        size = size.saturating_sub(messages[end..next].iter().map(request_message_chars).sum::<usize>());
         end = next;
         if size <= budget {
             break;
@@ -1302,26 +1361,7 @@ fn roll_tool_history(
     }
     // 첫 호출 이전의 글과 원래 사용자 요청은 그대로 둔다.
     for m in messages.drain(first..end) {
-        if let Some(calls) = m["tool_calls"].as_array() {
-            for call in calls {
-                let function = &call["function"];
-                let name = function["name"].as_str().unwrap_or("도구");
-                let args = function["arguments"].as_str().unwrap_or("");
-                let target = serde_json::from_str::<Value>(args).ok()
-                    .and_then(|v| ["relative_path", "id", "query"].iter()
-                        .find_map(|key| v[key].as_str().map(|s| s.chars().take(105).collect::<String>())));
-                notes.push_back(match target {
-                    Some(target) => format!("- {name} ({target})"),
-                    None => format!("- {name}"),
-                });
-            }
-        } else if m["role"] == "tool" {
-            let excerpt: String = m["content"].as_str().unwrap_or("").chars().take(110).collect();
-            notes.push_back(format!("  결과: {}", excerpt.replace(['\n', '\r'], " ")));
-        }
-        while notes.len() > 16 {
-            notes.pop_front();
-        }
+        remember_pruned_tool(&m, notes);
     }
 }
 
@@ -1803,10 +1843,16 @@ pub const AUTO_APPROVABLE: [&str; 3] = ["run_python", "run_command", "start_serv
 /// "항상 허용"으로 바로 실행한 도구를 기다리는 최대 시간
 const AUTO_RUN_LIMIT: Duration = Duration::from_secs(200);
 
-fn is_auto_approved(project: &Project, record: &ToolExecutionRecord) -> bool {
-    record.status == "pending_approval"
-        && AUTO_APPROVABLE.contains(&record.tool_name.as_str())
-        && project.auto_approve.iter().any(|t| t == &record.tool_name)
+fn is_auto_approved<R: Runtime>(app: &AppHandle<R>, project: &Project, record: &ToolExecutionRecord) -> bool {
+    if record.status != "pending_approval" || !AUTO_APPROVABLE.contains(&record.tool_name.as_str()) {
+        return false;
+    }
+    let allowed = |p: &Project| p.auto_approve.iter().any(|t| t == &record.tool_name);
+    if let Some(state) = app.try_state::<crate::AppState>() {
+        return state.db.lock().is_ok_and(|db| db.projects.iter()
+            .find(|p| p.id == project.id && p.root_path == project.root_path).is_some_and(allowed));
+    }
+    allowed(project)
 }
 
 /// 한 라운드의 스트림 줄을 처리하고 화면으로 델타를 내보낸다.
@@ -1936,7 +1982,7 @@ pub async fn run_exaone_turn<R: Runtime>(
     let mut short_reply_used = false;
     // 생각만 하고 보이는 답 없이 끝난 라운드를 한 턴에 한 번만 다시 시킨다(작은 모델에서 잦음).
     let mut empty_nudged = false;
-    let user_index = api_messages.iter().rposition(|m| m["role"] == "user");
+    let mut user_index = api_messages.iter().rposition(|m| m["role"] == "user");
     let mut tool_notes = std::collections::VecDeque::new();
 
     loop {
@@ -1950,6 +1996,8 @@ pub async fn run_exaone_turn<R: Runtime>(
         if let Some(index) = user_index {
             let reserve = (budget / 8).min(1_800);
             let rolling_budget = budget.saturating_sub(reserve) >> compact_level.saturating_sub(1);
+            let index = roll_completed_tool_history(&mut api_messages, index, rolling_budget, &mut tool_notes);
+            user_index = Some(index);
             roll_tool_history(&mut api_messages, index, rolling_budget, &mut tool_notes);
         }
         let mut messages = compact_messages(&api_messages, level);
@@ -2376,12 +2424,18 @@ pub async fn run_exaone_turn<R: Runtime>(
             record.round = msg.round_contents.len().saturating_sub(1) as u32;
             // 사용자가 이 프로젝트에서 "항상 허용"한 도구는 묻지 않고 바로 실행한다.
             let mut needs_approval = needs_approval;
-            if let Some(project) = req.project.filter(|p| needs_approval && is_auto_approved(p, &record)) {
+            if let Some(project) = req.project.filter(|p| needs_approval && is_auto_approved(app, p, &record)) {
                 record.status = "running".to_string();
                 sink.tool(record.clone(), snap.clone());
                 let args: Value = serde_json::from_str(&record.arguments_json).unwrap_or_default();
-                let run = crate::run_approved_tool(app, Some(project), &record.id, &record.tool_name, &args, false);
-                match race_cancel(run, &cancel_flag, AUTO_RUN_LIMIT).await {
+                let run = crate::run_approved_tool(app, Some(project), &record.id, &record.tool_name, &args, false, &cancel_flag);
+                let outcome = if record.tool_name == "start_server" {
+                    // 서버 시작은 자체적으로 취소와 소유한 세션 정리를 끝낸 뒤 반환한다.
+                    Raced::Done(run.await)
+                } else {
+                    race_cancel(run, &cancel_flag, AUTO_RUN_LIMIT).await
+                };
+                match outcome {
                     Raced::Done(done) => {
                         record.status = done.status.to_string();
                         record.output = done.output;
@@ -2394,14 +2448,14 @@ pub async fn run_exaone_turn<R: Runtime>(
                 }
                 needs_approval = false;
             }
-            if let Some(s) = &snap {
-                new_snapshots.push(s.clone());
-            }
             paused_for_approval |= needs_approval;
             msg.tool_records.push(record.clone());
-            if let Some(save) = req.checkpoint {
+            let saved = req.checkpoint.is_some_and(|save| {
                 let snapshots = snap.as_ref().map(std::slice::from_ref).unwrap_or_default();
-                save(&checkpoint_message(&msg, None), snapshots);
+                save(&checkpoint_message(&msg, None), snapshots)
+            });
+            if let Some(snapshot) = snap.as_ref().filter(|_| !saved) {
+                new_snapshots.push(snapshot.clone());
             }
             sink.tool(record, snap);
         }
@@ -3115,6 +3169,24 @@ mod tests {
     }
 
     #[test]
+    fn active_turn_checks_current_automatic_approval() {
+        let app = tauri::test::mock_app();
+        let dir = tempfile::tempdir().unwrap();
+        let mut current = test_project(dir.path());
+        current.auto_approve.push("start_server".into());
+        let stale = current.clone();
+        app.manage(crate::AppState {
+            store: crate::store::StoreManager::new(dir.path()),
+            db: StdMutex::new(crate::store::AppDatabase { projects: vec![current], ..Default::default() }),
+            runs: Default::default(),
+        });
+        let record = rec("call1", "start_server", "pending_approval", "승인 대기", 0);
+        assert!(is_auto_approved(app.handle(), &stale, &record));
+        app.state::<crate::AppState>().db.lock().unwrap().projects[0].auto_approve.clear();
+        assert!(!is_auto_approved(app.handle(), &stale, &record));
+    }
+
+    #[test]
     fn api_messages_without_tools_send_plain_text() {
         let mut a = msg("assistant", "답변");
         a.tool_records = vec![rec("c1", "read_file", "completed", "본문", 0)];
@@ -3490,6 +3562,7 @@ mod tests {
                 assert_eq!(m.tool_records[0].snapshot_id.as_deref(), Some(snapshots[0].id.as_str()));
                 cancelled.store(true, Ordering::Relaxed);
             }
+            true
         };
         let (result, snapshots) = run_exaone_turn(app.handle(), TurnRequest {
             checkpoint: Some(&checkpoint),
@@ -3498,8 +3571,37 @@ mod tests {
         assert!(dir.path().join("first.txt").is_file());
         assert!(!dir.path().join("second.txt").exists());
         assert_eq!(result.tool_records.len(), 1);
-        assert_eq!(snapshots.len(), 1);
+        assert!(snapshots.is_empty(), "저장된 스냅샷을 마지막에 다시 추가하지 않는다");
         assert!(result.content.contains("중지했습니다"));
+    }
+
+    #[tokio::test]
+    async fn next_turn_rolls_old_tool_arguments_without_losing_the_new_question() {
+        let root = tempfile::tempdir().unwrap();
+        let mut earlier = msg("assistant", "보고서를 저장했습니다.");
+        earlier.round_contents = vec![String::new(), earlier.content.clone()];
+        for i in 0..6 {
+            let mut tool = rec(&format!("old-{i}"), "write_file", "completed", "저장됨", 0);
+            tool.arguments_json = json!({"relative_path":format!("{i}.txt"),"content":"내용".repeat(3500)}).to_string();
+            earlier.tool_records.push(tool);
+        }
+        let history = vec![msg("user", "보고서 작성"), earlier, msg("user", "다음 보고서 제목을 알려 줘")];
+        let (url, bodies) = mock_server(vec![vec![
+            sse(json!({"choices":[{"delta":{"content":"다음 제목"},"finish_reason":"stop"}]})), sse_done(),
+        ]], 0).await;
+        let app = tauri::test::mock_app();
+        let settings = test_settings(url);
+        let project = test_project(root.path());
+        let (out, _) = run_exaone_turn(app.handle(), TurnRequest {
+            context_length: 8192,
+            ..turn_req(&settings, Some(&project), &history)
+        }, Arc::new(AtomicBool::new(false))).await.unwrap();
+        assert_eq!(out.content, "다음 제목");
+        let sent = &bodies.lock().unwrap()[0]["messages"];
+        let messages = sent.as_array().unwrap();
+        assert_eq!(messages.last().unwrap()["content"], "다음 보고서 제목을 알려 줘");
+        assert!(messages.iter().any(|m| m["content"] == "보고서를 저장했습니다."));
+        assert!(sent.to_string().chars().count() < 10_000, "오래된 도구 인자가 지나치게 큽니다.");
     }
 
     fn test_settings(url: String) -> AppSettings {
@@ -4562,7 +4664,10 @@ content-length: {}
         let project = test_project(dir.path());
         let history = vec![msg("user", "a.txt 읽어 줘")];
         let saved: StdMutex<Vec<ChatMessage>> = StdMutex::new(Vec::new());
-        let checkpoint = |m: &ChatMessage, _: &[FileSnapshot]| saved.lock().unwrap().push(m.clone());
+        let checkpoint = |m: &ChatMessage, _: &[FileSnapshot]| {
+            saved.lock().unwrap().push(m.clone());
+            true
+        };
         let (out, _) = run_exaone_turn(
             app.handle(),
             TurnRequest {

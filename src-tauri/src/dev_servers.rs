@@ -48,6 +48,11 @@ mod tests {
                 "$listener = [System.Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, {port}); +                 $listener.Start(); Write-Output 'http://127.0.0.1:{port}/'; while ($true) {{ Start-Sleep -Seconds 1 }}"
             ),
         };
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let occupied_url = format!("http://{}/", occupied.local_addr().unwrap());
+        assert!(start(app.handle(), &project, "powershell",
+            &DevServerConfig { url: Some(occupied_url), ..config.clone() }).is_err());
+        assert!(list(app.handle(), "p").unwrap().is_empty());
         assert!(validate(dir.path(), &DevServerConfig { cwd: "../".into(), ..config.clone() }).is_err());
         let first = start(app.handle(), &project, "powershell", &config).unwrap();
         let second = start(app.handle(), &project, "powershell", &config).unwrap();
@@ -73,6 +78,21 @@ mod tests {
         assert_eq!(ready.url.as_deref(), Some(expected.as_str()));
         assert!(logged.contains(&expected));
         assert!(!is_listening(&local_url(&expected).unwrap()).await);
+
+        let flag = AtomicBool::new(false);
+        let args = serde_json::json!({"name":"취소 시험","command":"Start-Sleep -Seconds 30"});
+        let start = start_for_model(app.handle(), &project, &args, &flag);
+        let interrupt = async {
+            while list(app.handle(), "p").unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            flag.store(true, Ordering::Relaxed);
+        };
+        let (stopped, ()) = tokio::time::timeout(Duration::from_secs(4), async {
+            tokio::join!(start, interrupt)
+        }).await.unwrap();
+        assert!(stopped.unwrap_err().contains("중지"));
+        assert!(list(app.handle(), "p").unwrap().is_empty());
     }
 }
 // 프로젝트 개발 서버 감지, ConPTY 세션과 연결, 로컬 주소 확인.
@@ -80,6 +100,7 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use reqwest::{Url, redirect::Policy};
@@ -140,6 +161,9 @@ pub(crate) fn local_url(raw: &str) -> Result<Url, String> {
     }
     if url.port_or_known_default() == Some(0) {
         return Err(invalid());
+    }
+    if crate::is_app_url(&url) {
+        return Err("Any LM Desktop 자체 주소는 미리보기에서 열 수 없습니다.".into());
     }
     Ok(url)
 }
@@ -289,6 +313,13 @@ fn opened<R: Runtime>(
     }) {
         return Ok((existing.info.clone(), false));
     }
+    if let Some(address) = url.as_deref().and_then(|s| local_url(s).ok()) {
+        if probe_addrs(&address).into_iter().any(|addr|
+            std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok()
+        ) {
+            return Err(format!("이미 연결을 받고 있는 주소입니다: {address}"));
+        }
+    }
     let request = OpenRequest {
         cwd: cwd.to_string_lossy().into_owned(),
         cols: 100, rows: 30, kind: TerminalKind::Server,
@@ -308,22 +339,26 @@ fn opened<R: Runtime>(
     Ok((info, true))
 }
 
-async fn is_listening(url: &Url) -> bool {
-    let Some(port) = url.port_or_known_default() else { return false };
+fn probe_addrs(url: &Url) -> Vec<SocketAddr> {
+    let Some(port) = url.port_or_known_default() else { return Vec::new() };
     let ipv4 = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let ipv6 = SocketAddr::from((Ipv6Addr::LOCALHOST, port));
-    let connect = |addr| async move {
-        tokio::time::timeout(Duration::from_millis(200), tokio::net::TcpStream::connect(addr))
-            .await.is_ok_and(|r| r.is_ok())
-    };
     match url.host_str() {
-        Some("127.0.0.1") => connect(ipv4).await,
-        Some("[::1]") => connect(ipv6).await,
-        _ => {
-            let (a, b) = tokio::join!(connect(ipv4), connect(ipv6));
-            a || b
-        }
+        Some("127.0.0.1") => vec![ipv4],
+        Some("[::1]") => vec![ipv6],
+        _ => vec![ipv4, ipv6],
     }
+}
+
+async fn is_listening(url: &Url) -> bool {
+    tokio::time::timeout(Duration::from_millis(300), async {
+        for addr in probe_addrs(url) {
+            if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                return true;
+            }
+        }
+        false
+    }).await.unwrap_or(false)
 }
 
 async fn watch<R: Runtime>(app: AppHandle<R>, id: String) {
@@ -374,12 +409,18 @@ pub(crate) fn start<R: Runtime>(
     shell: &str,
     config: &DevServerConfig,
 ) -> Result<ServerInfo, String> {
+    start_tracked(app, project, shell, config).map(|(info, _)| info)
+}
+
+fn start_tracked<R: Runtime>(
+    app: &AppHandle<R>, project: &Project, shell: &str, config: &DevServerConfig,
+) -> Result<(ServerInfo, bool), String> {
     let (info, fresh) = opened(app, project, shell, config)?;
     if fresh {
         let _ = app.emit(SERVER_EVENT, &info);
         tauri::async_runtime::spawn(watch(app.clone(), info.terminal.id.clone()));
     }
-    Ok(info)
+    Ok((info, fresh))
 }
 
 pub(crate) fn list<R: Runtime>(app: &AppHandle<R>, project_id: &str) -> Result<Vec<ServerInfo>, String> {
@@ -416,15 +457,28 @@ fn server_output<R: Runtime>(app: &AppHandle<R>, server: &ServerInfo, lines: usi
 }
 
 pub(crate) async fn start_for_model<R: Runtime>(
-    app: &AppHandle<R>, project: &Project, args: &serde_json::Value,
+    app: &AppHandle<R>, project: &Project, args: &serde_json::Value, cancel: &AtomicBool,
 ) -> Result<String, String> {
+    let cancelled = "사용자가 개발 서버 시작을 중지했습니다.";
+    if cancel.load(Ordering::Relaxed) {
+        return Err(cancelled.into());
+    }
     let config = start_args(Path::new(&project.root_path), args)?;
     let shell = app.try_state::<AppState>().and_then(|state|
         state.db.lock().ok().map(|db| db.settings.terminal_shell.clone())
     ).unwrap_or_else(|| "powershell".into());
-    let mut info = start(app, project, &shell, &config)?;
+    let (mut info, created) = start_tracked(app, project, &shell, &config)?;
     let deadline = Instant::now() + START_TIMEOUT;
-    while info.status == "starting" {
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            if created && info.terminal.running {
+                stop(app, &project.id, &info.terminal.id)?;
+            }
+            return Err(cancelled.into());
+        }
+        if info.status != "starting" {
+            break;
+        }
         if Instant::now() >= deadline {
             info.status = "unconfirmed";
             break;
@@ -459,6 +513,9 @@ pub(crate) fn logs<R: Runtime>(
 pub(crate) fn stop<R: Runtime>(app: &AppHandle<R>, project_id: &str, id: &str) -> Result<String, String> {
     let mut server = find_server(app, project_id, id)?;
     let terminals = app.try_state::<TerminalManager>().ok_or("터미널을 사용할 수 없습니다.")?;
+    if let Some(manager) = app.try_state::<DevServers>() {
+        manager.0.lock().map_err(|e| e.to_string())?.remove(id);
+    }
     terminals.close(id)?;
     server.status = "exited";
     server.terminal.running = false;

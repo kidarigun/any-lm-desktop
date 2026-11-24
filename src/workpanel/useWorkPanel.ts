@@ -45,7 +45,7 @@ export interface WorkPanelController {
   autoPreview: boolean;
   setAutoPreview: (enabled: boolean) => void;
   startServer: (config: DevServerConfig) => Promise<void>;
-  openPreview: (url: string) => boolean;
+  openPreview: (url?: string) => boolean;
   error: string | null;
   clearError: () => void;
   showCanvas: boolean;
@@ -99,8 +99,8 @@ export function useWorkPanel({ cwd, projectId, canvasOpen, windowWidth, sidebarC
     setLastOpened("workpanel");
   }, []);
 
-  const openPreview = useCallback((url: string) => {
-    const target = previewDestination(url);
+  const openPreview = useCallback((url?: string) => {
+    const target = url === undefined ? { url: "", local: true } : previewDestination(url);
     if (!target?.local) return false;
     dispatch({ type: "openPreview", url: target.url });
     reveal();

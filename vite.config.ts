@@ -44,6 +44,7 @@ export default defineConfig(async () => ({
   server: {
     port: 1420,
     strictPort: true,
+    headers: { "Content-Security-Policy": "frame-ancestors 'none'", "X-Frame-Options": "DENY" },
     host: host || false,
     hmr: host
       ? {

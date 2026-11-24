@@ -3,11 +3,15 @@
     "id": "project-dev-server",
     "note": "승인 뒤 로컬 Node 서버 시작, 로그 읽기, 미리보기 열기 및 종료",
     "mode": "project",
+    "reasoning": "off",
     "files": {
       "server.cjs": "const http = require('node:http');\nconst server = http.createServer((req, res) => {\n  res.setHeader('Content-Type', 'text/html; charset=utf-8');\n  res.end('<h1>Any LM 개발 서버 테스트</h1>');\n});\nserver.listen(0, '127.0.0.1', () => {\n  console.log('ANYLM_SERVER_READY http://127.0.0.1:' + server.address().port + '/');\n});\n"
     },
     "turns": [
-      "이 프로젝트의 테스트 서버를 실제로 실행해서 확인해 줘. start_server에 command를 정확히 node server.cjs로 전달해. 실행 결과의 세션 ID로 server_logs를 한 번 읽고, 실행 결과 url로 open_preview를 호출한 다음 같은 ID로 stop_server를 호출해서 정리해. 마지막 답변에 결과를 알려 줘."
+      "테스트 서버를 실행해 줘. 비어 있는 포트를 자동 선택하니 start_server에 {\"command\":\"node server.cjs\"}만 전달하고 url과 cwd는 생략해. 실행 결과의 id와 url을 알려 줘.",
+      "지금 실행 중인 테스트 서버의 id를 넣어 server_logs 도구를 호출하고 로그의 준비 문구를 알려 줘.",
+      "지금 실행 중인 테스트 서버의 실제 url로 open_preview 도구를 호출해 미리보기 탭을 열어 줘.",
+      "지금 실행 중인 테스트 서버의 id를 넣어 stop_server 도구를 호출해서 종료해 줘."
     ],
     "approve": ["start_server"],
     "checks": [

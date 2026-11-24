@@ -36,16 +36,18 @@
 - 내장 웹 검색 MCP(결정 0006): 완료. `src/catalog/builtin.ts`에 공식 서버 8개(Tavily·Exa·Brave·Perplexity·Firecrawl·Kagi·Jina·Linkup, 분류 "웹 검색"), `mergeCatalogs`(내장 먼저·같은 id는 내장 우선·원격 `official` 무시), 찾아보기는 원격 목록이 없어도 내장 항목과 오류 띠를 보여 주고 카드에 "공식" 표시. 연결된 서버의 `catalogId`가 내장 검색 항목이면 `[MCP]` 절에 최신 정보는 웹 검색으로 찾고 URL을 밝히라는 한 줄(`ToolSpec.catalog_id`). 키 없이 Exa 실측(`cargo test --lib live_exa -- --ignored`): tools/list에 web_search_exa·web_fetch_exa, 검색 결과 본문 반환. 키가 필요한 제공사는 호출해 보지 않았다.
 - 지침 편집기 후속: 프로젝트 설정 창의 [큰 편집기로 열기]는 창의 값이 저장된 값과 같을 때만 쓸 수 있고(다르면 "큰 편집기: 먼저 저장하세요"), 화면의 프로젝트를 바꾸지 않는다. 편집기 Esc는 포커스가 창 밖이어도 듣고(창이 열려 있는 동안만 window 리스너), `role="dialog" aria-modal="true"`.
 - Skill 자동 불러오기 + 하니스 MCP(결정 0007): 완료. 앱이 턴 시작 때 요청에 맞는 Skill 하나를 고르고(`skills::select_for_message`: `/이름`, 또는 `-`가 들어 있거나 4글자 이상인 영문 이름(한글 이름은 `/`로만), 아니면 지식 폴더 토큰에서 한 글자·불용어를 뺀 토큰의 IDF 합 ≥2.0·맞은 토큰 ≥2·요청 쪽 비율 ≥0.25·2등과 0.5 차, 흔하지 않은 맞은 토큰이 이름 토큰이거나 2개 이상 — 수정 1·2차) 그 지침을 `[참고 자료]`처럼 질문 바로 앞 한 쌍으로 넣는다(머리 줄 `[Skill: 이름 — …]`, 예산 min(10000, ctx×1.5×0.20), 저장 안 함, 줄이기 기준·자동 압축 어림 포함). 같은 턴 첫 `load_skill` 재호출만 짧은 답, 승인 뒤 이어가기는 카드에 적힌 Skill을 다시 넣음, 고르지 못한 후속 요청은 앞 답변의 Skill을 최대 3턴 이어 넣음(Sticky, 전용 머리 줄 "앞 요청에서 쓰던 Skill… 다른 일이면 무시", 낱말 3개 이상인데 Skill과 겹치는 토큰이 없으면 안 넣음), 참고 자료와 합쳐 컨텍스트×1.5×0.25자 상한(참고 자료가 먼저 줄어듦), 추론만 하고 빈 답으로 멈춘 라운드는 한 번 재촉(`EMPTY_ANSWER_NUDGE`, 저장 안 함). 답변 맨 앞 도구 카드 "Skill 자동 불러옴: 이름"(`ToolExecutionRecord.automatic`, 다음 요청 기록에는 안 보냄). 설정 `skillAutoLoad`(기본 켜짐) — Skill 창 "설치됨" 탭 스위치. 하니스: 시나리오 `mcpServers`(앱의 McpManager로 연결, 끝나면 지움, `autoApprove` 밖 MCP 도구는 하니스가 승인하고 기록), `skillAutoLoad`, 검사 `toolCalledContains`·`skillAutoLoaded`(도구 검사는 자동 카드를 세지 않음), 검사 경로의 `{today}`·파일 이름 `*`, `harness/search.json`(Exa 키 없음). 실측(9B 8192 / 35B 32768, 로드돼 있던 그대로): proj-skill은 두 모델 모두 Skill이 자동으로 들어갔고 35B는 양식 그대로, 9B는 3번 중 2번 양식을 따름(1번은 생각만 하고 빈 답) — 검사 점수는 둘 다 2/5인데 `make_scenarios.py`의 검사 경로 날짜가 `2026-11-15`로 고정돼 있어서다(Skill은 "보고서를 쓰는 날짜"로 저장하라고 함). search-exa: 35B 3/3, 9B 2/3 두 번(검색은 하지만 답을 생각 안에만 쓰고 빈 답으로 끝남). 수정 1차 뒤 실측: proj-skill 9B 2/5·5/5·5/5(2/5는 양식은 지키고 파일 이름을 메모 날짜로 씀), 35B 5/5; search.json 9B 3/3·3/3(빈 답 재촉이 둘 다 들어가 답을 씀), 35B 3/3. 수정 2차 뒤 proj-skill 9B 5/5, 35B 5/5.
-- 오른쪽 작업 패널 + PTY 터미널(설계 `docs/superpowers/specs/2026-11-24-dev-server-preview-console.md` T1, 결정 0008): 완료. `terminal.rs`(portable-pty/ConPTY, 기본 `powershell.exe -NoLogo`, 설정 `terminalShell`로 pwsh(PATH에 있을 때만)/cmd, PATH 앞에 앱 Node.js·uv, 링 버퍼 256KB, 16ms 모아 보내기·UTF-8 경계 처리, 시작 DSR 백엔드 응답, 한도 8개, 닫기·앱 종료 때 taskkill /T + Job Object로 트리 전체 종료), 명령 `terminal_open/write/resize/close/list/snapshot/busy/shells`, 이벤트 `anylm-terminal-output {id,data,seq}`·`anylm-terminal-exit {id,code}`. 스냅샷은 문자열이 아니라 `{data, seq, running, exitCode}`(이벤트와 겹치지 않게, 결정 0008). 화면 `src/workpanel/`(xterm 6 + fit + web-links, 상단 터미널 버튼·Ctrl+`, 폭 320px~70% 기억, 탭·[+ 새 터미널]·×·종료됨 (코드 n)·[다시 시작], 캔버스 오른쪽·채팅창 400px+캔버스 360px+패널 320px이 안 들어가면 나중에 연 것만, 지연 로딩 실패 시 [다시 시도]). 실제 앱 창(`tauri dev`)에서는 아직 눈으로 보지 못했다 — 브라우저(웹뷰만)에 가짜 명령을 넣어 탭·색상·한글·입력·Ctrl+` 닫기/열기·복원·어두운 테마만 확인. 아래 수동 확인 목록 "작업 패널 · 터미널".
+- 오른쪽 작업 패널 + PTY 터미널(설계 `docs/superpowers/specs/2026-11-24-dev-server-preview-console.md` T1, 결정 0008): 완료. `terminal.rs`(portable-pty/ConPTY, 기본 `powershell.exe -NoLogo`, 설정 `terminalShell`로 pwsh(PATH에 있을 때만)/cmd, PATH 앞에 앱 Node.js·uv, 링 버퍼 256KB, 16ms 모아 보내기·UTF-8 경계 처리, 시작 DSR 백엔드 응답, 한도 8개, 닫기·앱 종료 때 taskkill /T + Job Object로 트리 전체 종료), 명령 `terminal_open/write/resize/close/list/snapshot/busy/shells`, 이벤트 `anylm-terminal-output {id,data,seq}`·`anylm-terminal-exit {id,code}`. 스냅샷은 문자열이 아니라 `{data, seq, running, exitCode}`(이벤트와 겹치지 않게, 결정 0008). 화면 `src/workpanel/`(xterm 6 + fit + web-links, 상단 터미널 버튼·Ctrl+`, 폭 320px~70% 기억, 탭·[+ 새 터미널]·×·종료됨 (코드 n)·[다시 시작], 캔버스 오른쪽·채팅창 400px+캔버스 360px+패널 320px이 안 들어가면 나중에 연 것만, 지연 로딩 실패 시 [다시 시도]). Windows 실제 앱에서 표시와 프로젝트·홈 경로, 열기·닫기를 확인했다. 나머지 조작은 아래 수동 확인 목록에 남긴다.
+
+- 개발 서버 T2/T3와 작업 패널 미리보기: 구현과 로컬 검증 완료. 실제 Windows 창에서 PowerShell, [서버 실행] 메뉴, 로컬 HTTP 페이지의 JavaScript 모듈을 확인했다. 프로젝트별 로그·종료, 시작 승인과 취소를 앱과 하니스가 같은 코드에서 처리한다. IPv6 리터럴은 기본 브라우저에서 연다(결정 0010).
+- 에이전트 루프: 고정 도구 라운드 상한 제거. 현재 턴과 완료된 턴 모두에서 오래된 도구 교환을 묶음 단위로 줄인다. 중지·승인과 도구별 되돌리기 기록을 저장한다(결정 0009).
+- 원본 잔재: 저장 파일·LM Studio 토큰 계정·런타임 표식·카탈로그 기본 주소·테스트 정리. 같은 Any LM 앱 데이터 안의 이전 저장 파일을 새 이름으로 불러온 실제 파일의 해시가 일치했다(결정 0011).
 
 ## 다음 할 일
-0. **마무리 검증**: T2/T3 및 원본 잔재 정리 완료. 실사용 앱에서 로컬 미리보기와 원형에서 이어받은 수동 확인 목록을 점검한다.
-1. **화면 수동 확인**: 아래 "수동 확인 목록"을 사용자와 함께 앱 화면에서 확인한다(`npm run tauri dev`). 문제가 나오면 고치고 목록에서 지운다.
-2. **인계 연습(완료 기준 9, 작업 12 단계 2)**: 완료. Codex가 인계 문서와 Git 상태를 대조해 포트 표기를 정정하고 후속 작업을 이어받았다. 작업 12 단계 3은 최종 화면 검증 뒤 마감한다.
-3. **GitHub 비공개 저장소**: 완료(2026-11-23, 사용자 승인). `origin` = https://github.com/kidarigun/any-lm-desktop (비공개), `main`이 `origin/main`을 추적. `upstream`(원본 k-exaone-desktop) push 주소는 `DISABLED` 유지. 이후 push는 작업을 마칠 때 사용자가 허락한 경우에만 한다.
-4. **미뤄 둔 사소한 점(최종 검토, 지금 고치지 않아도 됨)**:
+1. **남은 화면 QA**: 아래 수동 확인 목록의 기존 기능과 공급자 로그인·계정 확인을 이어서 점검한다. Windows 개발 앱에서 이번 변경의 터미널·로컬 미리보기·연결 창은 확인했다.
+2. **원격 반영**: GitHub 비공개 저장소 개설과 인계 연습은 완료했다. `main`이 `origin/main`을 추적한다. 이후 원격 푸시는 사용자가 허락한 경우에만 진행한다.
+3. **미뤄 둔 사소한 점(최종 검토, 지금 고치지 않아도 됨)**:
    - 9: AI 요약의 대화 글자 상한이 고정 60,000자이고 생각 켜짐을 물려받아 8K/32K에서 로컬 요약으로 자주 떨어짐 → 컨텍스트×1.5×0.6 상한, 요약은 생각 끄기 검토.
-   - 10: 승인 후 이어가기·수정 후 다시 보내기는 모델 준비를 하지 않고, 다시 보내기는 자동 압축도 하지 않음.
+   - 10: 수정 후 다시 보내기는 화면을 되돌리기 전에 모델 준비를 한다. 승인 후 이어가기에는 별도 준비 단계가 없으며, 다시 보내기에는 자동 요약 압축이 없다.
    - 11: [내리고 로드]가 다른 대화가 쓰는 모델을 내릴 수 있음(경고 없음).
    - 12: 통계 줄이 없는 답변(취소·실패)에는 모델 이름이 안 보임, 승인 뒤 다른 모델이 이어도 `model_key`는 처음 값.
    - 13: [다시 로드] 안내가 같은 모델의 인스턴스 하나만 내림(연결 창은 전부 내림).
@@ -55,6 +57,10 @@
    - 그 밖에 검토의 "Can stay" 목록(서버 상태는 아무 HTTP 응답이면 켜짐으로 봄 등).
 
 ## 마지막 확인
+2026-11-24, 루프와 미리보기 리뷰 보완 뒤: `npm test` 181 통과·1 건너뜀, `npx tsc --noEmit` 통과, `cargo test --lib` 280 통과·10 무시, `npm run build` 성공. 후속 턴의 큰 도구 인자 줄이기, 실행 직전 자동 승인 확인, 점유된 포트와 서버 시작 취소를 회귀 검증했다. 실제 앱에서 9B와 35B가 32K로 표시되는 것, 로컬 모듈 실행과 부모 접근·Tauri 명령 거부를 확인했다.
+
+최종 LM Studio 9B 32K 실측: 기본 추론의 단일 요청은 첫 도구 호출 전에 하니스 10분 제한에 도달했다. 추론을 끈 단일 요청에서는 모델이 후속 도구들을 제안하고 호출하지 않는 경우가 있었다. `harness/dev-server.json` 최종 시나리오는 추론을 끈 4개 사용자 요청으로 진행해 시작 승인·로그·미리보기·종료 검사 6/6, 호출 8회, 73초였다. 9B는 32K로 로드되어 있다. `harness/report.py`의 추론 토큰 표기도 LM Studio 응답에 맞췄다.
+
 2026-11-24, 루프 체크포인트 검토 뒤: `npm test` 180 통과·1 건너뜀, `npx tsc --noEmit` 통과, `cargo test --lib` 278 통과·10 무시. 하나의 응답에서 요청한 두 쓰기 중 첫 번째 직후 중지하면 두 번째 쓰기는 실행되지 않으며, 첫 번째 작업 기록과 스냅샷이 함께 전달된다.
 
 2026-11-24, 원본 의존 이름 정리 뒤: `npm test` 180 통과·1 건너뜀, `npx tsc --noEmit` 통과, `cargo test --lib` 277 통과·10 무시. 기본 목록의 오프라인 동작과 기존 Any LM 대화 파일의 새 경로 저장을 확인했다.
@@ -96,7 +102,7 @@
 | 6 | 70% 자동 압축·긴급 압축 | 부분 통과 — 화면 확인 필요 | `auto_compact_triggers_at_70_percent`·`auto_compact_respects_setting`·`auto_compact_skips_when_nothing_to_cover`, `summary_request_uses_conversation_model_and_reasoning_off`, `stream_overflow_error_escalates_compaction_instead_of_plain_retry`, `context_overflow_is_retried_with_shorter_history`, `detects_lm_studio_overflow` 통과. 압축 카드와 진행 문구는 눈으로 |
 | 7 | K-EXAONE 전용 요소 없음 | 통과(화면 문구는 눈으로 한 번 더) | `ui/noBrandText.test.ts` 통과. `git grep -i -E "rate|만료|low|high|max|update|업데이트|exaone|엑사원" -- src`를 훑어 판정: 남은 것은 Tailwind `max-w-*`·`Math.max`·`updated`(대화 갱신)·내부 이름(`onExaoneStream`, `exaone-stream`, `exaone-ordered`, 드래그 MIME)뿐이고 호출 한도·키 만료·추론 강도 low/high/max·업데이트 화면은 없음. 사소한 잔재 2건(화면에 안 보임): `src/types.ts:183` 주석의 "하루 호출 한도", `src/api.ts:488` 카탈로그 기본 주소 `kidarigun/exaone-catalog` |
 | 8 | 모든 테스트 통과 | 통과 | 위 세 명령: 114 / 오류 0 / 159 |
-| 9 | 인계 연습 | 사용자와 함께 진행 예정 | 작업 12 단계 2 |
+| 9 | 인계 연습 | 통과 | 작업 12 단계 2. Codex가 인계 문서와 실제 Git을 대조하고 후속 작업을 커밋했다. |
 
 ## 결정 필요
 - 최종 원격 푸시는 사용자 승인 후 진행한다.
@@ -120,7 +126,7 @@
 
 ### LM Studio 연결 창
 - 서버 주소에 `http://localhost:1234/v1`을 넣고 저장해도 모델 목록이 보이고 대화가 되는지
-- 두 모델이 보이고 9B 행이 '로드됨 · 32K'인지, 연결 점이 맞게 바뀌는지
+- 연결 점이 서버 정지·재시작에 맞게 바뀌는지. 두 모델의 '로드됨 · 32K' 표시는 실제 앱에서 확인함
 - 개발자 도구에서 `await window.__TAURI__.core.invoke("lm_list_models")` → 모델 2개
 - LM Studio 화면에서 모델별 GPU 설정(전문가 가중치 CPU로)을 저장해 둔 뒤 앱으로 로드해도 그 값이 유지되는지 (결정 기록 0002)
 
@@ -141,8 +147,8 @@
 - 에이전트 작업 도중 컨텍스트가 넘칠 때 긴급 압축으로 이어 가는지(필요하면 9B를 8192로 로드해 확인)
 
 ## 마지막 작업자
-- 도구: claude-code
-- 모델: Claude Opus 5.5
+- 도구: codex
+- 모델: gpt-6.2-sol
 - 시각: 2026-11-24
 
 ### 프로젝트 화면 · 메모리
@@ -150,8 +156,8 @@
 - 지침 편집기: 지침 카드 [편집] → [서식 예시]로 4종(보고서·문서 작성/코딩/자료 조사·요약/번역·교정) 넣기(비어 있으면 대체, 있으면 끝에 덧붙임), "n자 · 약 m토큰 · 컨텍스트의 x%"가 입력 중 바뀌고 10% 넘으면 노란색인지, 저장 뒤 새 대화에서 모델이 그 지침을 따르는지(시스템 프롬프트 반영), Esc·취소 때 변경 확인이 뜨는지
 
 ### 작업 패널 · 터미널
-- 상단 바 오른쪽 터미널 아이콘(툴팁 "터미널 (Ctrl+`)")과 Ctrl+`(채팅 입력란에 커서가 있을 때도)로 패널이 열리고 닫히는지, 처음 열면 PowerShell 탭이 하나 생기는지, 앱을 다시 켜도 열림 상태·폭이 남는지
-- 터미널이 지금 CSP에서 정상으로 그려지는지(글자·커서·선택), 프로젝트 화면이면 프로젝트 폴더, 일반 채팅이면 사용자 홈에서 시작하는지
+- Ctrl+`(채팅 입력란에 커서가 있을 때도) 단축키와 다시 켰을 때 폭 복원. 상단 버튼으로 열기·닫기, PowerShell 첫 탭·프로젝트 및 홈 시작 경로는 실제 Windows 창에서 확인함
+- 터미널 텍스트 선택 확인. 현재 CSP의 글자·커서와 어두운 테마는 실제 Windows 창에서 확인함
 - `dir`, `node -v`(앱이 Node.js를 설치했으면 그 버전), `Write-Host -ForegroundColor Green hi`(초록), 진행 표시(임시 폴더에서 `npm i lodash`, 또는 `Invoke-WebRequest https://nodejs.org/dist/index.json -OutFile $env:TEMP\index.json`), 한글 출력(`echo 한글`)
 - `ping -t localhost` 중 Ctrl+C로 멈추는지, 글자를 선택하고 Ctrl+C → 복사(멈추지 않음), Ctrl+V 붙여넣기
 - 탭 여러 개 열기·고르기·닫기, 9번째는 "최대 8개" 안내, 패널을 닫았다 열어도 출력이 남아 있는지, 셸 선택 상자(명령 프롬프트/PowerShell 7)

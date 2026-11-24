@@ -19,7 +19,7 @@ def load(run_dir):
 
 
 def speed(t):
-    """글자가 나오기 시작한 뒤의 초당 출력 토큰 수"""
+    """응답 헤더를 받은 뒤의 초당 출력 토큰 수"""
     usage = t.get("usage") or {}
     out = usage.get("completion_tokens") or 0
     ms = t["totalMs"] - (t.get("headersMs") or 0)
@@ -42,12 +42,14 @@ def summary(run_dir):
         for ti, turn in enumerate(d["turns"]):
             for ri, t in enumerate(turn["traces"]):
                 u = t.get("usage") or {}
+                completion_details = u.get("completion_tokens_details") or {}
+                reasoning_tokens = completion_details.get("reasoning_tokens", u.get("reasoning_tokens", 0)) or 0
                 tools = ",".join(c["name"] for c in t["toolCalls"]) or "-"
                 first = t.get("firstContentMs") or t.get("firstToolMs")
                 print(f"   턴{ti + 1} 라운드{ri + 1}: {t['totalMs'] / 1000:6.1f}초"
                       f" | 첫 글·도구 {first / 1000 if first else 0:6.1f}초"
                       f" | 최장 멈춤 {t['maxGapMs'] / 1000:5.1f}초"
-                      f" | 입력 {u.get('prompt_tokens', 0):6d} 출력 {u.get('completion_tokens', 0):6d} (추론 {u.get('reasoning_tokens', 0):6d})"
+                      f" | 입력 {u.get('prompt_tokens', 0):6d} 출력 {u.get('completion_tokens', 0):6d} (추론 {reasoning_tokens:6d})"
                       f" | {speed(t):5.1f} 토큰/초"
                       f" | 종료 {t.get('finishReason')} | 도구 {tools}"
                       f"{' | 오류 ' + t['error'][:80] if t.get('error') else ''}")

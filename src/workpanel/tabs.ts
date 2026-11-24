@@ -76,7 +76,8 @@ export function tabsReducer(state: TabsState, action: TabsAction): TabsState {
       const existing = state.tabs.find((t) => t.kind === "preview" && t.url === action.url);
       if (existing) return { ...state, activeKey: existing.key };
       const tab: PreviewTab = {
-        kind: "preview", key: `preview-${action.url}`, url: action.url, title: new URL(action.url).host,
+        kind: "preview", key: `preview-${action.url}`, url: action.url,
+        title: action.url ? new URL(action.url).host : "미리보기",
       };
       return { tabs: [...state.tabs, tab], activeKey: tab.key };
     }

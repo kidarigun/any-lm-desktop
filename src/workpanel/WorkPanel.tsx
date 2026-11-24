@@ -112,6 +112,10 @@ export function WorkPanel({ panel, isDark, windowWidth, shell, onShellChange, on
           <span className="hidden min-[1250px]:inline">새 터미널</span>
         </button>
         <ServerMenu key={panel.projectId} panel={panel} />
+        <button type="button" onClick={() => panel.openPreview()} title="미리보기 열기" aria-label="미리보기 열기"
+          className="shrink-0 rounded-md p-1.5 text-stone-600 hover:bg-stone-100 dark:text-stone-300 dark:hover:bg-stone-700">
+          <Globe size={15} />
+        </button>
         <div className="flex-1" />
         {shells.length > 0 && (
           <select

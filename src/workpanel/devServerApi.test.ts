@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { previewDestination } from "./devServerApi";
+import { previewDestination, previewFrameUrl } from "./devServerApi";
 
 describe("개발 미리보기 주소", () => {
   it("로컬 주소를 정규화하고 외부 사이트는 브라우저 대상으로 표시한다", () => {
@@ -9,5 +9,12 @@ describe("개발 미리보기 주소", () => {
     expect(previewDestination("https://localhost.example.com/")?.local).toBe(false);
     expect(previewDestination("https://localhost@example.com/")).toBeNull();
     expect(previewDestination("file:///C:/secret")).toBeNull();
+  });
+
+  it("앱 자체는 프레임에 넣지 않고 IPv6 주소를 다른 호스트로 바꾸지 않는다", () => {
+    expect(previewDestination("http://localhost:1420/settings", "http://localhost:1420")).toBeNull();
+    expect(previewDestination("http://tauri.localhost/")).toBeNull();
+    expect(previewFrameUrl("http://[::1]:8000/")).toBeNull();
+    expect(previewFrameUrl("http://localhost:8000/")).toBe("http://localhost:8000/");
   });
 });

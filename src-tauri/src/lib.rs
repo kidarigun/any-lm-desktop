@@ -221,12 +221,12 @@ fn merge_tool_snapshots(db: &mut AppDatabase, snapshots: impl IntoIterator<Item 
 }
 
 /// 중간 답변과 작업의 되돌리기 기록을 한 저장 파일에 반영한다.
-fn save_checkpoint(state: &AppState, conversation_id: &str, msg: &ChatMessage, snapshots: &[FileSnapshot]) {
-    let Ok(mut db) = state.db.lock() else { return };
-    let Ok(conv) = find_conv_mut(&mut db, conversation_id) else { return };
+fn save_checkpoint(state: &AppState, conversation_id: &str, msg: &ChatMessage, snapshots: &[FileSnapshot]) -> bool {
+    let Ok(mut db) = state.db.lock() else { return false };
+    let Ok(conv) = find_conv_mut(&mut db, conversation_id) else { return false };
     upsert_message(conv, msg.clone());
     merge_tool_snapshots(&mut db, snapshots.iter().cloned());
-    let _ = state.store.save(&db);
+    state.store.save(&db).is_ok()
 }
 
 #[tauri::command]
@@ -1335,6 +1335,7 @@ pub(crate) async fn run_approved_tool<R: tauri::Runtime>(
     tool_name: &str,
     args: &Value,
     always: bool,
+    cancel: &std::sync::atomic::AtomicBool,
 ) -> ApprovedRun {
     let project_id = project.map(|p| p.id.clone()).unwrap_or_default();
     let root = project.map(|p| PathBuf::from(&p.root_path)).unwrap_or_default();
@@ -1390,7 +1391,7 @@ pub(crate) async fn run_approved_tool<R: tauri::Runtime>(
             }
         }
         "start_server" => match project {
-            Some(project) => match dev_servers::start_for_model(app, project, args).await {
+            Some(project) => match dev_servers::start_for_model(app, project, args, cancel).await {
                 Ok(result) => ("completed", result),
                 Err(err) => ("error", err),
             },
@@ -1531,7 +1532,7 @@ async fn resolve_tool_approval(
 
     // 2) 잠금 밖에서 실제 작업 실행
     let ApprovedRun { status, output, snapshot: new_snap, produced } = if approve {
-        run_approved_tool(&app, project.as_ref(), &tool_id, &tool_name, &args, always == Some(true)).await
+        run_approved_tool(&app, project.as_ref(), &tool_id, &tool_name, &args, always == Some(true), &run.cancel_flag()).await
     } else {
         ApprovedRun {
             status: "rejected",

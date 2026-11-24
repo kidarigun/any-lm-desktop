@@ -19,12 +19,12 @@ export interface ServerInfo {
   url: string | null;
 }
 
-export function previewDestination(input: string): { url: string; local: boolean } | null {
+export function previewDestination(input: string, appOrigin = globalThis.location?.origin): { url: string; local: boolean } | null {
   try {
     const url = new URL(input.trim());
     if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password || url.port === "0") return null;
     if (url.hostname === "0.0.0.0") url.hostname = "localhost";
-    if (["ipc.localhost", "tauri.localhost"].includes(url.hostname)) return null;
+    if (url.origin === appOrigin || ["ipc.localhost", "tauri.localhost"].includes(url.hostname)) return null;
     const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) || url.hostname.endsWith(".localhost");
     return { url: url.href, local };
   } catch {
@@ -32,11 +32,10 @@ export function previewDestination(input: string): { url: string; local: boolean
   }
 }
 
-/** CSP의 호스트 규칙에서 IPv6 리터럴에 대응하는 루프백 호스트를 쓴다. */
-export function previewFrameUrl(raw: string): string {
-  const url = new URL(raw);
-  if (url.hostname === "[::1]") url.hostname = "localhost";
-  return url.href;
+/** 프레임 CSP에서 지원하지 않는 IPv6 리터럴은 입력한 주소로 브라우저에서 연다. */
+export function previewFrameUrl(raw: string): string | null {
+  const target = previewDestination(raw);
+  return target?.local && new URL(target.url).hostname !== "[::1]" ? target.url : null;
 }
 
 export const DevServerAPI = {

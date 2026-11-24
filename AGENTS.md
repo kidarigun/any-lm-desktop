@@ -26,6 +26,7 @@ Rust (`src-tauri/src/`)
 - `python_runner.rs` — 프로젝트 안 Python 스크립트 실행. `runtime.rs` — 앱 전용 Python/Node/uv 설치·관리.
 - `runs.rs` — 대화별 실행 중복 방지와 중지 플래그.
 - `terminal.rs` — 작업 패널 터미널(PTY, `portable-pty`/ConPTY): 세션 관리·링 버퍼·UTF-8 이어 붙이기·ANSI 제거(`plain_text`)·Job Object+taskkill 트리 종료, `terminal_*` 명령과 `anylm-terminal-*` 이벤트(결정 0008, 테스트는 `terminal_tests.rs`).
+- `dev_servers.rs` — 프로젝트 개발 서버 감지·실행·중복 방지·로컬 미리보기, ConPTY 로그와 포트 확인, 승인형 시작·프로젝트별 로그/종료(결정 0010, 하니스 `harness/dev-server.json`).
 - `secrets.rs` — Windows 자격 증명 관리자(LM Studio API 토큰·MCP 비밀 값 보관).
 - `single_instance.rs` — 앱 중복 실행 방지.
 - `harness.rs` — 실제 LM Studio 서버로 에이전트 루프를 돌려 보는 테스트 하니스(`ANYLM_*` 환경 변수, 시나리오 `mcpServers`로 앱의 MCP 관리자 연결).
@@ -39,7 +40,7 @@ Rust (`src-tauri/src/`)
 - `explorer/` — 파일 탐색기·@파일 멘션. `diff/` — 변경 보기와 이력.
 - `mcp/` — MCP 대화상자. `skills/` — Skill 대화상자와 "Skill 자동 불러오기" 스위치·카드 이름표 규칙(`autoLoad`). `catalog/` — 카탈로그 화면과 규칙(`catalog.ts`), 앱에 내장한 공식 웹 검색 MCP 8개(`builtin.ts`, 원격 목록과 `mergeCatalogs`로 합침. 결정 0006).
 - `python/` — Python 실행 대화상자. `runtime/` — 실행 환경 패널.
-- `workpanel/` — 오른쪽 작업 패널: 열기/닫기·폭·Ctrl+`·캔버스와 함께 보기 규칙(`panelState`), 탭 모델(`tabs`, T2의 서버·미리보기 탭 자리), 상태 훅(`useWorkPanel`), 패널(`WorkPanel`, 처음 열 때 불러옴)·상단 버튼(`WorkPanelToggle`)·xterm 화면(`TerminalView`, `xtermTheme`), 명령 래퍼(`terminalApi`).
+- `workpanel/` — 오른쪽 작업 패널: 열기/닫기·폭·Ctrl+`·캔버스와 함께 보기(`panelState`), 셸/서버/미리보기 탭(`tabs`), 상태 훅(`useWorkPanel`), 패널(`WorkPanel`, 지연 로딩)·터미널(`TerminalView`, `terminalApi`)·서버 실행(`ServerMenu`, `devServerApi`)·로컬 미리보기(`PreviewView`).
 - `security/` — HTML 정화. `ui/` — 패널 크기 조절·스크롤바 공용 UI, 화면 문구 브랜드 검사 테스트(`noBrandText`).
 
 그 밖: `harness/` 실측 시나리오와 결과 요약 스크립트, `scripts/third_party_notices.py`(THIRD_PARTY_NOTICES 생성), `docs/handoff/` 인계 문서, `docs/decisions/` 결정 기록, `docs/superpowers/` 설계·계획.

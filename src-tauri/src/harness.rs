@@ -58,6 +58,8 @@ struct Scenario {
     /// "chat" 또는 "project"
     mode: String,
     tuning: Tuning,
+    /// 시나리오에서만 `on`이나 `off`를 지정한다. 비어 있으면 모델 기본 동작을 따른다.
+    reasoning: Option<String>,
     instructions: String,
     /// 프로젝트 폴더에 미리 만들어 둘 파일 (상대 경로 → 내용)
     files: BTreeMap<String, String>,
@@ -258,7 +260,7 @@ fn unsafe_reason(tool: &str, args: &Value, root: &Path) -> Option<String> {
             .and_then(|p| std::fs::read_to_string(p).ok());
         if args["command"].as_str() == Some("node server.cjs")
             && matches!(args["cwd"].as_str(), None | Some("" | "."))
-            && args["url"].is_null()
+            && (args["url"].is_null() || args["url"].as_str() == Some(""))
             && expected.is_some() && script.as_deref() == expected
         {
             return None;
@@ -539,6 +541,9 @@ async fn live() {
         }
 
         let mut settings = base_settings.clone();
+        if let Some(reasoning @ ("on" | "off")) = sc.reasoning.as_deref() {
+            settings.model_prefs.entry(config.model.clone()).or_default().reasoning = Some(reasoning.into());
+        }
         if let Some(on) = sc.skill_auto_load {
             settings.skill_auto_load = on;
         }
@@ -666,7 +671,8 @@ async fn live() {
                     } else if let Some(why) = &blocked {
                         ("rejected".to_string(), format!("사용자가 실행을 거부했습니다. ({})", why), Vec::new())
                     } else {
-                        let run = run_approved_tool(app.handle(), project.as_ref(), &tool_id, &tool_name, &args, false);
+                        let approval_cancel = AtomicBool::new(false);
+                        let run = run_approved_tool(app.handle(), project.as_ref(), &tool_id, &tool_name, &args, false, &approval_cancel);
                         match tokio::time::timeout_at(deadline, run).await {
                             Ok(run) => (run.status.to_string(), run.output, run.produced),
                             Err(_) => ("error".into(), "하니스 승인 실행 검증 시간이 지났습니다.".into(), Vec::new()),
@@ -733,6 +739,7 @@ async fn live() {
             "id": sc.id,
             "startedAt": started_at,
             "mode": sc.mode,
+            "reasoning": sc.reasoning,
             "tuning": sc.tuning,
             "incomplete": incomplete,
             "wallMs": sc_start.elapsed().as_millis() as u64,

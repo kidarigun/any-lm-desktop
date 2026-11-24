@@ -538,4 +538,5 @@ it("has no K-EXAONE branding in UI sources", () => {
 
 - [x] **Step 2: 인계 연습(완료 기준 9).** 2026-11-24에 Codex가 Claude Code의 인계 문서와 Git 상태를 대조한 뒤 포트 표기를 정정하고 후속 작업을 이어받았다. STATUS와 LOG를 갱신하고 `Agent: codex`로 기록한다.
 
-- [ ] **Step 3: 최종 검증과 커밋** — 세 검증 명령 PASS → `docs: record acceptance results and handoff drill`. 사용자 승인을 받은 뒤 `git push origin main`.
+- [x] **Step 3: 최종 로컬 검증과 커밋** — 세 검증 명령 통과. 인계 결과, 실제 앱 확인 결과와 남은 수동 확인 목록을 STATUS·LOG에 기록했다.
+- [ ] **원격 반영** — 사용자 승인 뒤 `git push origin main`.
