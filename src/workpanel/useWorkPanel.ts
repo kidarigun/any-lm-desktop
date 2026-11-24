@@ -13,10 +13,12 @@ import {
 } from "./panelState";
 import { EMPTY_TABS, tabsReducer, type TabsState } from "./tabs";
 import { TerminalAPI } from "./terminalApi";
+import { DevServerAPI, previewDestination, type DevServerConfig, type ServerInfo } from "./devServerApi";
 
 export interface WorkPanelOptions {
   /** 새 터미널의 작업 폴더 (비우면 사용자 홈) */
   cwd: string;
+  projectId?: string;
   /** 문서 캔버스가 열려 있는지 (좁은 창에서 둘 중 나중에 연 것만 보인다) */
   canvasOpen: boolean;
   windowWidth: number;
@@ -38,6 +40,12 @@ export interface WorkPanelController {
   selectTab: (key: string) => void;
   closeTab: (key: string) => Promise<void>;
   restartTab: (key: string) => Promise<void>;
+  projectId?: string;
+  servers: Record<string, ServerInfo>;
+  autoPreview: boolean;
+  setAutoPreview: (enabled: boolean) => void;
+  startServer: (config: DevServerConfig) => Promise<void>;
+  openPreview: (url: string) => boolean;
   error: string | null;
   clearError: () => void;
   showCanvas: boolean;
@@ -46,18 +54,23 @@ export interface WorkPanelController {
 
 const DEFAULT_COLS = 100;
 const DEFAULT_ROWS = 30;
+const AUTO_PREVIEW_KEY = "anylm_auto_dev_preview";
 
 /**
  * 작업 패널 상태: 열림·폭(기억), 터미널 탭, Ctrl+` 단축키, 셸 종료 알림.
  * 탭 상태는 App에 두므로 패널을 닫아도 세션과 탭은 그대로 남는다.
  */
-export function useWorkPanel({ cwd, canvasOpen, windowWidth, sidebarCollapsed }: WorkPanelOptions): WorkPanelController {
+export function useWorkPanel({ cwd, projectId, canvasOpen, windowWidth, sidebarCollapsed }: WorkPanelOptions): WorkPanelController {
   const [open, setOpenState] = useState<boolean>(() => loadWorkPanelOpen());
   const [width, setWidth] = useState<number>(() => loadWorkPanelWidth());
   const [tabs, dispatch] = useReducer(tabsReducer, EMPTY_TABS);
   const [error, setError] = useState<string | null>(null);
   const [lastOpened, setLastOpened] = useState<SidePanel>(() => (loadWorkPanelOpen() ? "workpanel" : "canvas"));
   const [restored, setRestored] = useState<boolean>(() => !TerminalAPI.available());
+  const [servers, setServers] = useState<Record<string, ServerInfo>>({});
+  const [autoPreview, setAutoPreview] = useState(() => {
+    try { return localStorage.getItem(AUTO_PREVIEW_KEY) !== "off"; } catch { return true; }
+  });
 
   const cwdRef = useRef(cwd);
   cwdRef.current = cwd;
@@ -68,8 +81,88 @@ export function useWorkPanel({ cwd, canvasOpen, windowWidth, sidebarCollapsed }:
   const restoredRef = useRef(restored);
   restoredRef.current = restored;
   const opening = useRef(false);
+  const projectRef = useRef(projectId);
+  projectRef.current = projectId;
+  const autoPreviewRef = useRef(autoPreview);
+  autoPreviewRef.current = autoPreview;
+  const autoOpened = useRef(new Set<string>());
+  const serversRef = useRef(servers);
+  serversRef.current = servers;
 
   useEffect(() => saveWorkPanelOpen(open), [open]);
+  useEffect(() => {
+    try { localStorage.setItem(AUTO_PREVIEW_KEY, autoPreview ? "on" : "off"); } catch { /* 저장소를 사용할 수 없음 */ }
+  }, [autoPreview]);
+
+  const reveal = useCallback(() => {
+    setOpenState(true);
+    setLastOpened("workpanel");
+  }, []);
+
+  const openPreview = useCallback((url: string) => {
+    const target = previewDestination(url);
+    if (!target?.local) return false;
+    dispatch({ type: "openPreview", url: target.url });
+    reveal();
+    return true;
+  }, [reveal]);
+
+  const acceptServer = useCallback((server: ServerInfo, activate: boolean, mayAutoOpen: boolean) => {
+    const id = server.terminal.id;
+    setServers((prior) => {
+      if (server.status === "starting" && prior[id] && prior[id].status !== "starting") return prior;
+      return { ...prior, [id]: server };
+    });
+    if (activate) {
+      dispatch({ type: "open", info: server.terminal });
+      reveal();
+    } else {
+      dispatch({ type: "restore", sessions: [server.terminal] });
+    }
+    if (mayAutoOpen && server.status === "ready" && server.url && autoPreviewRef.current && !autoOpened.current.has(id)) {
+      autoOpened.current.add(id);
+      openPreview(server.url);
+    }
+  }, [openPreview, reveal]);
+
+  useEffect(() => {
+    if (!TerminalAPI.available()) return;
+    let disposed = false;
+    const off: Array<() => void> = [];
+    const keep = (sub: Promise<() => void>) => void sub.then((unsubscribe) => {
+      if (disposed) unsubscribe();
+      else off.push(unsubscribe);
+    }).catch(() => {});
+    keep(DevServerAPI.onServer((server) => {
+      const current = projectRef.current === server.projectId;
+      acceptServer(server, current && server.status === "starting", current);
+    }));
+    keep(DevServerAPI.onPreview((event) => {
+      if (projectRef.current === event.projectId) openPreview(event.url);
+    }));
+    return () => {
+      disposed = true;
+      off.forEach((unsubscribe) => unsubscribe());
+    };
+  }, [acceptServer, openPreview]);
+
+  useEffect(() => {
+    if (!projectId) return;
+    let disposed = false;
+    void DevServerAPI.list(projectId).then((items) => {
+      if (!disposed) items.forEach((server) => acceptServer(server, false, false));
+    }).catch(() => {});
+    return () => { disposed = true; };
+  }, [projectId, acceptServer]);
+
+  const startServer = useCallback(async (config: DevServerConfig) => {
+    const id = projectRef.current;
+    if (!id) return;
+    const server = await DevServerAPI.start(id, config, true);
+    const current = id === projectRef.current;
+    acceptServer(server, current, current);
+    setError(null);
+  }, [acceptServer]);
 
   // 캔버스를 새로 열면 좁은 창에서는 캔버스가 앞에 온다.
   const prevCanvas = useRef(canvasOpen);
@@ -168,7 +261,13 @@ export function useWorkPanel({ cwd, canvasOpen, windowWidth, sidebarCollapsed }:
           return;
         }
       }
-      await TerminalAPI.close(tab.sessionId).catch(() => {});
+      try {
+        await TerminalAPI.close(tab.sessionId);
+      } catch (e) {
+        setError(String(e));
+        return;
+      }
+      setServers((prior) => Object.fromEntries(Object.entries(prior).filter(([id]) => id !== tab.sessionId)));
     }
     dispatch({ type: "close", key });
   }, []);
@@ -176,8 +275,18 @@ export function useWorkPanel({ cwd, canvasOpen, windowWidth, sidebarCollapsed }:
   const restartTab = useCallback(async (key: string) => {
     const tab = tabsRef.current.tabs.find((t) => t.key === key);
     if (!tab || tab.kind !== "terminal") return;
-    await TerminalAPI.close(tab.sessionId).catch(() => {});
     try {
+      await TerminalAPI.close(tab.sessionId);
+      const server = serversRef.current[tab.sessionId];
+      if (server) {
+        dispatch({ type: "close", key });
+        setServers((prior) => Object.fromEntries(Object.entries(prior).filter(([id]) => id !== tab.sessionId)));
+        const info = await DevServerAPI.start(server.projectId, server.config, false);
+        const current = projectRef.current === info.projectId;
+        acceptServer(info, current, current);
+        setError(null);
+        return;
+      }
       const info = await TerminalAPI.open({
         cwd: tab.cwd,
         cols: DEFAULT_COLS,
@@ -190,7 +299,7 @@ export function useWorkPanel({ cwd, canvasOpen, windowWidth, sidebarCollapsed }:
     } catch (e) {
       setError(String(e));
     }
-  }, []);
+  }, [acceptServer]);
 
   const visible = visibleSidePanels({ canvasOpen, panelOpen: open, lastOpened, windowWidth, sidebarCollapsed });
   // 창 크기·사이드바·캔버스가 바뀔 때마다 다시 맞춘다(저장된 폭은 그대로 두고 화면에 쓰는 폭만).
@@ -216,6 +325,12 @@ export function useWorkPanel({ cwd, canvasOpen, windowWidth, sidebarCollapsed }:
     selectTab,
     closeTab,
     restartTab,
+    projectId,
+    servers,
+    autoPreview,
+    setAutoPreview,
+    startServer,
+    openPreview,
     error,
     clearError: () => setError(null),
     showCanvas: visible.canvas,

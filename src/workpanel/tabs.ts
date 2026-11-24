@@ -1,7 +1,4 @@
-/**
- * 작업 패널 탭 모델.
- * 지금은 터미널(셸) 탭만 쓰고, T2에서 서버 터미널(`terminalKind: "server"`)과 미리보기 탭(`kind: "preview"`)을 더한다.
- */
+/** 작업 패널의 셸·서버 터미널 및 미리보기 탭. */
 import type { TerminalInfo, TerminalKind } from "./terminalApi";
 
 export interface TerminalTab {
@@ -18,7 +15,6 @@ export interface TerminalTab {
   exitCode: number | null;
 }
 
-/** T2: 앱 안 미리보기 (아직 만들지 않음) */
 export interface PreviewTab {
   kind: "preview";
   key: string;
@@ -37,6 +33,7 @@ export const EMPTY_TABS: TabsState = { tabs: [], activeKey: null };
 
 export type TabsAction =
   | { type: "open"; info: TerminalInfo }
+  | { type: "openPreview"; url: string }
   | { type: "close"; key: string }
   | { type: "select"; key: string }
   | { type: "exit"; sessionId: string; code: number | null }
@@ -70,7 +67,17 @@ function tabFromInfo(tabs: WorkTab[], info: TerminalInfo): TerminalTab {
 export function tabsReducer(state: TabsState, action: TabsAction): TabsState {
   switch (action.type) {
     case "open": {
+      const existing = state.tabs.find((t) => t.kind === "terminal" && t.sessionId === action.info.id);
+      if (existing) return { ...state, activeKey: existing.key };
       const tab = tabFromInfo(state.tabs, action.info);
+      return { tabs: [...state.tabs, tab], activeKey: tab.key };
+    }
+    case "openPreview": {
+      const existing = state.tabs.find((t) => t.kind === "preview" && t.url === action.url);
+      if (existing) return { ...state, activeKey: existing.key };
+      const tab: PreviewTab = {
+        kind: "preview", key: `preview-${action.url}`, url: action.url, title: new URL(action.url).host,
+      };
       return { tabs: [...state.tabs, tab], activeKey: tab.key };
     }
     case "close": {

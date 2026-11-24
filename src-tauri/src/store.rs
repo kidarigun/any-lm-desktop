@@ -68,6 +68,8 @@ pub struct Project {
     /// 지식 폴더(절대 경로). 앱은 읽기만 하고, 색인은 앱 데이터 폴더 `knowledge/<id>.json`에 둔다.
     #[serde(default)]
     pub knowledge_folders: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dev_servers: Vec<crate::dev_servers::DevServerConfig>,
 }
 
 /// 프로젝트 메모리 항목 하나
@@ -406,6 +408,7 @@ impl StoreManager {
             auto_approve: Vec::new(),
             memory: Vec::new(),
             knowledge_folders: Vec::new(),
+            dev_servers: Vec::new(),
         };
 
         let db = AppDatabase {

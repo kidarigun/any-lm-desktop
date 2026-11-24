@@ -39,6 +39,7 @@ export interface Project {
   memory?: MemoryItem[];
   /** 지식 폴더(절대 경로). 앱은 읽기만 한다. */
   knowledgeFolders?: string[];
+  devServers?: import("./workpanel/devServerApi").DevServerConfig[];
 }
 
 /** 지식 폴더 하나의 색인 상태 */

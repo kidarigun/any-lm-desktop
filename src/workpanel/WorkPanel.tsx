@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { PanelRightClose, Plus, RotateCcw, SquareTerminal, X } from "lucide-react";
+import { Globe, PanelRightClose, Plus, RotateCcw, SquareTerminal, X } from "lucide-react";
 import { PanelResizer } from "../ui/PanelResizer";
 import { WORK_PANEL_DEFAULT_WIDTH, WORK_PANEL_MIN_WIDTH } from "./panelState";
 import { TerminalView } from "./TerminalView";
+import { PreviewView } from "./PreviewView";
+import { ServerMenu } from "./ServerMenu";
 import { TerminalAPI, type ShellOption } from "./terminalApi";
 import type { WorkPanelController } from "./useWorkPanel";
 
@@ -17,7 +19,7 @@ export interface WorkPanelProps {
   onLink: (url: string) => void;
 }
 
-/** 오른쪽 작업 패널: 터미널 탭들 (T2에서 서버·미리보기 탭이 더해진다) */
+/** 오른쪽 작업 패널 */
 export function WorkPanel({ panel, isDark, windowWidth, shell, onShellChange, onLink }: WorkPanelProps) {
   const ref = useRef<HTMLElement>(null);
   const [shells, setShells] = useState<ShellOption[]>([]);
@@ -51,7 +53,7 @@ export function WorkPanel({ panel, isDark, windowWidth, shell, onShellChange, on
         label="작업 패널 폭 조절"
       />
       <div className="h-10 shrink-0 flex items-center gap-1 px-1.5 border-b border-[#E5E3DB] dark:border-[#2E2E2A]">
-        <div role="tablist" aria-label="터미널 탭" className="flex items-center gap-0.5 min-w-0 overflow-x-auto"
+        <div role="tablist" aria-label="작업 패널 탭" className="flex items-center gap-0.5 min-w-0 overflow-x-auto"
           style={{ scrollbarWidth: "none" }}
         >
           {tabs.tabs.map((t) => {
@@ -80,7 +82,9 @@ export function WorkPanel({ panel, isDark, windowWidth, shell, onShellChange, on
                     : "text-stone-600 dark:text-stone-400 hover:bg-stone-100 dark:hover:bg-[#2A2A27]"
                 }`}
               >
-                <SquareTerminal className={`w-3.5 h-3.5 shrink-0 ${exited ? "opacity-40" : ""}`} />
+                {t.kind === "preview"
+                  ? <Globe className="w-3.5 h-3.5 shrink-0" />
+                  : <SquareTerminal className={`w-3.5 h-3.5 shrink-0 ${exited ? "opacity-40" : ""}`} />}
                 <span className={`truncate ${exited ? "opacity-60" : ""}`}>{t.title}</span>
                 <button
                   type="button"
@@ -105,8 +109,9 @@ export function WorkPanel({ panel, isDark, windowWidth, shell, onShellChange, on
           className="flex items-center gap-1 px-2 h-7 rounded-md text-xs font-semibold text-stone-700 dark:text-stone-200 hover:bg-stone-100 dark:hover:bg-[#2A2A27] cursor-pointer whitespace-nowrap shrink-0"
         >
           <Plus className="w-3.5 h-3.5" />
-          새 터미널
+          <span className="hidden min-[1250px]:inline">새 터미널</span>
         </button>
+        <ServerMenu key={panel.projectId} panel={panel} />
         <div className="flex-1" />
         {shells.length > 0 && (
           <select
@@ -157,10 +162,28 @@ export function WorkPanel({ panel, isDark, windowWidth, shell, onShellChange, on
           </div>
         )}
         {tabs.tabs.map((t) => {
-          if (t.kind !== "terminal") return null;
           const selected = t.key === tabs.activeKey;
+          if (t.kind === "preview") {
+            return (
+              <div key={t.key} className={selected ? "absolute inset-0" : "hidden"}>
+                <PreviewView initialUrl={t.url} />
+              </div>
+            );
+          }
+          const server = panel.servers[t.sessionId];
           return (
             <div key={t.sessionId} className={selected ? "absolute inset-0 flex flex-col" : "hidden"}>
+              {server && !t.exited && (
+                <div className="flex shrink-0 items-center gap-2 border-b border-stone-200 px-2 py-1 text-xs dark:border-stone-700">
+                  <span role="status" className="shrink-0">
+                    {server.status === "ready" ? "● 실행 중" : server.status === "starting" ? "◌ 시작 중…" : "◌ 주소 연결 미확인"}
+                  </span>
+                  {server.url && (
+                    <button type="button" title={server.url} className="min-w-0 truncate text-blue-600 dark:text-blue-300"
+                      onClick={() => panel.openPreview(server.url!)}>{server.url}</button>
+                  )}
+                </div>
+              )}
               <div className="flex-1 min-h-0">
                 <TerminalView sessionId={t.sessionId} active={selected} isDark={isDark} onLink={onLink} />
               </div>

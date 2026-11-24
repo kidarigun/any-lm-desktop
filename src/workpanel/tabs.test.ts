@@ -18,6 +18,17 @@ const info = (id: string, extra: Partial<TerminalInfo> = {}): TerminalInfo => ({
 const openAll = (...ids: string[]): TabsState => ids.reduce((s, id) => tabsReducer(s, { type: "open", info: info(id) }), EMPTY_TABS);
 
 describe("작업 패널 탭", () => {
+  it("같은 서버 세션과 미리보기 주소를 다시 열면 기존 탭을 고른다", () => {
+    let s = openAll("a");
+    s = tabsReducer(s, { type: "openPreview", url: "http://localhost:3000/" });
+    const key = s.activeKey;
+    s = tabsReducer(s, { type: "open", info: info("a") });
+    expect(s.tabs).toHaveLength(2);
+    expect(s.activeKey).toBe("tab-a");
+    s = tabsReducer(s, { type: "openPreview", url: "http://localhost:3000/" });
+    expect(s.tabs).toHaveLength(2);
+    expect(s.activeKey).toBe(key);
+  });
   it("터미널을 열면 탭이 생기고 그 탭이 선택된다. 같은 이름에는 번호를 붙인다", () => {
     const s = openAll("a", "b", "c");
     expect(s.tabs.map((t) => t.title)).toEqual(["PowerShell", "PowerShell 2", "PowerShell 3"]);

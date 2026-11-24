@@ -3424,6 +3424,7 @@ mod tests {
             auto_approve: Vec::new(),
             memory: Vec::new(),
             knowledge_folders: Vec::new(),
+            dev_servers: Vec::new(),
         }
     }
 

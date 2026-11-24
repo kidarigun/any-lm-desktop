@@ -33,7 +33,7 @@
         "worker-src": "'self' blob:",
         "connect-src": "'self' ipc: http://ipc.localhost blob: data:",
         "object-src": "'none'",
-        "frame-src": "http://anylm-preview.localhost:*",
+        "frame-src": "http://localhost:* https://localhost:* http://127.0.0.1:* https://127.0.0.1:* http://*.localhost:* https://*.localhost:*",
         "child-src": "'self' blob:",
         "base-uri": "'none'",
         "form-action": "'none'"
@@ -48,7 +48,7 @@
         "worker-src": "'self' blob:",
         "connect-src": "'self' ipc: http://ipc.localhost blob: data: ws://localhost:1420 http://localhost:1420",
         "object-src": "'none'",
-        "frame-src": "http://anylm-preview.localhost:*",
+        "frame-src": "http://localhost:* https://localhost:* http://127.0.0.1:* https://127.0.0.1:* http://*.localhost:* https://*.localhost:*",
         "child-src": "'self' blob:",
         "base-uri": "'none'",
         "form-action": "'none'"

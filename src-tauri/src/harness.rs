@@ -515,6 +515,7 @@ async fn live() {
             auto_approve: Vec::new(),
             memory: Vec::new(),
             knowledge_folders: kb_folders.clone(),
+            dev_servers: Vec::new(),
         });
         let root = project.as_ref().map(|p| PathBuf::from(&p.root_path)).unwrap_or_else(|| work.clone());
         // 앱에서는 폴더를 더할 때 바로 색인이 돈다. 같게 맞추려고 시나리오 시작 전에 끝까지 색인해 둔다

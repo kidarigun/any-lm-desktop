@@ -2,6 +2,7 @@ pub mod catalog;
 pub mod context_budget;
 pub mod doc_bridge;
 pub mod exaone;
+mod dev_servers;
 pub mod fs_ops;
 pub mod html_preview;
 pub mod lmstudio;
@@ -515,6 +516,7 @@ fn upsert_project(
         auto_approve: Vec::new(),
         memory: Vec::new(),
         knowledge_folders: Vec::new(),
+        dev_servers: Vec::new(),
     };
     projects.push(proj.clone());
     proj
@@ -2520,6 +2522,7 @@ pub fn run() {
             app.manage(knowledge::KnowledgeManager::new(app_data_dir.join("knowledge")));
             app.manage(PathGrants::default());
             app.manage(terminal::TerminalManager::new(terminal::tauri_sink(app.handle().clone())));
+            app.manage(dev_servers::DevServers::default());
             app.manage(html_preview::PreviewServer::start().map_err(|err| format!("HTML 미리보기 서버를 시작할 수 없습니다: {err}")));
             Ok(())
         })
@@ -2617,6 +2620,10 @@ pub fn run() {
             terminal::terminal_snapshot,
             terminal::terminal_busy,
             terminal::terminal_shells,
+            dev_servers::dev_server_options,
+            dev_servers::dev_server_start,
+            dev_servers::dev_server_list,
+            dev_servers::dev_preview_check,
         ])
         .build(tauri::generate_context!())
         .expect("error while running Any LM Desktop")
@@ -2673,6 +2680,7 @@ mod tests {
                 source: "model".into(),
             }],
             knowledge_folders: vec![r"D:\자료".into()],
+            dev_servers: Vec::new(),
         }];
         let updated = upsert_project(&mut projects, Some("p1".into()), "새 이름".into(), "C:/b".into(), "새 지침".into());
         assert_eq!(updated.name, "새 이름");

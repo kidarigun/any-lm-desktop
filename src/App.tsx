@@ -521,6 +521,7 @@ export default function App() {
   // 오른쪽 작업 패널(터미널): 프로젝트·코드 화면은 프로젝트 폴더, 일반 채팅은 사용자 홈(빈 값)
   const workPanel = useWorkPanel({
     cwd: currentScopeId !== "general-chat" && activeProject ? activeProject.rootPath : "",
+    projectId: currentScopeId !== "general-chat" ? activeProject?.id : undefined,
     canvasOpen: !!activeArtifact,
     windowWidth,
     sidebarCollapsed,
@@ -3166,7 +3167,7 @@ export default function App() {
               .catch((err) => setErrorBanner(String(err)))
           }
           onLink={(url) => {
-            if (isExternalLink(url)) BackendAPI.openExternalUrl(url).catch(() => {});
+            if (!workPanel.openPreview(url) && isExternalLink(url)) BackendAPI.openExternalUrl(url).catch(() => {});
           }}
         />
         </React.Suspense>
