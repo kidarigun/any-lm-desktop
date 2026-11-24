@@ -193,16 +193,17 @@ fn commit_assistant_message(
     new_snapshots: Vec<FileSnapshot>,
 ) -> Result<Conversation, String> {
     let mut db = state.db.lock().map_err(|e| e.to_string())?;
-    db.snapshots.extend(new_snapshots);
+    merge_tool_snapshots(&mut db, new_snapshots);
     // 오래된 되돌리기 기록을 정리한다 (그 기록이 쓰던 백업 파일도 지운다).
-    for blob in db.prune_snapshots() {
-        fs_ops::delete_blob(&blob);
-    }
+    let pruned_blobs = db.prune_snapshots();
     let conv = find_conv_mut(&mut db, conversation_id)?;
     upsert_message(conv, assistant_msg);
     conv.updated_at = chrono::Local::now().to_rfc3339();
     let updated = conv.clone();
     state.store.save(&db)?;
+    for blob in pruned_blobs {
+        fs_ops::delete_blob(&blob);
+    }
     Ok(updated)
 }
 
@@ -214,11 +215,17 @@ fn upsert_message(conv: &mut Conversation, msg: ChatMessage) {
     }
 }
 
-/// 답변을 받는 도중의 내용을 저장한다. 앱이 갑자기 꺼져도 받은 데까지는 대화에 남는다.
-fn save_checkpoint(state: &AppState, conversation_id: &str, msg: &ChatMessage) {
+fn merge_tool_snapshots(db: &mut AppDatabase, snapshots: impl IntoIterator<Item = FileSnapshot>) {
+    let mut seen: HashSet<_> = db.snapshots.iter().map(|s| s.id.clone()).collect();
+    db.snapshots.extend(snapshots.into_iter().filter(|s| seen.insert(s.id.clone())));
+}
+
+/// 중간 답변과 작업의 되돌리기 기록을 한 저장 파일에 반영한다.
+fn save_checkpoint(state: &AppState, conversation_id: &str, msg: &ChatMessage, snapshots: &[FileSnapshot]) {
     let Ok(mut db) = state.db.lock() else { return };
     let Ok(conv) = find_conv_mut(&mut db, conversation_id) else { return };
     upsert_message(conv, msg.clone());
+    merge_tool_snapshots(&mut db, snapshots.iter().cloned());
     let _ = state.store.save(&db);
 }
 
@@ -1130,7 +1137,7 @@ async fn send_chat_message(
         state.store.save(&db)?;
         (settings, project, history, turn_mode, compaction, model_key, auto_job)
     };
-    let checkpoint = |m: &ChatMessage| save_checkpoint(&state, &conversation_id, m);
+    let checkpoint = |m: &ChatMessage, snapshots: &[FileSnapshot]| save_checkpoint(&state, &conversation_id, m, snapshots);
 
     if let Some(job) = auto_job {
         // 요약도 이 대화의 모델로 요청한다.
@@ -1260,7 +1267,7 @@ async fn edit_and_resend_message(
         state.store.save(&db)?;
         (settings, project, history, backup, backup_compaction, turn_mode, compaction, model_key)
     };
-    let checkpoint = |m: &ChatMessage| save_checkpoint(&state, &conversation_id, m);
+    let checkpoint = |m: &ChatMessage, snapshots: &[FileSnapshot]| save_checkpoint(&state, &conversation_id, m, snapshots);
 
     let model_info = lmstudio::turn_model_info(&settings, &model_key).await;
     let context_length = context_budget::resolve_context(model_info.loaded_context);
@@ -1585,7 +1592,7 @@ async fn resolve_tool_approval(
 
     // 4) 도구 결과를 모델에 전달해 같은 메시지에 이어서 답변을 받는다.
     let (model_key, settings, history, assistant_msg, turn_mode, compaction) = continuation;
-    let checkpoint = |m: &ChatMessage| save_checkpoint(&state, &conversation_id, m);
+    let checkpoint = |m: &ChatMessage, snapshots: &[FileSnapshot]| save_checkpoint(&state, &conversation_id, m, snapshots);
     let model_info = lmstudio::turn_model_info(&settings, &model_key).await;
     let context_length = context_budget::resolve_context(model_info.loaded_context);
     // 승인 뒤 이어가기도 같은 질문(마지막 사용자 메시지, 첨부 내용 제외)으로 참고 자료와 Skill을 다시 만들어 같은 자리에 넣는다.
