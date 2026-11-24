@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { BackendAPI } from "../api";
 import { buildMcpInstall, fillTemplate, filterEntries, mergeCatalogs, missingRuntimes, normalizeCatalog, oauthInputKeys } from "./catalog";
 import { BUILTIN_CATALOG_RAW, builtinCatalog } from "./builtin";
 
@@ -226,5 +227,51 @@ describe("mergeCatalogs", () => {
     expect(remote.mcp[0].official).toBeUndefined();
     const m = mergeCatalogs(builtin, remote);
     expect(m.mcp.find((x) => x.id === "sneaky")!.official).toBeUndefined();
+  });
+});
+
+describe("기본 카탈로그 보존 회귀 방지", () => {
+  it("catalogDefaultUrl은 비어 있지 않은 https catalog.json 주소를 반환한다", async () => {
+    const url = await BackendAPI.catalogDefaultUrl();
+    expect(url).toMatch(/^https:\/\/.+\/catalog\.json$/);
+  });
+
+  it("내장 웹 검색 MCP 8개와 원격 기본 Skill·MCP 항목을 모두 함께 유지한다", () => {
+    const builtin = builtinCatalog();
+    const remote = normalizeCatalog(
+      {
+        version: 1,
+        name: "Any LM Desktop 기본 목록",
+        skills: [
+          { id: "weekly-report", name: "주간 보고서", download: "dist/weekly-report.zip", sha256: "a".repeat(64) },
+          { id: "anthropic-pdf", name: "PDF 도구", download: "dist/anthropic-pdf.zip", sha256: "b".repeat(64) },
+          { id: "superpowers-brainstorming", name: "브레인스토밍", download: "dist/superpowers-brainstorming.zip", sha256: "c".repeat(64) },
+        ],
+        mcp: [
+          { id: "google-workspace", name: "Google Workspace", install: { transport: "stdio", command: "uvx" } },
+          { id: "filesystem", name: "내 PC 파일", install: { transport: "stdio", command: "npx" } },
+          { id: "context7", name: "Context7", install: { transport: "http", url: "https://mcp.context7.com/mcp" } },
+          { id: "memory", name: "기억", install: { transport: "stdio", command: "npx" } },
+          { id: "fetch", name: "웹 페이지 읽기", install: { transport: "stdio", command: "uvx" } },
+        ],
+      },
+      "https://raw.githubusercontent.com/kidarigun/exaone-catalog/main/catalog.json"
+    );
+
+    const merged = mergeCatalogs(builtin, remote);
+    expect(merged.mcp.slice(0, 8).map((m) => m.id)).toEqual(builtin.mcp.map((m) => m.id));
+    expect(merged.mcp.map((m) => m.id)).toEqual([
+      ...builtin.mcp.map((m) => m.id),
+      "google-workspace",
+      "filesystem",
+      "context7",
+      "memory",
+      "fetch",
+    ]);
+    expect(merged.skills.map((s) => s.id)).toEqual([
+      "weekly-report",
+      "anthropic-pdf",
+      "superpowers-brainstorming",
+    ]);
   });
 });

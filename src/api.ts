@@ -500,8 +500,12 @@ export const BackendAPI = {
   /** 목록을 불러온다 (주소가 없으면 기본 목록). 인터넷이 안 되면 마지막 저장본. */
   async catalogLoad(url?: string): Promise<{ url: string; catalog: unknown; fromCache: boolean; error?: string | null }> {
     if (isTauri()) return await invoke("catalog_load", { url: url ?? null });
-    if (!url?.trim()) return { url: "", catalog: { version: 1, name: "Any LM Desktop 기본 목록" }, fromCache: false };
     throw new Error("Tauri 데스크톱 창에서만 목록을 불러올 수 있습니다.");
+  },
+
+  async catalogDefaultUrl(): Promise<string> {
+    if (isTauri()) return await invoke<string>("catalog_default_url");
+    return "https://raw.githubusercontent.com/kidarigun/exaone-catalog/main/catalog.json";
   },
 
   /** 목록의 Skill zip을 받아 sha256 확인 후 설치. 같은 Skill이 있으면 ALREADY_EXISTS:<이름> 오류. */

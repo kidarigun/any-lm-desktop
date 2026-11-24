@@ -2256,6 +2256,11 @@ async fn catalog_load(app: AppHandle, url: Option<String>) -> Result<catalog::Ca
     catalog::load(url.as_deref().unwrap_or_default(), &dir).await
 }
 
+#[tauri::command]
+fn catalog_default_url() -> String {
+    catalog::DEFAULT_CATALOG_URL.to_string()
+}
+
 /// 목록의 Skill을 받아 sha256을 확인하고 설치한다.
 #[tauri::command]
 async fn catalog_install_skill(url: String, sha256: String, overwrite: bool) -> Result<skills::SkillInfo, String> {
@@ -2728,6 +2733,7 @@ pub fn run() {
             runtime_install,
             runtime_remove,
             catalog_load,
+            catalog_default_url,
             catalog_install_skill,
             catalog_runtimes,
             mcp_list_servers,

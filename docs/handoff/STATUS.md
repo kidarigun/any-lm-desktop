@@ -43,6 +43,7 @@
 - 원본 잔재: 저장 파일·LM Studio 토큰 계정·런타임 표식·카탈로그 기본 주소·테스트 정리. 같은 Any LM 앱 데이터 안의 이전 저장 파일을 새 이름으로 불러온 실제 파일의 해시가 일치했다(결정 0011).
 - 멀티 로컬 LLM 공급자(LM Studio · Ollama · OpenAI 호환, 설계 `docs/superpowers/specs/2026-11-24-multi-local-providers-design.md`, 계획 `docs/superpowers/plans/2026-11-24-multi-local-providers.md`, 결정 0012): 완료. `store.rs`(`LlmProvider`·`ProviderProfile`·최상위 필드 하위 호환 동기화), `secrets.rs`(공급자별 Windows 자격 증명 계정 `lm-studio-api-token`·`ollama-api-token`·`openai-compat-api-token`), `src-tauri/src/providers/`(`mod.rs` 공통 로컬 URL 검증·`ProviderCapabilities`·공급자별 오류 문구·라우팅, `ollama.rs` `/api/tags`·`/api/ps`·`/api/show`·`/api/generate` 로드/언로드·`ollama serve` 분리 실행, `openai_compat.rs` 경로 정규화·`/v1/models`·즉시 `Ready` `plan_load`·빈 목록 시 수동 모델 ID 허용), `exaone.rs`(공급자별 채팅 URL·오류 문구 일반화·Ollama/llama.cpp/vLLM 컨텍스트 초과 패턴 추가), `harness.rs`(`ANYLM_PROVIDER`), 프런트엔드 `src/lmstudio/providerMeta.ts`·`ConnectionDialog.tsx`(3종 공급자 전환 탭·전환 대기 안내·기능별 버튼 표시)·`ModelPicker.tsx`·`App.tsx`(사이드바 `{공급자} 연결`·오류 띠 `[서버 시작]` 조건부 표시). LM Studio 기존 구현과 테스트는 그대로 유지하고 모의 HTTP 서버로 Ollama·OpenAI 호환 전 흐름을 검증함. 실제 Ollama/llama.cpp 데몬 실측은 아래 수동 확인 목록에 남긴다.
 - 라이브 업데이트(자동 업데이트) · 통합 `[설정]` 메뉴 · 배포 NSIS 빌드 · 공개 저장소 전환(설계 `docs/superpowers/specs/2026-11-24-updater-settings-release-design.md`, 계획 `docs/superpowers/plans/2026-11-24-updater-settings-release.md`, 결정 0013): 완료. Any LM Desktop 전용 서명 키(`%USERPROFILE%\.tauri\any-lm-desktop.key`, 비밀키는 로컬에만 보관)를 생성해 `tauri-plugin-updater` v2(`kidarigun/any-lm-desktop`, `createUpdaterArtifacts: true`)와 `check_update`/`install_update`(종료 직전 `terminal.close_all()` 포함)·`AppSettings.check_updates`·`src/update/UpdatePanel.tsx`·`scripts/make_latest_json.py`를 복구했다. 좌측 하단의 Skill·MCP 서버·연결 3개 버튼을 연결 상태 점이 포함된 단일 `[설정]` 버튼으로 통합하고, `src/settings/SettingsDialog.tsx`(4개 탭: 연결·모델 / Skill / MCP 서버 / 환경·업데이트)와 각 다이얼로그 `embedded` 모드를 구현했다. `THIRD_PARTY_NOTICES.md`를 재생성하고 서명된 NSIS 설치 파일(`Any LM Desktop_0.1.0_x64-setup.exe`, 17.76 MiB) 및 `release/latest.json`을 생성했으며, 저장소를 공개(Public)로 전환하고 `main`을 푸시한다.
+- 기본 Skill·MCP 카탈로그 복구 및 재발 방지 가드레일(결정 0014): 완료. 커밋 `21143f3`에서 `DEFAULT_CATALOG_URL`을 제거하고 빈 스텁을 돌려주게 바꾸면서 `fe7e89c`의 설정 통합·배포 빌드 당시 Skill 찾아보기(63개)·MCP 찾아보기(17개)가 누락되고 내장 웹 검색 MCP 8개만 보이던 회귀를 복구했다. `src-tauri/src/catalog.rs`(`DEFAULT_CATALOG_URL`, `resolve_url`, 기본 카탈로그 레거시 제목만 `"Any LM Desktop 기본 목록"`으로 정규화, 오프라인 `catalog_cache.json` 폴백 유지), `src-tauri/src/lib.rs`(`catalog_default_url`), `src/api.ts`, `src/catalog/CatalogViews.tsx`를 복원하고, Rust/Vitest 회귀 테스트와 `AGENTS.md` 영구 보호 규칙을 추가했다. 서명된 NSIS 설치 파일(17.74 MiB)과 `release/latest.json`도 재생성했다.
 
 ## 다음 할 일
 1. **남은 화면 QA**: 아래 수동 확인 목록의 기존 기능과 공급자 로그인·계정 확인을 이어서 점검한다. Windows 개발 앱에서 이번 변경의 터미널·로컬 미리보기·연결 창은 확인했다.
@@ -59,6 +60,8 @@
    - 그 밖에 검토의 "Can stay" 목록(서버 상태는 아무 HTTP 응답이면 켜짐으로 봄 등).
 
 ## 마지막 확인
+2026-11-24, 기본 Skill·MCP 카탈로그 복구 및 재발 방지 가드레일(결정 0014) 뒤: `npm test` 통과(31 파일, 187 통과·1 건너뜀, `noBrandText` 및 기본 카탈로그 보존 회귀 테스트 포함), `npx tsc --noEmit` 오류 없음, `cd src-tauri && cargo test --lib` 295 통과·0 실패·11 무시(실행 중인 개발 앱 파일 잠금 회피를 위해 분리 타깃 폴더에서 실행), `cargo test --lib live_default_catalog_has_skills_and_mcp -- --ignored --nocapture` 통과(`skills=63`, `mcp=17`), `cargo check --all-targets` 경고·오류 없음, `npm run build` 성공, `npm run tauri build`로 `Any LM Desktop_0.1.0_x64-setup.exe`(17.74 MiB)·`.sig` 및 `release/latest.json` 재생성.
+
 2026-11-24, 자동 업데이트 복구 · `[설정]` 메뉴 통합 · NSIS 배포 빌드 뒤: `npm test` 통과(31 파일, 185 통과·1 건너뜀), `npx tsc --noEmit` 오류 없음, `cd src-tauri && cargo test --lib` 293 통과·0 실패·10 무시(실행 중인 개발 앱 파일 잠금 회피를 위해 분리 타깃 폴더에서 실행), `cargo check --all-targets` 경고·오류 없음, `npm run build` 성공, `THIRD_PARTY_NOTICES.md` 갱신(npm 111개·Rust 321개), `npm run tauri build`로 `Any LM Desktop_0.1.0_x64-setup.exe`(17.76 MiB)·`.sig` 및 `release/latest.json` 생성 성공.
 
 2026-11-24, 멀티 로컬 LLM 공급자(LM Studio · Ollama · OpenAI 호환) 구현 뒤: `npm test` 통과(30 파일, 183 통과·1 건너뜀), `npx tsc --noEmit` 오류 없음, `cd src-tauri && cargo test --lib` 293 통과·0 실패·10 무시(Ollama·OpenAI 호환 모의 HTTP, 설정 마이그레이션, 로컬 URL 보안, 컨텍스트 초과 문구, 하니스 `ANYLM_PROVIDER` 테스트 포함), `cargo check --all-targets` 경고·오류 없음, `npm run build` 성공.
@@ -202,5 +205,6 @@
 ### 통합 설정 창 · 자동 업데이트
 - 좌측 사이드바 하단에 `[설정]` 버튼 하나만 표시되고 오른쪽에 활성 공급자 이름과 연결 점이 맞는지
 - `[설정]` 창 4개 탭(`연결 · 모델`, `Skill`, `MCP 서버`, `환경 · 업데이트`) 전환과 각 탭 동작이 매끄럽고, `MCP 서버`에서 서버 추가 폼이나 JSON 붙여넣기 화면을 연 채 `Esc`를 누르면 설정 창 전체가 아니라 편집 화면만 닫히는지
+- `[설정]` → `Skill` → `찾아보기`에 기본 원격 Skill 63개가 표시되고 기존 설치된 Skill이 `설치됨`에 그대로 보이는지, `[설정]` → `MCP 서버` → `찾아보기`에 내장 웹 검색 8개 + 기본 원격 17개 = 25개와 `내 서버`의 기존 연결이 모두 보이는지
 - `환경 · 업데이트` 탭에서 현재 버전 `0.1.0`, [업데이트 확인], 자동 확인 체크가 정상 동작하는지(GitHub 릴리스가 올라간 이후 실제 업데이트 알림·설치 확인)
 - 빌드된 `Any LM Desktop_0.1.0_x64-setup.exe` 설치 및 실행 확인

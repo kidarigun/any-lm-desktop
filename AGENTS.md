@@ -23,7 +23,7 @@ Rust (`src-tauri/src/`)
 - `snapshot_diff.rs` — 스냅샷의 이전/이후 내용 텍스트 추출(변경 보기).
 - `html_preview.rs` — HTML 미리보기용 로컬 서버.
 - `mcp.rs` / `mcp_oauth.rs` — MCP 클라이언트 / 원격 MCP OAuth 로그인.
-- `skills.rs` — Skill 찾기·읽기·설치, 요청에 맞는 Skill 자동 불러오기(`select_for_message`·`auto_for_turn`, 결정 0007). `catalog.rs` — 원격 Skill·MCP 카탈로그 받기(내장 목록은 프런트 `src/catalog/builtin.ts`).
+- `skills.rs` — Skill 찾기·읽기·설치, 요청에 맞는 Skill 자동 불러오기(`select_for_message`·`auto_for_turn`, 결정 0007). `catalog.rs` — 기본 원격(`DEFAULT_CATALOG_URL`) 및 사용자 지정 Skill·MCP 카탈로그 받기(웹뷰에서 내장 웹 검색 MCP 8개 `src/catalog/builtin.ts`와 병합, 결정 0006·0014).
 - `python_runner.rs` — 프로젝트 안 Python 스크립트 실행. `runtime.rs` — 앱 전용 Python/Node/uv 설치·관리.
 - `runs.rs` — 대화별 실행 중복 방지와 중지 플래그.
 - `terminal.rs` — 작업 패널 터미널(PTY, `portable-pty`/ConPTY): 세션 관리·링 버퍼·UTF-8 이어 붙이기·ANSI 제거(`plain_text`)·Job Object+taskkill 트리 종료, `terminal_*` 명령과 `anylm-terminal-*` 이벤트(결정 0008, 테스트는 `terminal_tests.rs`).
@@ -65,6 +65,7 @@ Rust (`src-tauri/src/`)
 - 기본 원하는 컨텍스트 `32768`. 자동 요약 압축 기준 `0.70`(로드된 컨텍스트 대비). 글자→토큰 추정 `1토큰 = 1.5자`(`chars()` 기준).
 - 모델 로드 요청 시간 제한 5분. 응답 헤더 대기 180초, 스트림 무응답 900초(원본 유지).
 - 앱은 사용자가 [내리고 로드]·[다시 로드]·[언로드]를 누를 때만 모델을 내린다.
+- 기존 Skill·MCP 기본 목록 보호(결정 0014): 사용자의 명시적 지시 없이 기존 Skill·MCP 카탈로그 소스(`DEFAULT_CATALOG_URL`·`builtinCatalog`)나 설치·저장 데이터를 지우거나 빈 목록으로 대체하지 않는다. 메뉴·설정·카탈로그를 손대거나 배포 빌드를 만들기 전후로 Skill/MCP 설치됨·찾아보기 목록이 비어 있지 않은지(회귀 테스트 + 실목록) 반드시 확인한다.
 - 매 작업 끝: `npm test` · `npx tsc --noEmit` · `cd src-tauri && cargo test --lib` 모두 통과 → 계획 체크박스 · `docs/handoff/STATUS.md` 갱신 → 한 커밋. 커밋 메시지 끝에 `Agent: <claude-code|codex|antigravity>` 줄.
 - LM Studio로 실측하는 작업은 끝나면 `qwen3.5-9b`를 컨텍스트 32768로 다시 로드해 둔다.
 - 커밋 트레일러: 모든 커밋 메시지 끝에 `Agent: <claude-code|codex|antigravity>` 줄을 단다(실제로 작업한 도구).

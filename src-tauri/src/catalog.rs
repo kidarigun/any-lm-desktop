@@ -1,8 +1,8 @@
 //! Skill·MCP 찾아보기 목록(카탈로그) 불러오기와 목록에서 설치하기.
 //!
-//! 사용자가 원격 목록을 설정하면 해당 HTTPS 주소의 JSON을 불러온다. 기본 목록은 앱에 내장한다.
+//! 기본 원격 카탈로그(`DEFAULT_CATALOG_URL`) 또는 사용자가 지정한 HTTPS JSON을 불러온다.
 //! 마지막으로 받은 목록을 앱 데이터 폴더에 저장해 두어, 인터넷이 안 될 때도 보여 준다.
-//! 목록의 내용 검사와 화면 구성은 웹뷰에서 하고, 여기서는 받아오기·해시 검사·설치만 맡는다.
+//! 목록의 내용 검사와 화면 구성(내장 공식 웹 검색 MCP 병합 포함)은 웹뷰에서 하고, 여기서는 받아오기·해시 검사·설치만 맡는다.
 
 use crate::skills;
 use serde::Serialize;
@@ -11,9 +11,36 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+pub const DEFAULT_CATALOG_URL: &str = "https://raw.githubusercontent.com/kidarigun/exaone-catalog/main/catalog.json";
 const MAX_CATALOG_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SKILL_ZIP_BYTES: usize = 20 * 1024 * 1024;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// 비어 있는 주소는 기본 원격 카탈로그 주소로 해석한다.
+pub fn resolve_url(url: &str) -> &str {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        DEFAULT_CATALOG_URL
+    } else {
+        trimmed
+    }
+}
+
+/// 기본 원격 카탈로그의 레거시 앱 이름만 Any LM Desktop 표기로 정리한다 (항목은 절대 건드리지 않는다).
+fn normalize_default_catalog_name(url: &str, default_url: &str, catalog: &mut Value) {
+    if url != default_url {
+        return;
+    }
+    if let Some(obj) = catalog.as_object_mut() {
+        let has_legacy_brand = obj
+            .get("name")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.contains("EXAONE") || s.contains("LG"));
+        if has_legacy_brand {
+            obj.insert("name".to_string(), Value::String("Any LM Desktop 기본 목록".to_string()));
+        }
+    }
+}
 
 /// https 주소만 받는다. (내 PC에서 시험할 때만 localhost http 허용)
 pub fn check_url(url: &str) -> Result<(), String> {
@@ -70,28 +97,27 @@ fn parse_catalog(bytes: &[u8]) -> Result<Value, String> {
     }
 }
 
-/// 목록을 받아온다. 실패하면 같은 주소에서 마지막으로 받은 목록을 돌려준다.
+/// 목록을 받아온다. 주소가 비어 있으면 기본 원격 카탈로그(`DEFAULT_CATALOG_URL`)를 사용한다.
+/// 실패하면 같은 주소에서 마지막으로 받은 목록을 돌려준다.
 pub async fn load(url: &str, cache_dir: &Path) -> Result<CatalogResult, String> {
-    let url = url.trim();
-    if url.is_empty() {
-        return Ok(CatalogResult {
-            url: String::new(),
-            catalog: serde_json::json!({"version": 1, "name": "Any LM Desktop 기본 목록", "skills": [], "mcp": []}),
-            from_cache: false,
-            error: None,
-        });
-    }
+    load_with_default(url, DEFAULT_CATALOG_URL, cache_dir).await
+}
+
+async fn load_with_default(url: &str, default_url: &str, cache_dir: &Path) -> Result<CatalogResult, String> {
+    let trimmed = url.trim();
+    let url = if trimmed.is_empty() { default_url } else { trimmed };
     let fetched = match fetch_bytes(url, MAX_CATALOG_BYTES).await {
         Ok(b) => parse_catalog(&b),
         Err(e) => Err(e),
     };
     match fetched {
-        Ok(catalog) => {
+        Ok(mut catalog) => {
             let _ = std::fs::create_dir_all(cache_dir);
             let _ = std::fs::write(
                 cache_path(cache_dir),
                 serde_json::to_vec(&serde_json::json!({ "url": url, "catalog": catalog })).unwrap_or_default(),
             );
+            normalize_default_catalog_name(url, default_url, &mut catalog);
             Ok(CatalogResult { url: url.to_string(), catalog, from_cache: false, error: None })
         }
         Err(e) => {
@@ -101,7 +127,10 @@ pub async fn load(url: &str, cache_dir: &Path) -> Result<CatalogResult, String> 
                 .filter(|v| v.get("url").and_then(|u| u.as_str()) == Some(url))
                 .and_then(|v| v.get("catalog").cloned());
             match cached {
-                Some(catalog) => Ok(CatalogResult { url: url.to_string(), catalog, from_cache: true, error: Some(e) }),
+                Some(mut catalog) => {
+                    normalize_default_catalog_name(url, default_url, &mut catalog);
+                    Ok(CatalogResult { url: url.to_string(), catalog, from_cache: true, error: Some(e) })
+                }
                 None => Err(e),
             }
         }
@@ -166,6 +195,7 @@ mod tests {
 
     #[test]
     fn only_https_urls() {
+        assert!(check_url(DEFAULT_CATALOG_URL).is_ok());
         assert!(check_url("https://example.com/catalog.json").is_ok());
         assert!(check_url("http://example.com/catalog.json").is_err());
         assert!(check_url("file:///C:/catalog.json").is_err());
@@ -174,6 +204,21 @@ mod tests {
     #[test]
     fn sha256_matches_known_value() {
         assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+
+    #[test]
+    fn default_catalog_url_is_configured_and_resolved() {
+        assert!(!DEFAULT_CATALOG_URL.is_empty());
+        assert_eq!(resolve_url(""), DEFAULT_CATALOG_URL);
+        assert_eq!(resolve_url("   "), DEFAULT_CATALOG_URL);
+        assert_eq!(resolve_url(" https://example.com/custom.json "), "https://example.com/custom.json");
+    }
+
+    #[test]
+    fn custom_catalog_keeps_its_own_name() {
+        let mut custom = serde_json::json!({ "version": 1, "name": "내 EXAONE 사용자 목록", "skills": [], "mcp": [] });
+        normalize_default_catalog_name("https://example.com/catalog.json", DEFAULT_CATALOG_URL, &mut custom);
+        assert_eq!(custom["name"], "내 EXAONE 사용자 목록");
     }
 
     #[tokio::test]
@@ -194,21 +239,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_catalog_works_without_a_remote_source() {
+    async fn empty_url_uses_default_catalog_cache_not_empty_stub() {
         let dir = tempfile::tempdir().unwrap();
-        let result = load("", dir.path()).await.unwrap();
-        assert!(result.url.is_empty());
-        assert_eq!(result.catalog["version"], 1);
-        assert!(!cache_path(dir.path()).exists());
+        let default_url = "https://127.0.0.1:1/catalog.json";
+        // 저장본이 없으면 빈 스텁을 돌려주지 않고 오류를 반환한다
+        assert!(load_with_default("", default_url, dir.path()).await.is_err());
+
+        std::fs::write(
+            cache_path(dir.path()),
+            serde_json::to_vec(&serde_json::json!({
+                "url": default_url,
+                "catalog": {
+                    "version": 1,
+                    "name": "Desktop App for LG K-EXAONE 기본 목록 (테스트)",
+                    "skills": [{ "id": "weekly-report", "name": "주간 보고서" }],
+                    "mcp": [{ "id": "google-workspace", "name": "Google Workspace" }]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let r = load_with_default("", default_url, dir.path()).await.unwrap();
+        assert!(r.from_cache);
+        assert!(r.error.is_some());
+        assert_eq!(r.url, default_url);
+        assert_eq!(r.catalog["name"], "Any LM Desktop 기본 목록");
+        assert_eq!(r.catalog["skills"].as_array().unwrap().len(), 1);
+        assert_eq!(r.catalog["mcp"].as_array().unwrap().len(), 1);
     }
 
-    /// 사용자가 정한 실제 목록으로: ANYLM_CATALOG_URL 설정 후 cargo test --lib live_catalog -- --ignored --nocapture
+    /// 실제 기본 목록 확인: cargo test --lib live_default_catalog_has_skills_and_mcp -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn live_default_catalog_has_skills_and_mcp() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = load("", dir.path()).await.unwrap();
+        assert_eq!(r.url, DEFAULT_CATALOG_URL);
+        assert!(!r.from_cache);
+        assert_eq!(r.catalog["name"], "Any LM Desktop 기본 목록");
+        let skills_len = r.catalog["skills"].as_array().map(|a| a.len()).unwrap_or(0);
+        let mcp_len = r.catalog["mcp"].as_array().map(|a| a.len()).unwrap_or(0);
+        eprintln!("live default catalog: skills={} mcp={}", skills_len, mcp_len);
+        assert!(skills_len >= 50, "expected >= 50 skills, got {}", skills_len);
+        assert!(mcp_len >= 15, "expected >= 15 mcp servers, got {}", mcp_len);
+    }
+
+    /// 실제 기본 또는 사용자 목록으로: cargo test --lib live_catalog -- --ignored --nocapture
     #[tokio::test]
     #[ignore]
     async fn live_catalog_skill_install_and_remote_mcp() {
         let dir = tempfile::tempdir().unwrap();
         skills::set_user_dir(dir.path().join("skills"));
-        let configured = std::env::var("ANYLM_CATALOG_URL").expect("ANYLM_CATALOG_URL");
+        let configured = std::env::var("ANYLM_CATALOG_URL").unwrap_or_else(|_| DEFAULT_CATALOG_URL.to_string());
         let base = reqwest::Url::parse(&configured).unwrap();
         let r = load(&configured, dir.path()).await.unwrap();
         assert!(!r.from_cache);
