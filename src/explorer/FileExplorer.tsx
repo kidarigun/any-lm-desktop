@@ -49,7 +49,7 @@ export interface FileExplorerProps {
 }
 
 /** 탐색기에서 채팅 입력창으로 끌어다 놓을 때 쓰는 데이터 형식 */
-export const DRAG_MIME = "application/x-exaone-path";
+export const DRAG_MIME = "application/x-anylm-path";
 
 type Draft =
   | { mode: "file" | "folder"; parent: string }

@@ -2104,14 +2104,8 @@ async fn runtime_remove(kind: String) -> Result<(), String> {
 /// 찾아보기 목록을 불러온다. 주소를 주지 않으면 기본 목록.
 #[tauri::command]
 async fn catalog_load(app: AppHandle, url: Option<String>) -> Result<catalog::CatalogResult, String> {
-    let url = url.filter(|u| !u.trim().is_empty()).unwrap_or_else(|| catalog::DEFAULT_CATALOG_URL.to_string());
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    catalog::load(url.trim(), &dir).await
-}
-
-#[tauri::command]
-fn catalog_default_url() -> String {
-    catalog::DEFAULT_CATALOG_URL.to_string()
+    catalog::load(url.as_deref().unwrap_or_default(), &dir).await
 }
 
 /// 목록의 Skill을 받아 sha256을 확인하고 설치한다.
@@ -2583,7 +2577,6 @@ pub fn run() {
             runtime_install,
             runtime_remove,
             catalog_load,
-            catalog_default_url,
             catalog_install_skill,
             catalog_runtimes,
             mcp_list_servers,

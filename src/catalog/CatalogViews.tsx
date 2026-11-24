@@ -51,7 +51,7 @@ export function useCatalog() {
 
   const load = useCallback(async (force: boolean) => {
     const url = savedUrl();
-    if (!force && memo && (!url || memo.url === url)) {
+    if (!force && memo && memo.url === url) {
       setData(memo);
       return;
     }
@@ -65,7 +65,7 @@ export function useCatalog() {
       setRuntimes(rt);
     } catch (e) {
       // 목록을 받지 못했고 저장본도 없으면 내장 목록만 보여 준다 (기억해 두지 않아 다시 시도할 수 있다).
-      setData((prev) => prev ?? { url, catalog: mergeCatalogs(builtinCatalog(), null), fromCache: false, error: null });
+      setData({ url, catalog: mergeCatalogs(builtinCatalog(), null), fromCache: false, error: null });
       setError(errorText(e));
       const rt = await BackendAPI.catalogRuntimes().catch(() => null);
       if (rt) {
@@ -187,7 +187,7 @@ function SourceFooter({ data, setUrl }: { data: Loaded | null; setUrl: (u: strin
             setEditing(false);
           }}
         >
-          <input value={value} onChange={(e) => setValue(e.target.value)} placeholder="비우면 기본 목록 (https://...catalog.json)" className={`${inputCls} font-mono text-[11px]`} spellCheck={false} />
+          <input value={value} onChange={(e) => setValue(e.target.value)} placeholder="선택 사항. 비워 두면 내장 목록 사용" className={`${inputCls} font-mono text-[11px]`} spellCheck={false} />
           <button type="submit" className={primary}>
             적용
           </button>

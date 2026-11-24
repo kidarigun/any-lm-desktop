@@ -110,7 +110,7 @@ pub struct ToolExecutionRecord {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnStats {
-    /// 서버에 보낸 요청 수 (하루 호출 한도에서 빠지는 수)
+    /// 이번 답변에 서버로 보낸 요청 수.
     pub api_calls: u32,
     /// 마지막 요청의 입력 토큰 수 (대화가 지금 얼마나 긴지)
     pub prompt_tokens: u64,
@@ -346,10 +346,14 @@ pub struct StoreManager {
     default_workspace: Option<PathBuf>,
 }
 
+const STORE_NAME: &str = "anylm_desktop_store.json";
+// 이전 Any LM 설치에서 쓰던 파일명. 같은 앱 데이터 폴더 안에서만 읽는다.
+const LEGACY_STORE_NAME: &str = "exaone_desktop_store.json";
+
 impl StoreManager {
     pub fn new(base_dir: &Path) -> Self {
         let _ = fs::create_dir_all(base_dir);
-        let db_path = base_dir.join("exaone_desktop_store.json");
+        let db_path = base_dir.join(STORE_NAME);
         Self { db_path, default_workspace: None }
     }
 
@@ -383,6 +387,20 @@ impl StoreManager {
             if let Some(mut db) = Self::read_db(&self.backup_path()) {
                 db.normalize_after_load();
                 let _ = self.save(&db);
+                return db;
+            }
+        }
+        if let Some(parent) = self.db_path.parent() {
+            let legacy = parent.join(LEGACY_STORE_NAME);
+            let read_previous = |path: &Path| {
+                path.symlink_metadata().ok().filter(|m| m.is_file())?;
+                Self::read_db(path)
+            };
+            if let Some(mut db) = read_previous(&legacy).or_else(|| read_previous(&legacy.with_extension("bak.json"))) {
+                db.normalize_after_load();
+                if let Err(e) = self.save(&db) {
+                    eprintln!("Any LM 저장 파일을 새 이름으로 저장하지 못했습니다: {e}");
+                }
                 return db;
             }
         }
@@ -524,14 +542,14 @@ mod tests {
             ..Default::default()
         });
         store.save(&db).unwrap();
-        assert!(!dir.path().join("exaone_desktop_store.json.tmp").exists(), "임시 파일은 남지 않는다");
+        assert!(!store.db_path.with_extension("json.tmp").exists(), "임시 파일은 남지 않는다");
 
         // 다시 열면 백업이 생긴다.
         assert_eq!(store.load().conversations.len(), 1);
         assert!(store.backup_path().is_file());
 
         // 저장 파일이 깨져도 빈 상태로 덮어쓰지 않고, 깨진 파일을 보관한 뒤 백업에서 되살린다.
-        fs::write(dir.path().join("exaone_desktop_store.json"), "{\"settings\": {").unwrap();
+        fs::write(&store.db_path, "{\"settings\": {").unwrap();
         let restored = store.load();
         assert_eq!(restored.conversations[0].title, "지킬 대화");
         let kept: Vec<_> = fs::read_dir(dir.path())
@@ -542,6 +560,24 @@ mod tests {
         assert_eq!(kept.len(), 1, "깨진 파일은 따로 보관한다");
     }
 
+    #[test]
+    fn anylm_loads_its_old_store_and_writes_the_new_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("exaone_desktop_store.json");
+        let old_data = br#"{"settings":{},"projects":[],"conversations":[{"id":"saved","projectId":"general-chat","title":"old chat","messages":[],"updatedAt":"2026-11-24"}],"snapshots":[]}"#;
+        fs::write(&old, old_data).unwrap();
+        let store = StoreManager::new(dir.path());
+        let mut db = store.load();
+        assert_eq!(db.conversations[0].id, "saved");
+        assert!(dir.path().join("anylm_desktop_store.json").is_file());
+        assert_eq!(fs::read(&old).unwrap(), old_data);
+
+        db.conversations[0].title = "updated chat".to_string();
+        store.save(&db).unwrap();
+        assert_eq!(store.load().conversations[0].title, "updated chat");
+        assert_eq!(fs::read(&old).unwrap(), old_data);
+    }
+
     /// 실제로 쓰던 저장 파일의 사본이 새 코드에서 그대로 읽히는지 본다.
     /// 실행: ANYLM_REAL_STORE=<저장 파일 경로> cargo test --lib store::tests::reads_a_real_store -- --ignored --nocapture
     #[test]
@@ -549,7 +585,7 @@ mod tests {
     fn reads_a_real_store_file() {
         let src = std::env::var("ANYLM_REAL_STORE").expect("ANYLM_REAL_STORE");
         let dir = tempfile::tempdir().unwrap();
-        fs::copy(&src, dir.path().join("exaone_desktop_store.json")).unwrap();
+        fs::copy(&src, dir.path().join(LEGACY_STORE_NAME)).unwrap();
         let store = StoreManager::new(dir.path());
         let db = store.load();
         let messages: usize = db.conversations.iter().map(|c| c.messages.len()).sum();
@@ -557,7 +593,7 @@ mod tests {
         assert!(!db.conversations.is_empty(), "사본을 읽지 못하고 빈 상태가 되었다");
         store.save(&db).unwrap();
         let before = fs::metadata(&src).unwrap().len();
-        let after = fs::metadata(dir.path().join("exaone_desktop_store.json")).unwrap().len();
+        let after = fs::metadata(&store.db_path).unwrap().len();
         println!("파일 크기: {} → {} 바이트", before, after);
         assert_eq!(store.load().conversations.len(), db.conversations.len());
     }

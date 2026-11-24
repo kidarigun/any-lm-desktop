@@ -57,8 +57,6 @@ struct Scenario {
     note: String,
     /// "chat" 또는 "project"
     mode: String,
-    /// low | high | max (없으면 high)
-    effort: Option<String>,
     tuning: Tuning,
     instructions: String,
     /// 프로젝트 폴더에 미리 만들어 둘 파일 (상대 경로 → 내용)
@@ -735,7 +733,6 @@ async fn live() {
             "id": sc.id,
             "startedAt": started_at,
             "mode": sc.mode,
-            "effort": sc.effort,
             "tuning": sc.tuning,
             "incomplete": incomplete,
             "wallMs": sc_start.elapsed().as_millis() as u64,

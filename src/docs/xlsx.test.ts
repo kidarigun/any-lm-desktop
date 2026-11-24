@@ -126,12 +126,12 @@ describe("xlsx 만들기·읽기·고치기", () => {
   });
 
   /**
-   * 다른 프로그램과 주고받기 확인 (EXAONE_XLSX_DIR를 지정했을 때만):
+   * 다른 프로그램과 주고받기 확인 (ANYLM_XLSX_DIR를 지정했을 때만):
    * - ours.xlsx를 써 두면 openpyxl 같은 외부 프로그램으로 열어 볼 수 있다.
    * - external.xlsx(외부 프로그램이 만든 파일, 공유 문자열 사용)가 있으면 읽어 external.md로 남긴다.
    */
-  it.runIf(!!process.env.EXAONE_XLSX_DIR)("외부 프로그램과 주고받기", async () => {
-    const dir = process.env.EXAONE_XLSX_DIR!;
+  it.runIf(!!process.env.ANYLM_XLSX_DIR)("외부 프로그램과 주고받기", async () => {
+    const dir = process.env.ANYLM_XLSX_DIR!;
     writeFileSync(`${dir}/ours.xlsx`, await markdownToXlsx(SALES, "매출"));
     let external: Uint8Array | null = null;
     try {

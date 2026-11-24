@@ -324,7 +324,7 @@ fn blob_dir() -> PathBuf {
     BLOB_DIR
         .get()
         .cloned()
-        .unwrap_or_else(|| std::env::temp_dir().join("exaone-desktop-blobs"))
+        .unwrap_or_else(|| std::env::temp_dir().join("anylm-desktop-blobs"))
 }
 
 fn save_blob(bytes: &[u8]) -> Result<String, String> {
@@ -996,11 +996,11 @@ mod tests {
     #[tokio::test]
     async fn shell_command_returns_utf8_output() {
         let dir = tempdir().unwrap();
-        let out = execute_shell_command(dir.path(), "Write-Output '안녕 EXAONE'", Duration::from_secs(60))
+        let out = execute_shell_command(dir.path(), "Write-Output '안녕 Any LM'", Duration::from_secs(60))
             .await
             .unwrap();
         assert!(out.contains("[Exit Code: 0]"), "{}", out);
-        assert!(out.contains("안녕 EXAONE"), "{}", out);
+        assert!(out.contains("안녕 Any LM"), "{}", out);
     }
 
     #[cfg(windows)]

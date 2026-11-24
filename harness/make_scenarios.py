@@ -78,7 +78,6 @@ scenarios = [
         "id": "chat-date",
         "note": "시스템 프롬프트의 현재 시각을 믿고 날짜 계산을 하는지",
         "mode": "chat",
-        "effort": "low",
         "turns": ["오늘 날짜와 요일을 알려 주고, 올해 크리스마스까지 며칠 남았는지 계산해 주세요."],
         "checks": [
             {"kind": "answerContains", "text": "11월 15일"},
@@ -91,7 +90,6 @@ scenarios = [
         "id": "chat-long-report",
         "note": "긴 답변: 출력이 중간에 끊기는지(finish_reason), 속도, 추론 분량",
         "mode": "chat",
-        "effort": "high",
         "turns": [
             "직원 50명 규모의 중소 제조기업이 생성형 AI를 업무에 도입하려고 합니다. 경영진에게 보고할 도입 전략 보고서를 써 주세요. "
             "목차는 1) 도입 배경 2) 적용할 업무 3) 단계별 추진 일정 4) 필요 예산 5) 위험과 대응 6) 기대 효과 7) 결론 순서로 하고, "
@@ -107,7 +105,6 @@ scenarios = [
         "id": "proj-report",
         "note": "파일 여러 개를 읽고 계산해서 보고서 저장: 라운드 수, 한 번에 여러 도구를 부르는지, 계산 정확도 (기본 설정)",
         "mode": "project",
-        "effort": "high",
         "files": {"data/sales_2025.csv": SALES_CSV, "notes/회의록_2025-12.md": MEETING},
         "turns": [
             "data 폴더의 매출 자료와 notes 폴더의 회의록을 읽고, 분기별 매출 합계 표와 개선 제안 3가지를 담은 보고서를 "
@@ -126,8 +123,6 @@ scenarios = [
         "id": "proj-excel-chart",
         "note": "Python 스크립트 작성 후 실행까지 한 답변에서 끝내는지 (이전 추론 유지 설정)",
         "mode": "project",
-        "effort": "high",
-        "tuning": {"preserveThinking": True},
         "files": {"data/sales_2025.csv": SALES_CSV},
         "approve": ["run_python"],
         "turns": ["data/sales_2025.csv로 제품별 월 매출 추이 꺾은선 차트가 들어간 엑셀 파일 reports/매출차트.xlsx를 만들어 줘."],
@@ -141,7 +136,6 @@ scenarios = [
         "id": "proj-modify",
         "note": "기존 파일 부분 수정: 읽지 않고 고치려다 실패하는지, 낮은 추론 강도에서의 정확도",
         "mode": "project",
-        "effort": "low",
         "files": {"README.md": README},
         "turns": ["README.md에서 현재 버전을 1.3.0으로 올리고, 변경 이력 맨 위에 '1.3.0 - 엑셀 내보내기 추가' 항목을 넣어 줘."],
         "checks": [
@@ -156,8 +150,6 @@ scenarios = [
         "id": "proj-skill",
         "note": "앱이 Skill을 미리 넣고 모델이 그 양식을 따르는지 (이전 추론 유지 설정). 파일 이름 날짜는 실행한 날({today}), 양식 검사는 날짜와 따로(*)",
         "mode": "project",
-        "effort": "high",
-        "tuning": {"preserveThinking": True},
         "files": {"notes/week.md": WEEK_NOTES},
         "skills": {"weekly-report": WEEKLY_SKILL},
         "turns": ["notes/week.md 메모를 바탕으로 이번 주 주간 업무 보고서를 만들어 줘."],
@@ -173,7 +165,6 @@ scenarios = [
         "id": "chat-multiturn",
         "note": "여러 번 주고받기: 앞에서 정한 규칙을 계속 지키는지, 앞 답을 기억하는지",
         "mode": "chat",
-        "effort": "low",
         "turns": [
             "이 대화에서는 모든 답변을 세 문장 이내로 해 주세요. 그리고 제 이름은 '한결'입니다. 알겠으면 '네'라고만 답하세요.",
             "재택근무의 장점과 단점을 알려 주세요.",
@@ -219,7 +210,6 @@ scenarios_2 = [
         "id": "proj-long-doc",
         "note": "긴 문서를 파일로 저장: 본문이 한꺼번에 도착할 때까지의 조용한 시간(120초 넘는지)과 끊김 여부",
         "mode": "project",
-        "effort": "high",
         "files": {"notes/ai_현황.md": AI_NOTES},
         "turns": [
             "notes/ai_현황.md를 참고해서 사내 AI 활용 안내서를 써 줘. 1) 왜 쓰는가 2) 쓸 수 있는 업무 3) 입력하면 안 되는 정보 "
@@ -239,7 +229,6 @@ scenarios_2 = [
         "id": "proj-modify-2",
         "note": "여러 곳 수정: 한 응답에 수정을 모으고, 다시 읽어 확인하지 않는지 (이전 6회 → 목표 3회)",
         "mode": "project",
-        "effort": "low",
         "files": {"config/설정.md": SETTINGS_MD},
         "turns": ["config/설정.md에서 담당자를 이서준으로, 점검 주기를 주 2회로 바꾸고, 목록 맨 끝에 '- 백업: 매일 02:00' 항목을 추가해 줘."],
         "checks": [
@@ -255,7 +244,6 @@ scenarios_2 = [
         "id": "proj-excel-2",
         "note": "스크립트 작성과 실행을 한 응답에 모으는지, 실행 뒤 다시 확인하지 않는지 (이전 6회 → 목표 3~4회)",
         "mode": "project",
-        "effort": "high",
         "files": {"data/visitors.csv": VISITORS_CSV},
         "approve": ["run_python"],
         "turns": ["data/visitors.csv로 요일별 방문자 막대 차트가 들어간 엑셀 파일 reports/방문자.xlsx를 만들어 줘."],
@@ -386,7 +374,6 @@ scenarios_3 = [
         "id": "proj-chart-code",
         "note": "run_python의 code로 스크립트 작성과 실행을 한 번에 하는지 (이전 5~6회 → 목표 3회)",
         "mode": "project",
-        "effort": "high",
         "files": {"data/비용.csv": COSTS_CSV},
         "approve": ["run_python"],
         "turns": ["data/비용.csv로 항목별 비용 비율을 보여 주는 원형 차트 이미지를 charts/비용.png로 만들어 줘."],
@@ -402,7 +389,6 @@ scenarios_3 = [
         "id": "proj-docx-plan",
         "note": "Word 문서 작성: 분량 요구가 있어도 검사용 스크립트를 만들지 않는지 (제목별 글자 수 제공 효과)",
         "mode": "project",
-        "effort": "high",
         "files": {"notes/신사업.md": PLAN_NOTES},
         "approve": ["run_python"],
         "turns": [
@@ -422,7 +408,6 @@ scenarios_3 = [
         "id": "proj-pptx",
         "note": "발표 자료: 슬라이드 나누기와 발표자 노트 규칙을 지키는지",
         "mode": "project",
-        "effort": "high",
         "files": {"notes/신사업.md": PLAN_NOTES},
         "turns": ["notes/신사업.md 내용으로 임원 보고용 발표 자료 5장을 slides/신사업.pptx로 만들어 줘. 각 장에 발표자 노트도 넣어 줘."],
         "checks": [
@@ -437,7 +422,6 @@ scenarios_3 = [
         "id": "proj-xlsx",
         "note": "엑셀을 Markdown 표로 만들기: 수식 칸과 시트 나누기 규칙",
         "mode": "project",
-        "effort": "low",
         "files": {"data/분기.csv": QUARTER_CSV},
         "turns": ["data/분기.csv로 엑셀 파일 reports/분기요약.xlsx를 만들어 줘. 분기마다 국내+해외 합계 열을 수식으로 넣고, 맨 아래에 연간 합계 행도 수식으로 넣어 줘."],
         "checks": [
@@ -452,7 +436,6 @@ scenarios_3 = [
         "id": "proj-multiturn",
         "note": "한 프로젝트에서 이어지는 요청 3번: 앞에서 쓴 내용을 기억해 다시 읽지 않는지",
         "mode": "project",
-        "effort": "high",
         "files": {"notes/회의_1112.md": MINUTES},
         "turns": [
             "notes/회의_1112.md를 읽고 결정 사항과 기한을 표로 정리해서 summary.md로 저장해 줘.",
@@ -473,7 +456,6 @@ scenarios_3 = [
         "id": "code-bugfix",
         "note": "코드 수정: 시험을 돌려 원인을 찾고, 고친 뒤 다시 돌려 확인하는지",
         "mode": "project",
-        "effort": "high",
         "files": {"calc.py": CALC_PY, "tests/test_calc.py": TEST_CALC_PY},
         "approve": ["run_python"],
         "turns": ["tests/test_calc.py를 실행하면 실패하는 항목이 있어. 원인을 찾아 calc.py를 고치고, 다시 실행해서 모두 통과하는지 확인해 줘."],
@@ -489,7 +471,6 @@ scenarios_3 = [
         "id": "proj-search",
         "note": "여러 파일에서 내용 찾기: search_files를 쓰는지, 파일을 하나씩 다 읽는지",
         "mode": "project",
-        "effort": "low",
         "files": POLICY_FILES,
         "turns": ["docs 폴더 문서들 중에서 환불할 때 금액이 깎이는 경우가 어디에 적혀 있는지 찾아서, 파일 이름과 내용을 알려 줘."],
         "checks": [
@@ -503,7 +484,6 @@ scenarios_3 = [
         "id": "proj-delete",
         "note": "삭제 승인 흐름: 여러 삭제를 한 응답에 모으는지, 남길 파일을 지키는지",
         "mode": "project",
-        "effort": "low",
         "files": {"보고서.md": "# 보고서\n", "임시1.tmp": "x", "임시2.tmp": "y", "old/백업.bak": "z"},
         "approve": ["delete_path"],
         "turns": ["확장자가 .tmp인 파일과 old 폴더를 지워 줘. 보고서.md는 그대로 둬."],
@@ -520,7 +500,6 @@ scenarios_3 = [
         "id": "chat-max-puzzle",
         "note": "추론 강도 '최대': 조건이 많은 문제에서 걸리는 시간과 정확도",
         "mode": "chat",
-        "effort": "max",
         "turns": [
             "다섯 팀(가, 나, 다, 라, 마)이 월요일부터 금요일까지 하루에 한 팀씩 발표합니다. 조건은 다음과 같습니다. "
             "① 가는 수요일보다 앞이다. ② 나는 가의 이틀 뒤다. ③ 다는 금요일이 아니다. ④ 라는 마보다 뒤다. ⑤ 마는 월요일이 아니다. "
@@ -536,7 +515,6 @@ scenarios_3 = [
         "id": "chat-long-input",
         "note": "긴 입력(주문 기록 520줄): 한가운데 정보를 찾는 정확도와 긴 입력의 응답 시간",
         "mode": "chat",
-        "effort": "low",
         "turns": [
             "아래는 주문 기록입니다.\n\n" + order_log() + "\n\n질문: 주문 #4263의 고객사, 수량, 담당자를 알려 주세요. 그리고 이 기록에서 담당자가 '한'인 주문은 모두 몇 건인가요?"
         ],
@@ -609,7 +587,6 @@ scenarios_4 = [
         "id": "proj-chart-2",
         "note": "한글이 든 차트: 글꼴 설정을 앱이 해 주면 한 번에 끝나는지 (이전 9회 → 목표 3회)",
         "mode": "project",
-        "effort": "high",
         "files": {"data/만족도.csv": SURVEY_CSV},
         "approve": ["run_python"],
         "turns": ["data/만족도.csv로 부서별 만족도 가로 막대 차트 이미지를 charts/만족도.png로 만들어 줘. 제목과 축 이름은 한글로 넣어 줘."],
@@ -625,7 +602,6 @@ scenarios_4 = [
         "id": "proj-append",
         "note": "직접 쓴 파일 끝에 덧붙이기: 다시 읽지 않고 바로 덧붙이는지 (이전 3회 → 목표 2회)",
         "mode": "project",
-        "effort": "high",
         "files": {"notes/todo.md": TODO_MD},
         "turns": [
             "notes/todo.md를 읽고 급한 순서대로 번호를 매긴 표를 plan.md로 저장해 줘.",
@@ -643,7 +619,6 @@ scenarios_4 = [
         "id": "code-bugfix-2",
         "note": "코드 수정 후 확인 실행: python 명령으로 실행해도 앱의 Python 실행기로 돌아가는지",
         "mode": "project",
-        "effort": "high",
         "files": {"textutil.py": TEXTUTIL_PY, "tests/test_textutil.py": TEST_TEXTUTIL_PY},
         "approve": ["run_python", "run_command"],
         "turns": ["tests/test_textutil.py에 실패하는 항목이 있어. textutil.py를 고치고 시험을 실행해서 모두 통과하는지 확인해 줘."],

@@ -235,7 +235,7 @@ export interface ChatMessage {
 }
 
 export interface TurnStats {
-  /** 서버에 보낸 요청 수 (하루 호출 한도에서 빠지는 수) */
+  /** 이번 답변에 서버로 보낸 요청 수. */
   apiCalls: number;
   promptTokens: number;
   completionTokens: number;

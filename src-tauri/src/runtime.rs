@@ -41,7 +41,7 @@ pub fn set_root(dir: PathBuf) {
 }
 
 fn root() -> PathBuf {
-    ROOT.get().cloned().unwrap_or_else(|| std::env::temp_dir().join("exaone-desktop-runtimes"))
+    ROOT.get().cloned().unwrap_or_else(|| std::env::temp_dir().join("anylm-desktop-runtimes"))
 }
 
 pub fn uv_dir() -> PathBuf {
@@ -88,10 +88,12 @@ pub fn node_installed() -> bool {
     node_dir().join(exe("node")).is_file()
 }
 /// 앱 전용 Python 설치가 끝까지 성공했다는 표시
-const COMPLETE_MARK: &str = ".exaone-complete";
+const COMPLETE_MARK: &str = ".anylm-complete";
+const LEGACY_COMPLETE_MARK: &str = ".exaone-complete";
 
 pub fn python_installed() -> bool {
-    pyenv_python().is_file() && pyenv_dir().join(COMPLETE_MARK).is_file()
+    pyenv_python().is_file()
+        && (pyenv_dir().join(COMPLETE_MARK).is_file() || pyenv_dir().join(LEGACY_COMPLETE_MARK).is_file())
 }
 
 /// 자식 프로세스에서 먼저 찾을 실행 파일 폴더 (설치된 것만)

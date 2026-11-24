@@ -252,9 +252,9 @@ describe("pdf", () => {
       workerSrc: pathToFileURL(join(pkg, "build", "pdf.worker.mjs")).href,
       assetBase: join(pkg, "/"),
     });
-    const text = await extractPdfText(minimalPdf(["Hello EXAONE", "Second line"]));
+    const text = await extractPdfText(minimalPdf(["Hello Any LM", "Second line"]));
     expect(text).toContain("## 페이지 1");
-    expect(text).toContain("Hello EXAONE");
+    expect(text).toContain("Hello Any LM");
     expect(text).toContain("Second line");
   });
 });

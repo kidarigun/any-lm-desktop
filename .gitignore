@@ -7,6 +7,7 @@ src-tauri/target/
 src-tauri/gen/schemas/
 
 # Local app data / secrets
+.anylm_data/
 .exaone_data/
 *.local
 .env

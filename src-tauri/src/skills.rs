@@ -43,7 +43,7 @@ pub fn user_dir() -> PathBuf {
     USER_DIR
         .get()
         .cloned()
-        .unwrap_or_else(|| std::env::temp_dir().join("exaone-desktop-skills"))
+        .unwrap_or_else(|| std::env::temp_dir().join("anylm-desktop-skills"))
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]

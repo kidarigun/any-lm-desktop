@@ -29,7 +29,7 @@ def speed(t):
 def summary(run_dir):
     for d in load(run_dir):
         s = d["summary"]
-        print(f"\n## {s['id']}  [{s['mode']} / 추론 {s['effort']}{' / 추론 유지' if s['tuning'].get('preserveThinking') else ''}]"
+        print(f"\n## {s['id']}  [{s['mode']}]"
               f"{'  (중단됨)' if s['incomplete'] else ''}")
         print(f"   {d['scenario']['note']}")
         print(f"   호출 {s['apiCalls']}회, {s['wallMs'] / 1000:.0f}초, 검사 {s['checksPassed']}/{s['checksTotal']}, "

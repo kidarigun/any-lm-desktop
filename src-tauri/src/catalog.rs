@@ -1,6 +1,6 @@
 //! Skill·MCP 찾아보기 목록(카탈로그) 불러오기와 목록에서 설치하기.
 //!
-//! 목록은 https 주소의 JSON 파일 하나다 (기본: GitHub 저장소의 catalog.json).
+//! 사용자가 원격 목록을 설정하면 해당 HTTPS 주소의 JSON을 불러온다. 기본 목록은 앱에 내장한다.
 //! 마지막으로 받은 목록을 앱 데이터 폴더에 저장해 두어, 인터넷이 안 될 때도 보여 준다.
 //! 목록의 내용 검사와 화면 구성은 웹뷰에서 하고, 여기서는 받아오기·해시 검사·설치만 맡는다.
 
@@ -11,7 +11,6 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub const DEFAULT_CATALOG_URL: &str = "https://raw.githubusercontent.com/kidarigun/exaone-catalog/main/catalog.json";
 const MAX_CATALOG_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SKILL_ZIP_BYTES: usize = 20 * 1024 * 1024;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(20);
@@ -73,6 +72,15 @@ fn parse_catalog(bytes: &[u8]) -> Result<Value, String> {
 
 /// 목록을 받아온다. 실패하면 같은 주소에서 마지막으로 받은 목록을 돌려준다.
 pub async fn load(url: &str, cache_dir: &Path) -> Result<CatalogResult, String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Ok(CatalogResult {
+            url: String::new(),
+            catalog: serde_json::json!({"version": 1, "name": "Any LM Desktop 기본 목록", "skills": [], "mcp": []}),
+            from_cache: false,
+            error: None,
+        });
+    }
     let fetched = match fetch_bytes(url, MAX_CATALOG_BYTES).await {
         Ok(b) => parse_catalog(&b),
         Err(e) => Err(e),
@@ -115,7 +123,7 @@ pub async fn install_skill(url: &str, sha256: &str, overwrite: bool) -> Result<s
         return Err("받은 파일이 목록에 적힌 것과 다릅니다(sha256 불일치). 목록이 갱신 중일 수 있으니 잠시 뒤 다시 시도하세요.".to_string());
     }
     tokio::task::spawn_blocking(move || {
-        let tmp = std::env::temp_dir().join(format!("exaone-skill-{}.zip", uuid::Uuid::new_v4().simple()));
+        let tmp = std::env::temp_dir().join(format!("anylm-skill-{}.zip", uuid::Uuid::new_v4().simple()));
         std::fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
         let res = skills::install_from_zip(&tmp, overwrite);
         let _ = std::fs::remove_file(&tmp);
@@ -158,7 +166,7 @@ mod tests {
 
     #[test]
     fn only_https_urls() {
-        assert!(check_url(DEFAULT_CATALOG_URL).is_ok());
+        assert!(check_url("https://example.com/catalog.json").is_ok());
         assert!(check_url("http://example.com/catalog.json").is_err());
         assert!(check_url("file:///C:/catalog.json").is_err());
     }
@@ -185,26 +193,40 @@ mod tests {
         assert!(load("https://127.0.0.1:1/other.json", dir.path()).await.is_err());
     }
 
-    /// 실제 기본 목록으로: cargo test --lib live_ -- --ignored --nocapture
+    #[tokio::test]
+    async fn default_catalog_works_without_a_remote_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = load("", dir.path()).await.unwrap();
+        assert!(result.url.is_empty());
+        assert_eq!(result.catalog["version"], 1);
+        assert!(!cache_path(dir.path()).exists());
+    }
+
+    /// 사용자가 정한 실제 목록으로: ANYLM_CATALOG_URL 설정 후 cargo test --lib live_catalog -- --ignored --nocapture
     #[tokio::test]
     #[ignore]
     async fn live_catalog_skill_install_and_remote_mcp() {
         let dir = tempfile::tempdir().unwrap();
         skills::set_user_dir(dir.path().join("skills"));
-        let r = load(DEFAULT_CATALOG_URL, dir.path()).await.unwrap();
+        let configured = std::env::var("ANYLM_CATALOG_URL").expect("ANYLM_CATALOG_URL");
+        let base = reqwest::Url::parse(&configured).unwrap();
+        let r = load(&configured, dir.path()).await.unwrap();
         assert!(!r.from_cache);
         let cat = r.catalog;
-        let mut url = String::new();
+        let mut installed_url = None;
         for skill in cat["skills"].as_array().unwrap() {
-            url = format!("https://raw.githubusercontent.com/kidarigun/exaone-catalog/main/{}", skill["download"].as_str().unwrap());
-            let info = install_skill(&url, skill["sha256"].as_str().unwrap(), false).await.unwrap();
+            let url = base.join(skill["download"].as_str().unwrap()).unwrap();
+            let info = install_skill(url.as_str(), skill["sha256"].as_str().unwrap(), false).await.unwrap();
+            installed_url = Some(url);
             eprintln!("skill installed: {} ({} files) desc={}…", info.name, info.files.len(), info.description.chars().take(40).collect::<String>());
             assert!(info.error.is_none(), "{}: {:?}", info.name, info.error);
             assert_eq!(info.name, skill["skillName"].as_str().unwrap());
         }
         eprintln!("available to model: {}", skills::available(None).len());
         // 해시가 다르면 설치하지 않는다
-        assert!(install_skill(&url, &"0".repeat(64), true).await.unwrap_err().contains("sha256"));
+        if let Some(url) = installed_url {
+            assert!(install_skill(url.as_str(), &"0".repeat(64), true).await.unwrap_err().contains("sha256"));
+        }
 
         for m in cat["mcp"].as_array().unwrap() {
             if m["install"]["transport"] != "http" || m["inputs"].as_array().is_some_and(|i| i.iter().any(|x| x["required"] != false)) {

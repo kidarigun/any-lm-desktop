@@ -39,7 +39,6 @@ pub struct TraceToolCall {
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoundTrace {
-    pub effort: String,
     pub message_count: usize,
     pub request_chars: usize,
     pub tool_count: usize,
@@ -1984,7 +1983,6 @@ pub async fn run_exaone_turn<R: Runtime>(
 
         let round_started = Instant::now();
         let mut trace = RoundTrace {
-            effort: String::new(),
             message_count: body["messages"].as_array().map_or(0, Vec::len),
             request_chars: body["messages"].as_array().map_or(0, |m| total_chars(m)),
             tool_count: body["tools"].as_array().map_or(0, Vec::len),
@@ -3475,7 +3473,7 @@ mod tests {
             api_key: "test-key".into(),
             api_key_set: true,
             server_url: url,
-            model: "k-exaone_v2.5".into(),
+            model: "qwen3.5-9b".into(),
             writing_style: "default".into(),
             ..AppSettings::default()
         }
@@ -3878,7 +3876,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
-                model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768,
+                model_key: "qwen3.5-9b", model_display_name: "", reasoning_options: &[], context_length: 32768,
                 project: None,
                 conversation_id: "conv-busy",
                 history: &history,
@@ -3967,7 +3965,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
-                model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768,
+                model_key: "qwen3.5-9b", model_display_name: "", reasoning_options: &[], context_length: 32768,
                 project: Some(&project),
                 conversation_id: "conv-1",
                 history: &history,
@@ -4032,7 +4030,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
-                model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768,
+                model_key: "qwen3.5-9b", model_display_name: "", reasoning_options: &[], context_length: 32768,
                 project: Some(&project),
                 conversation_id: "conv-2",
                 history: &[user.clone()],
@@ -4058,7 +4056,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
-                model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768,
+                model_key: "qwen3.5-9b", model_display_name: "", reasoning_options: &[], context_length: 32768,
                 project: Some(&project),
                 conversation_id: "conv-2",
                 history: &history,
@@ -4108,7 +4106,7 @@ mod tests {
             app.handle(),
             TurnRequest {
                 settings: &settings,
-                model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768,
+                model_key: "qwen3.5-9b", model_display_name: "", reasoning_options: &[], context_length: 32768,
                 project: None,
                 conversation_id: "conv-3",
                 history: &[msg("user", "길게 말해줘")],
@@ -4333,7 +4331,7 @@ mod tests {
         let history = vec![msg("user", "a.txt 읽어 줘")];
         let (out, _) = run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "", auto_skill: None },
+            TurnRequest { settings: &settings, model_key: "qwen3.5-9b", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "", auto_skill: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -4535,7 +4533,7 @@ content-length: {}
             app.handle(),
             TurnRequest {
                 settings: &settings,
-                model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768,
+                model_key: "qwen3.5-9b", model_display_name: "", reasoning_options: &[], context_length: 32768,
                 project: Some(&project),
                 conversation_id: "c",
                 history: &history,
@@ -4579,7 +4577,7 @@ content-length: {}
             async move {
                 run_exaone_turn(
                     app.handle(),
-                    TurnRequest { settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "", auto_skill: None },
+                    TurnRequest { settings, model_key: "qwen3.5-9b", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c", history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "", auto_skill: None },
                     Arc::new(AtomicBool::new(false)),
                 )
                 .await
@@ -4654,7 +4652,7 @@ content-length: {}
         let settings = test_settings(url);
         run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: None, conversation_id: "conv-r", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "", auto_skill: None },
+            TurnRequest { settings: &settings, model_key: "qwen3.5-9b", model_display_name: "", reasoning_options: &[], context_length: 32768, project: None, conversation_id: "conv-r", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "", auto_skill: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -4812,7 +4810,7 @@ content-length: {}
         let history = vec![msg("user", "a.txt 써줘")];
         let (out, _) = run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c-eof", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "", auto_skill: None },
+            TurnRequest { settings: &settings, model_key: "qwen3.5-9b", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c-eof", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "", auto_skill: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -4842,7 +4840,7 @@ content-length: {}
         let history = vec![msg("user", "긴 문서 써줘")];
         let (out, _) = run_exaone_turn(
             app.handle(),
-            TurnRequest { settings: &settings, model_key: "k-exaone_v2.5", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c-trunc", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "", auto_skill: None },
+            TurnRequest { settings: &settings, model_key: "qwen3.5-9b", model_display_name: "", reasoning_options: &[], context_length: 32768, project: Some(&project), conversation_id: "c-trunc", history: &history, compaction: None, continue_from: None, mode: "", checkpoint: None, knowledge: "", auto_skill: None },
             Arc::new(AtomicBool::new(false)),
         )
         .await

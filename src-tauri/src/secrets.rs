@@ -1,32 +1,32 @@
 //! LM Studio API 토큰을 설정 파일(평문 JSON) 대신 Windows 자격 증명 관리자에 보관한다.
 
 pub const SERVICE: &str = "io.github.kidarigun.anylm-desktop";
-const ACCOUNT: &str = "exaone-api-key";
-
-fn entry() -> Result<keyring::Entry, String> {
-    keyring::Entry::new(SERVICE, ACCOUNT).map_err(|e| format!("자격 증명 저장소를 열 수 없습니다: {}", e))
-}
+const ACCOUNT: &str = "lm-studio-api-token";
+const LEGACY_ACCOUNT: &str = "exaone-api-key";
 
 /// 저장된 키. 없으면 `None`.
 pub fn load_api_key() -> Result<Option<String>, String> {
-    match entry()?.get_password() {
-        Ok(k) => Ok(Some(k)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(format!("API 토큰을 읽지 못했습니다: {}", e)),
+    let current = load_secret(ACCOUNT)?;
+    if current.is_some() {
+        return Ok(current);
     }
+    let legacy = load_secret(LEGACY_ACCOUNT)?;
+    if let Some(token) = &legacy {
+        if let Err(e) = store_api_key(token) {
+            eprintln!("기존 LM Studio 토큰을 새 저장 이름으로 복사하지 못했습니다: {e}");
+        }
+    }
+    Ok(legacy)
 }
 
 pub fn store_api_key(key: &str) -> Result<(), String> {
-    entry()?
-        .set_password(key)
-        .map_err(|e| format!("API 토큰을 Windows 자격 증명 관리자에 저장하지 못했습니다: {}", e))
+    store_secret(ACCOUNT, key)
 }
 
 pub fn delete_api_key() -> Result<(), String> {
-    match entry()?.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(format!("API 토큰을 삭제하지 못했습니다: {}", e)),
-    }
+    // 사용자가 삭제하면 이전 이름의 토큰까지 지워야 다시 불러오지 않는다.
+    delete_secret(LEGACY_ACCOUNT)?;
+    delete_secret(ACCOUNT)
 }
 
 /// MCP 서버의 환경 변수·헤더 값처럼 이름(account)별로 나눠 두는 비밀 값
@@ -61,7 +61,7 @@ mod tests {
     #[test]
     #[ignore]
     fn credential_manager_round_trip() {
-        let e = keyring::Entry::new(super::SERVICE, "exaone-selftest").unwrap();
+        let e = keyring::Entry::new(super::SERVICE, "anylm-selftest").unwrap();
         e.set_password("키-테스트-123").unwrap();
         assert_eq!(e.get_password().unwrap(), "키-테스트-123");
         e.delete_credential().unwrap();

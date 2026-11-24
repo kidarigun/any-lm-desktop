@@ -26,7 +26,7 @@ export { imageSize };
 
 const BODY_FONT = "Malgun Gothic";
 const CODE_FONT = "Consolas";
-const ORDERED_REF = "exaone-ordered";
+const ORDERED_REF = "anylm-ordered";
 
 // ---------------------------------------------------------------------------
 // DOCX → HTML / Markdown

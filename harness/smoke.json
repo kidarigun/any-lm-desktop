@@ -3,7 +3,6 @@
     "id": "smoke-hello",
     "note": "연결 확인: 속도, 토큰 사용량, 날짜 인식",
     "mode": "chat",
-    "effort": "low",
     "turns": ["안녕하세요. 오늘이 몇 년 몇 월 며칠이라고 생각하는지, 그리고 그렇게 생각한 근거를 두 문장으로 알려 주세요."],
     "checks": [{ "kind": "finished" }]
   }
