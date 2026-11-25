@@ -48,6 +48,9 @@ pub fn urls(server_url: &str) -> Result<OpenAiCompatUrls, String> {
 
 const QUICK_TIMEOUT: Duration = Duration::from_secs(10);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+/// `/props` 조회 시간. 모델 목록(`list_models`)이 이 조회를 품고 턴 시작 때 `PROBE_TIMEOUT` 안에 끝나야 하므로
+/// 그보다 훨씬 짧게 둔다(llama.cpp가 아닌 서버에서 오래 기다리지 않게).
+const PROPS_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn client(timeout: Duration) -> Result<reqwest::Client, String> {
     super::local_http_client(timeout)
@@ -145,7 +148,7 @@ pub fn parse_models(v: &Value, settings: &AppSettings, runtime_n_ctx: Option<u32
 
 /// llama.cpp `GET /props`에서 실행 중 컨텍스트를 묻는다. 실패하면(다른 서버·꺼짐·느림) `None`.
 async fn fetch_props_n_ctx(settings: &AppSettings, props_url: &str) -> Option<u32> {
-    let c = client(PROBE_TIMEOUT).ok()?;
+    let c = client(PROPS_TIMEOUT).ok()?;
     let resp = lmstudio::authorize(c.get(props_url), &settings.api_key).send().await.ok()?;
     if !resp.status().is_success() {
         return None;
