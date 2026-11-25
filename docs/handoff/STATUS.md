@@ -6,7 +6,7 @@
 ## 진행 중
 - 계획 파일: `docs/superpowers/plans/2026-11-23-any-lm-desktop.md`
 - 후속 계획: `docs/superpowers/plans/2026-11-24-resume-and-agent-loop.md`, `docs/superpowers/plans/2026-11-24-multi-local-providers.md`, `docs/superpowers/plans/2026-11-24-updater-settings-release.md`
-- 작업 1(저장소 만들기와 인계 체계): 완료. 단계 6은 사용자 승인 뒤 2026-11-23에 GitHub 비공개 저장소 `kidarigun/any-lm-desktop`을 만들고 `origin`으로 `main`을 push했다.
+- 작업 1(저장소 만들기와 인계 체계): 완료. 단계 6은 사용자 승인 뒤 2026-11-23에 GitHub 저장소 `kidarigun/any-lm-desktop`을 만들고 `origin`으로 `main`을 push했다(만들 때는 비공개였고, 지금은 공개 저장소다).
 - 작업 2(정체성 분리와 업데이트 제거): 완료. 제품명·identifier·버전·크레이트명·자격 증명 서비스명·단일 실행 포트(45789 → 최종 검토 뒤 45790, MCP OAuth 포트도 45789 → 45791)·미리보기 호스트·대화상자 환경 변수·localStorage 접두어(`anylm_`)·기본 작업 폴더(`문서\AnyLM`)를 바꾸고, 업데이트 기능(`tauri-plugin-updater`, UpdatePanel, `check_update`/`install_update`, `checkUpdates` 설정, `make_latest_json.py`)과 `migrate_old_data_dir`을 삭제했다.
 
 - 작업 3(설정을 LM Studio 연결로 바꾸기): 완료. `lmstudio.rs`(server_urls·authorize·friendly_error) 추가, `AppSettings`를 serverUrl/선택 토큰/autoCompact/modelPrefs로 교체, exaone.rs의 API 키 필수 검사·reasoning_effort 삭제, 추론 강도 선택 UI 삭제(작업 6에서 모델 선택기가 들어갈 자리). 설정 대화상자는 최소 수정만 했다(작업 5에서 재구성).
@@ -74,16 +74,18 @@
   - 남은 것: 실제 모델(9B·35B)로 오탐이 사라졌는지와 0.5/1.0 값의 효과는 아직 실측하지 않았다(아래 수동 확인 목록).
 - 전체 검토 수정 3차(공급자·터미널·버전·문서): 완료. 버전 0.1.1. 커밋 `5d90555`·`9ba842b`·`0459f66`·`c7f74c7`·`9d49771`·`62bf269`·`d929a2b`·`15f427c`·`0ddedf8`.
   - T0: `dev_servers::tests::server_commands_run_in_the_project_folder_not_windows`가 ConPTY 화면 대신 `cd` 결과를 쓴 파일을 읽는다(전체 테스트 3번 연속 통과, `process_path`를 되돌리면 `C:\Windows`로 실패).
-  - B-I2: Ollama 채팅은 `/api/chat`으로 보내고 요청마다 `options.num_ctx`(턴 컨텍스트)·`keep_alive`(5m)를 싣는다. 변환은 `providers/ollama.rs`의 순수 함수(`native_chat_body`·`NativeStream`·`native_response_to_openai`)이고, 에이전트 루프는 보내기 직전(`providers::chat_body`)과 줄 해석 직전(`providers::ChatStream`)에만 끼운다. 로드 안 된 모델의 턴 컨텍스트는 원하는 값(설정, 없으면 16K, 모델 최대로 자름). `ollama serve`에 설정 주소의 `OLLAMA_HOST`를 주고 PATH 상대 항목은 건너뛴다. Ollama가 이 PC에 없어 문서 예시 표본으로만 시험했다(수동 확인 목록).
+  - B-I2: Ollama 채팅은 `/api/chat`으로 보내고 요청마다 `options.num_ctx`(턴 컨텍스트)를 싣는다. `keep_alive`는 채팅·요약에 싣지 않아 사용자의 `OLLAMA_KEEP_ALIVE`를 따르고(같은 `num_ctx`면 다시 로드하지 않음), 미리 로드(5m)·언로드(0)에만 쓴다. `thinking` 능력이 있는 모델은 추론 설정이 꺼짐이면 `think: false`, 아니면 `think: true`(low·medium·high는 그 값), 능력이 없으면 `think`를 보내지 않는다. 변환은 `providers/ollama.rs`의 순수 함수(`native_chat_body`·`NativeStream`·`native_response_to_openai`)이고, 에이전트 루프는 보내기 직전(`providers::chat_body`)과 줄 해석 직전(`providers::ChatStream`)에만 끼운다. 로드 안 된 모델의 턴 컨텍스트는 원하는 값(설정, 없으면 16K, 모델 최대로 자름). `ollama serve`에 설정 주소의 `OLLAMA_HOST`를 주고 PATH 상대 항목은 건너뛴다. Ollama가 이 PC에 없어 문서 예시 표본으로만 시험했다(수동 확인 목록).
   - B-I3: llama.cpp식 목록이면 `/props`의 `default_generation_settings.n_ctx`를 실행 컨텍스트로 쓰고, 모르면 `min(n_ctx_train, 16K)`. 사용자 값은 서버 한도를 넘지 않는다.
   - B-I5: 대화의 `modelProvider`(예전 대화는 LM Studio)가 지금 공급자와 다르면 `modelKey`를 쓰지 않는다. 화면 모델 목록은 받은 공급자와 함께 들고, 공급자가 다르거나 새 공급자 목록 받기가 실패하면 비운다. OpenAI 호환 서버가 빈 목록이면 기본 모델로 입력한 ID만 Ready.
-  - C-I2: 읽기 대기열 16 KB × 64(sync_channel). 링 버퍼는 모두 받고, 화면은 16 ms마다·초당 2 MB까지, 대기 256 KB를 넘으면 오래된 것을 버리고 `[출력 N바이트 생략]`. 화면 쪽은 xterm write 콜백으로 256 K자 넘게 밀리면 대기열, 1 M자 넘으면 같은 표시로 버림(`outputFlow.ts`).
+  - C-I2: 읽기 대기열 16 KB × 64(sync_channel). 링 버퍼는 모두 받고, 화면은 16 ms마다·초당 2 MB까지, 대기 256 KB를 넘으면 오래된 것을 버리고 `[출력 N바이트 생략]`. 화면 쪽은 xterm write 콜백으로 256 K자 넘게 밀리면 대기열, 1 M자 넘으면 같은 표시로 버림(`outputFlow.ts`). 표시는 CAN(0x18)·SGR 초기화로 시작해 잘린 OSC·CSI 순서에 먹히지 않고, 터미널 화면을 닫으면 `OutputFlow.dispose()`로 쓰기를 멈춘다.
+  - 3차 수정 1회차(`dad3c96`·`5034428`·`784d1b8`·`d6e78cf`): 위 생략 표시·dispose, Ollama `keep_alive` 빼기와 `think`, llama.cpp `/props` 조회 1초(턴 정보 3초 안), T0 테스트의 임시 경로 공백 단정 빼기.
+  - 남은 것(3차): Ollama가 프롬프트를 `num_ctx`에 거의 채우면(`prompt_eval_count` ≥ `num_ctx`−256) 앞부분을 오류 없이 잘라 낸다. 지금은 로그(`[ollama] 프롬프트가 컨텍스트에 거의 찼습니다`)만 남기고, 다음 라운드의 넘침 처리(압축)로 잇지 않는다(압축 경로를 건드려야 해서 미룸). cmd 셸 명령(개발 서버·터미널)에 큰따옴표가 있으면 portable-pty가 `/c` 인자 안의 따옴표를 `\"`로 바꿔 cmd가 잘못 읽는다(기존 문제, 고치지 않음).
   - 사소한 것: 모델 최대 컨텍스트 선택지(40K·256K 등), README `ANYLM_CONTEXT` 16384, NOTICE(공개·세 공급자·Ollama 비보증), 결정 0014 기록 바로잡기, `.gitignore`의 `*.key`·`*.sig`, LOG의 "(이 커밋)" 17개를 실제 해시로.
 
 ## 다음 할 일
 0. **전체 검토 수정 3차 검토와 실측**: 3차 커밋(`5d90555`..`0ddedf8`)을 검토한다. Ollama가 있는 PC에서 16K 확인(아래 "Ollama 컨텍스트"), 터미널 홍수 확인(아래 "터미널 출력 홍수")을 한다. 0.1.1 설치 파일은 아직 만들지 않았다.
 1. **남은 화면 QA**: 아래 수동 확인 목록의 기존 기능과 공급자 로그인·계정 확인을 이어서 점검한다. Windows 개발 앱에서 이번 변경의 터미널·로컬 미리보기·연결 창은 확인했다.
-2. **원격 반영**: GitHub 비공개 저장소 개설과 인계 연습은 완료했다. `main`이 `origin/main`을 추적한다. 이후 원격 푸시는 사용자가 허락한 경우에만 진행한다.
+2. **원격 반영**: GitHub 공개 저장소 개설과 인계 연습은 완료했다. `main`이 `origin/main`을 추적한다. 이후 원격 푸시는 사용자가 허락한 경우에만 진행한다.
 3. **미뤄 둔 사소한 점(최종 검토, 지금 고치지 않아도 됨)**:
    - 9: AI 요약의 대화 글자 상한이 고정 60,000자이고 생각 켜짐을 물려받아 8K/32K에서 로컬 요약으로 자주 떨어짐 → 컨텍스트×1.5×0.6 상한, 요약은 생각 끄기 검토.
    - 10: 수정 후 다시 보내기는 화면을 되돌리기 전에 모델 준비를 한다. 승인 후 이어가기에는 별도 준비 단계가 없으며, 다시 보내기에는 자동 요약 압축이 없다.
@@ -98,6 +100,7 @@
 ## 마지막 확인
 2026-11-25, 전체 검토 수정 2차 보강 2(검토 수정 2차, 결정 0017 보강 2) 뒤: `cd src-tauri && cargo test --lib` 367 통과·0 실패·12 무시(분리 타깃 폴더), `cargo check --all-targets` 경고·오류 없음, `npm test` 통과(33 파일, 198 통과·1 건너뜀), `npx tsc --noEmit` 오류 없음. 앱은 띄우지 않았다.
 2026-11-25, 전체 검토 수정 3차 뒤: `cd src-tauri && cargo test --lib` 359 통과·0 실패·12 무시를 3번 연속(분리 타깃 폴더, 이전 간헐 실패 테스트 포함), `cargo test --lib terminal_flood -- --ignored` 통과(실제 PTY 20만 줄, 약 23초), `cargo check --all-targets` 경고·오류 없음, `npm test` 통과(33 파일, 198 통과·1 건너뜀), `npx tsc --noEmit` 오류 없음, `npm run build` 성공. Ollama·llama.cpp는 이 PC에 없어 실제 서버로는 시험하지 않았다. 앱은 띄우지 않았다.
+2026-11-25, 전체 검토 수정 3차 수정 1회차 뒤(`0658a44` 위): `cd src-tauri && cargo test --lib` 371 통과·0 실패·12 무시를 2번 연속(분리 타깃 폴더), `cargo check --all-targets` 경고·오류 없음, `npm test` 통과(33 파일, 199 통과·1 건너뜀), `npx tsc --noEmit` 오류 없음, `npm run build` 성공. Ollama·llama.cpp 실제 서버로는 시험하지 않았다. 앱은 띄우지 않았다.
 2026-11-25, 전체 검토 수정 2차 보강(검토 수정 1차, 결정 0015·0017 보강) 뒤: `npm test` 통과(32 파일, 192 통과·1 건너뜀), `npx tsc --noEmit` 오류 없음, `cd src-tauri && cargo test --lib` 341 통과·1 실패·11 무시(분리 타깃 폴더). 실패한 1개는 `dev_servers::tests::server_commands_run_in_the_project_folder_not_windows`다. cmd 출력이 비어 간헐적으로 실패하며, 단독으로 다시 돌리면 통과한다. 이번 수정 전 커밋 `04b34c1`에서도 3번 중 2번 같은 식으로 실패해, 이번 수정과는 관계없다. `cargo check --all-targets` 경고·오류 없음. 앱은 띄우지 않았다.
 2026-11-25, 전체 검토 수정 2차(결정 0015·0017 갱신) 뒤: `npm test` 통과(32 파일, 192 통과·1 건너뜀), `npx tsc --noEmit` 오류 없음, `cd src-tauri && cargo test --lib` 330 통과·0 실패·11 무시(사고 탐지 오탐 회귀, 도구 가드 시퀀스, 이번 턴 줄이기·이어 쓰기 인자, 반복 재시도 단계, 서버 로그 끝부분 테스트 포함, 분리 타깃 폴더), `cargo check --all-targets` 경고·오류 없음. 앱은 띄우지 않았다.
 2026-11-25, 전체 검토 수정 1차(결정 0019) 뒤: `npm test` 통과(32 파일, 192 통과·1 건너뜀), `npx tsc --noEmit` 오류 없음, `cd src-tauri && cargo test --lib` 313 통과·0 실패·11 무시(`ipc_guard::tests::`, `dev_servers::tests::server_commands_run_in_the_project_folder_not_windows`·`ipv6_only_server_is_seen_through_localhost`, `fs_ops::tests::process_path_drops_the_verbatim_prefix_only`, `providers::tests::local_client_returns_redirects_as_is` 포함), `cargo check --all-targets` 경고·오류 없음, `npm run build` 성공. 프레임 차단의 실제 창 확인은 수동 확인 목록에 남겼다.
@@ -278,7 +281,8 @@
 
 ### Ollama 컨텍스트 (전체 검토 수정 3차, B-I2)
 - Ollama가 있는 PC에서 [Ollama 연결]로 모델을 16K로 로드하고 한 번 대화한다. `ollama ps`의 CONTEXT가 16384여야 한다. 5분 넘게 쉬었다가(모델이 내려감) 다시 보내도 `ollama ps`가 16384로 다시 올라와야 한다(4096이면 실패).
-- 도구 호출(파일 읽기 등)과 결과가 이어지고, "생각하기"를 끄면 추론이 나오지 않는지(`think: false`), 생각 창에 추론이 보이는지 확인한다.
+- 도구 호출(파일 읽기 등)과 결과가 이어지고, "생각하기"를 끄면 추론이 나오지 않는지(`think: false`), 켜 두면(`think: true`) 추론이 본문이 아니라 생각 창에 보이는지 확인한다. 생각하기가 없는 모델(예: llama3.2)이 `think` 없이 오류 없이 답하는지도 본다.
+- `OLLAMA_KEEP_ALIVE=30m`으로 띄운 Ollama에서 대화한 뒤 `ollama ps`의 UNTIL이 30분 뒤인지(앱이 5분으로 덮어쓰지 않음).
 - [서버 시작]으로 켠 Ollama가 설정한 주소·포트에서 열리는지(예: 주소를 `http://127.0.0.1:11500`으로 바꾼 뒤 [서버 시작]).
 
 ### OpenAI 호환 컨텍스트 (전체 검토 수정 3차, B-I3·B-I5)
