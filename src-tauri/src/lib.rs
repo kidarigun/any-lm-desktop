@@ -3042,7 +3042,8 @@ mod tests {
         let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
         assert_eq!(conf["productName"], "Any LM Desktop");
         assert_eq!(conf["identifier"], "io.github.kidarigun.anylm-desktop");
-        assert_eq!(conf["version"], "0.1.0");
+        assert_eq!(conf["version"], "0.1.1");
+        assert_eq!(conf["version"], env!("CARGO_PKG_VERSION"), "tauri.conf.json과 Cargo.toml 버전이 같아야 한다");
         assert_eq!(
             conf["plugins"]["updater"]["endpoints"],
             serde_json::json!(["https://github.com/kidarigun/any-lm-desktop/releases/latest/download/latest.json"])
