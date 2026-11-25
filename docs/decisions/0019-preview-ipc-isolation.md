@@ -41,6 +41,10 @@
 - **오래된 WebView2 런타임**: `ICoreWebView2Frame7`이 없는 런타임은 1.0.2420보다 오래된 것이다. 이런 런타임에서는 최상위 문서의 직속 iframe만 감시하고, 로그에 "중첩 iframe 이동은 감시하지 못합니다"를 한 번 남긴다. 앱 명령은 이때도 1번이 막는다.
 - **실행 중 확인**: 프레임 감시가 실제로 걸리는지는 Windows 개발 창에서 확인해야 한다. 절차는 STATUS 수동 확인 목록의 "미리보기 IPC 격리 (결정 0019)"에 있다. 단위 테스트는 출처·호스트 판정과 Tauri 모의 런타임에서의 거절을 확인한다.
 
+## 확인
+
+- 2026-11-25에 실행 중 확인(controller, `tauri dev` + WebView2 CDP): 메인 창이 그려지고 앱 invoke가 동작하며, `plugin:event|listen`은 되고 `plugin:event|emit`은 거부된다. 127.0.0.1:5173 페이지에는 `__TAURI_INTERNALS__`가 있었지만 invoke·emit이 거절됐다. `http://tauri.localhost:5173`·`http://ipc.localhost:5173`으로 가는 iframe(만들 때와 다시 이동할 때 모두)은 취소되고 "차단한 iframe 이동"이 찍혔다. WebView2 1.0.2420 미만 런타임의 중첩 프레임 경우는 확인하지 않았다.
+
 ## 참고
 
 - tauri 2.12.5 `src/ipc/protocol.rs`(`Origin` 헤더 → `InvokeRequest.url`, `postMessage` 경로는 `WebMessageReceived`의 `Source`)

@@ -1,7 +1,7 @@
 # STATUS — 현재 상태 한 장
 
 ## 지금 목표
-원본 K-EXAONE Desktop 0.4.4를 멀티 로컬 LLM(LM Studio · Ollama · OpenAI 호환) 데스크톱 작업 앱 "Any LM Desktop"(0.1.0)으로 바꾸고 고도화한다. 설계: `docs/superpowers/specs/2026-11-23-any-lm-desktop-design.md`, 멀티 공급자 설계: `docs/superpowers/specs/2026-11-24-multi-local-providers-design.md`.
+원본 K-EXAONE Desktop 0.4.4를 멀티 로컬 LLM(LM Studio · Ollama · OpenAI 호환) 데스크톱 작업 앱 "Any LM Desktop"(0.1.1)으로 바꾸고 고도화한다. 설계: `docs/superpowers/specs/2026-11-23-any-lm-desktop-design.md`, 멀티 공급자 설계: `docs/superpowers/specs/2026-11-24-multi-local-providers-design.md`.
 
 ## 진행 중
 - 계획 파일: `docs/superpowers/plans/2026-11-23-any-lm-desktop.md`
@@ -53,7 +53,7 @@
   - C2: 개발 서버와 터미널의 작업 폴더에서 `\\?\` 접두사를 뗀다(`fs_ops::process_path`).
   - C-I1: 서버 준비 확인을 127.0.0.1과 ::1에 동시에 시도한다.
   - B-I1: 로컬 LLM 클라이언트는 프록시와 리디렉션을 쓰지 않는다(`providers::local_http_builder`).
-  - 남은 것: 플러그인 명령(`core:event:default`)은 프레임 차단에만 기대고, 실제 창에서 하는 확인은 아래 수동 확인 목록에 있다.
+  - 남은 것: 플러그인 명령은 프레임 차단에만 기댄다(이벤트 권한은 보강 `5bc6c17`에서 listen·unlisten만 남김). 실제 창 확인은 2026-11-25에 마쳤다(수동 확인 목록 "미리보기 IPC 격리"). WebView2 1.0.2420 미만의 중첩 프레임은 확인하지 않았다.
 - 전체 검토 수정 2차(에이전트 루프 오탐, 결정 0015·0017 갱신): 완료. 커밋 `c3d7d9f`·`bf4fa2e`·`f5b6991`·`ac8a451`.
   - A-I1·A-M3: 사고·답변 반복 탐지기가 코드 블록·코드 같은 줄·표 줄을 빼고 글만 본다. 같은 절 반복은 최근 사고에서 차지하는 몫까지 보고, 싱글 기준은 길이에 비례한다. 코드·표는 끝 2,000자 전체가 같은 주기일 때만 반복이다.
   - A-I2·A-I4·A-M5: 상태를 바꾸는 도구(명시 목록, MCP 포함)가 성공하면 같은 오류 횟수도 초기화한다. `server_logs`는 읽기 반복으로 세지 않는다. `open_preview`·`remember`는 초기화하지 않는다.
@@ -68,8 +68,16 @@
   - A-I5·A-M1: `presence_penalty`는 프로젝트·코딩 0, 일반 채팅 0.5, 사고 반복 직후 한 라운드만 1.0. 반복 감지 시 반복 억제 → 추론 끄기 순서로 다시 시도하고, 재시도 단계는 그 라운드가 정상으로 끝날 때까지 유지한다.
   - C-I4·C-I3: 프로젝트·코딩 도구 안내에 설계 §6의 start_server 문장을 넣었다. `server_logs`·`start_server` 결과는 도구 상한을 넘으면 끝을 남기고 "[앞부분 N자 생략]"을 적는다.
   - 남은 것: 실제 모델(9B·35B)로 오탐이 사라졌는지와 0.5/1.0 값의 효과는 아직 실측하지 않았다(아래 수동 확인 목록).
+- 전체 검토 수정 3차(공급자·터미널·버전·문서): 완료. 버전 0.1.1. 커밋 `5d90555`·`9ba842b`·`0459f66`·`c7f74c7`·`9d49771`·`62bf269`·`d929a2b`·`15f427c`·`0ddedf8`.
+  - T0: `dev_servers::tests::server_commands_run_in_the_project_folder_not_windows`가 ConPTY 화면 대신 `cd` 결과를 쓴 파일을 읽는다(전체 테스트 3번 연속 통과, `process_path`를 되돌리면 `C:\Windows`로 실패).
+  - B-I2: Ollama 채팅은 `/api/chat`으로 보내고 요청마다 `options.num_ctx`(턴 컨텍스트)·`keep_alive`(5m)를 싣는다. 변환은 `providers/ollama.rs`의 순수 함수(`native_chat_body`·`NativeStream`·`native_response_to_openai`)이고, 에이전트 루프는 보내기 직전(`providers::chat_body`)과 줄 해석 직전(`providers::ChatStream`)에만 끼운다. 로드 안 된 모델의 턴 컨텍스트는 원하는 값(설정, 없으면 16K, 모델 최대로 자름). `ollama serve`에 설정 주소의 `OLLAMA_HOST`를 주고 PATH 상대 항목은 건너뛴다. Ollama가 이 PC에 없어 문서 예시 표본으로만 시험했다(수동 확인 목록).
+  - B-I3: llama.cpp식 목록이면 `/props`의 `default_generation_settings.n_ctx`를 실행 컨텍스트로 쓰고, 모르면 `min(n_ctx_train, 16K)`. 사용자 값은 서버 한도를 넘지 않는다.
+  - B-I5: 대화의 `modelProvider`(예전 대화는 LM Studio)가 지금 공급자와 다르면 `modelKey`를 쓰지 않는다. 화면 모델 목록은 받은 공급자와 함께 들고, 공급자가 다르거나 새 공급자 목록 받기가 실패하면 비운다. OpenAI 호환 서버가 빈 목록이면 기본 모델로 입력한 ID만 Ready.
+  - C-I2: 읽기 대기열 16 KB × 64(sync_channel). 링 버퍼는 모두 받고, 화면은 16 ms마다·초당 2 MB까지, 대기 256 KB를 넘으면 오래된 것을 버리고 `[출력 N바이트 생략]`. 화면 쪽은 xterm write 콜백으로 256 K자 넘게 밀리면 대기열, 1 M자 넘으면 같은 표시로 버림(`outputFlow.ts`).
+  - 사소한 것: 모델 최대 컨텍스트 선택지(40K·256K 등), README `ANYLM_CONTEXT` 16384, NOTICE(공개·세 공급자·Ollama 비보증), 결정 0014 기록 바로잡기, `.gitignore`의 `*.key`·`*.sig`, LOG의 "(이 커밋)" 17개를 실제 해시로.
 
 ## 다음 할 일
+0. **전체 검토 수정 3차 검토와 실측**: 3차 커밋(`5d90555`..`0ddedf8`)을 검토한다. Ollama가 있는 PC에서 16K 확인(아래 "Ollama 컨텍스트"), 터미널 홍수 확인(아래 "터미널 출력 홍수")을 한다. 0.1.1 설치 파일은 아직 만들지 않았다.
 1. **남은 화면 QA**: 아래 수동 확인 목록의 기존 기능과 공급자 로그인·계정 확인을 이어서 점검한다. Windows 개발 앱에서 이번 변경의 터미널·로컬 미리보기·연결 창은 확인했다.
 2. **원격 반영**: GitHub 비공개 저장소 개설과 인계 연습은 완료했다. `main`이 `origin/main`을 추적한다. 이후 원격 푸시는 사용자가 허락한 경우에만 진행한다.
 3. **미뤄 둔 사소한 점(최종 검토, 지금 고치지 않아도 됨)**:
@@ -84,6 +92,7 @@
    - 그 밖에 검토의 "Can stay" 목록(서버 상태는 아무 HTTP 응답이면 켜짐으로 봄 등).
 
 ## 마지막 확인
+2026-11-25, 전체 검토 수정 3차 뒤: `cd src-tauri && cargo test --lib` 359 통과·0 실패·12 무시를 3번 연속(분리 타깃 폴더, 이전 간헐 실패 테스트 포함), `cargo test --lib terminal_flood -- --ignored` 통과(실제 PTY 20만 줄, 약 23초), `cargo check --all-targets` 경고·오류 없음, `npm test` 통과(33 파일, 198 통과·1 건너뜀), `npx tsc --noEmit` 오류 없음, `npm run build` 성공. Ollama·llama.cpp는 이 PC에 없어 실제 서버로는 시험하지 않았다. 앱은 띄우지 않았다.
 2026-11-25, 전체 검토 수정 2차 보강(검토 수정 1차, 결정 0015·0017 보강) 뒤: `npm test` 통과(32 파일, 192 통과·1 건너뜀), `npx tsc --noEmit` 오류 없음, `cd src-tauri && cargo test --lib` 341 통과·1 실패·11 무시(분리 타깃 폴더). 실패한 1개는 `dev_servers::tests::server_commands_run_in_the_project_folder_not_windows`다. cmd 출력이 비어 간헐적으로 실패하며, 단독으로 다시 돌리면 통과한다. 이번 수정 전 커밋 `04b34c1`에서도 3번 중 2번 같은 식으로 실패해, 이번 수정과는 관계없다. `cargo check --all-targets` 경고·오류 없음. 앱은 띄우지 않았다.
 2026-11-25, 전체 검토 수정 2차(결정 0015·0017 갱신) 뒤: `npm test` 통과(32 파일, 192 통과·1 건너뜀), `npx tsc --noEmit` 오류 없음, `cd src-tauri && cargo test --lib` 330 통과·0 실패·11 무시(사고 탐지 오탐 회귀, 도구 가드 시퀀스, 이번 턴 줄이기·이어 쓰기 인자, 반복 재시도 단계, 서버 로그 끝부분 테스트 포함, 분리 타깃 폴더), `cargo check --all-targets` 경고·오류 없음. 앱은 띄우지 않았다.
 2026-11-25, 전체 검토 수정 1차(결정 0019) 뒤: `npm test` 통과(32 파일, 192 통과·1 건너뜀), `npx tsc --noEmit` 오류 없음, `cd src-tauri && cargo test --lib` 313 통과·0 실패·11 무시(`ipc_guard::tests::`, `dev_servers::tests::server_commands_run_in_the_project_folder_not_windows`·`ipv6_only_server_is_seen_through_localhost`, `fs_ops::tests::process_path_drops_the_verbatim_prefix_only`, `providers::tests::local_client_returns_redirects_as_is` 포함), `cargo check --all-targets` 경고·오류 없음, `npm run build` 성공. 프레임 차단의 실제 창 확인은 수동 확인 목록에 남겼다.
@@ -247,6 +256,7 @@
 - 빌드된 `Any LM Desktop_0.1.0_x64-setup.exe` 설치 및 실행 확인
 
 ### 미리보기 IPC 격리 (결정 0019)
+- 완료: 2026-11-25에 실행 중 확인(controller, `tauri dev` + WebView2 CDP): 메인 창이 그려지고 앱 invoke가 동작하며, `plugin:event|listen`은 되고 `plugin:event|emit`은 거부된다. 127.0.0.1:5173 페이지에는 `__TAURI_INTERNALS__`가 있었지만 invoke·emit이 거절됐다. `http://tauri.localhost:5173`·`http://ipc.localhost:5173`으로 가는 iframe(만들 때와 다시 이동할 때 모두)은 취소되고 "차단한 iframe 이동"이 찍혔다. WebView2 1.0.2420 미만 런타임의 중첩 프레임 경우는 확인하지 않았다. 아래 절차는 다시 확인할 때 쓴다.
 - `npm run tauri dev`로 띄운 창에서 확인한다. 임시 폴더에 `index.html`을 만들고 아래 내용을 넣는다: `<iframe src="http://tauri.localhost:5173/x.html"></iframe>`. 같은 폴더의 `x.html`에는 `<pre id=o>…</pre><script>__TAURI_INTERNALS__.invoke('terminal_list').then(r=>o.textContent='열림 '+JSON.stringify(r),e=>o.textContent='거절 '+e)</script>`를 넣는다. 그 폴더에서 `python -m http.server 5173 --bind 127.0.0.1`을 실행하고, 작업 패널 미리보기에 `http://localhost:5173/`을 연다.
 - 기대 결과: 안쪽 프레임이 열리지 않아야 한다. 개발 콘솔(stderr)에 "차단한 iframe 이동: http://tauri.localhost:5173/x.html"이 찍힌다. 프레임 차단을 끄고 시험했다면 화면에 "거절 허용되지 않은 출처의 요청입니다."가 떠야 한다. "열림 [...]"이 보이면 실패다.
 - `x.html`을 미리보기 주소창에 직접 `http://tauri.localhost:5173/x.html`로 넣으면 "올바른 HTTP 또는 HTTPS 주소" 안내가 떠야 한다. `http://test.localhost:5173/`은 "외부 사이트는 브라우저에서 엽니다." 안내와 함께 브라우저로 열려야 한다.
@@ -260,6 +270,18 @@
 - 16K 컨텍스트에서 큰 파일 5개 이상을 읽는 작업이 "필요하면 다시 읽으세요" 없이 진행되는지 본다. 컨텍스트가 실제로 넘치면 압축 안내가 뜨는 것은 정상이다. 첫 안내는 2단계(최근 4개 결과는 그대로)여야 하고, 이번 턴 질문은 잘리지 않아야 한다.
 - 프로젝트·코딩 화면에서 생각 반복 뒤 1.0 재시도 라운드가 도구를 부를 때, 도구 JSON 인자와 `write_file` 내용이 깨지지 않는지 본다(결정 0017 보강의 남은 한계 M4).
 - 일반 채팅(추론 ON)의 요청 본문에 `presence_penalty` 0.5, 프로젝트·코딩에는 없음을 개발 콘솔이나 하니스 기록으로 확인한다. 생각이 실제로 반복되면 다음 시도에 1.0, 또 반복되면 추론 끄기로 넘어가는지 본다.
+
+### Ollama 컨텍스트 (전체 검토 수정 3차, B-I2)
+- Ollama가 있는 PC에서 [Ollama 연결]로 모델을 16K로 로드하고 한 번 대화한다. `ollama ps`의 CONTEXT가 16384여야 한다. 5분 넘게 쉬었다가(모델이 내려감) 다시 보내도 `ollama ps`가 16384로 다시 올라와야 한다(4096이면 실패).
+- 도구 호출(파일 읽기 등)과 결과가 이어지고, "생각하기"를 끄면 추론이 나오지 않는지(`think: false`), 생각 창에 추론이 보이는지 확인한다.
+- [서버 시작]으로 켠 Ollama가 설정한 주소·포트에서 열리는지(예: 주소를 `http://127.0.0.1:11500`으로 바꾼 뒤 [서버 시작]).
+
+### OpenAI 호환 컨텍스트 (전체 검토 수정 3차, B-I3·B-I5)
+- `llama-server -m <모델> -c 8192`로 띄우고 [OpenAI 호환 연결]에서 모델이 "사용 가능 · 8K"로 보이는지(학습 길이가 아니라).
+- LM Studio에서 모델을 고른 대화를 연 채 공급자를 Ollama로 바꾸면 "모델을 찾을 수 없습니다" 없이 Ollama 기본 모델로 보내지는지, 새 공급자 서버가 꺼져 있으면 모델 목록이 비는지.
+
+### 터미널 출력 홍수 (전체 검토 수정 3차, C-I2)
+- 작업 패널 PowerShell 탭에서 `1..200000 | % { $_ }`를 실행한다. 출력 중에도 앱(채팅 입력·탭 전환·스크롤)이 멈추지 않고, 넘친 곳에 `[출력 N바이트 생략]` 줄이 보이며, 끝나면 마지막 숫자 200000이 보여야 한다. 작업 관리자에서 앱 메모리가 계속 늘지 않아야 한다.
 
 ### 개발 서버 작업 폴더·준비 확인 (전체 검토 수정 1차)
 - 설정에서 터미널 셸을 명령 프롬프트로 바꾼 뒤 Vite 프로젝트의 `npm run dev`를 시작한다. 로그에 "UNC 경로는 지원되지 않습니다"가 없어야 한다. 서버는 프로젝트 폴더에서 돌아야 한다.
