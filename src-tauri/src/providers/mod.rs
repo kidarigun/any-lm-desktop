@@ -8,6 +8,7 @@ use crate::store::AppSettings;
 pub use crate::store::LlmProvider;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::borrow::Cow;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -138,6 +139,58 @@ pub fn chat_url(settings: &AppSettings) -> Result<String, String> {
         LlmProvider::Lmstudio => lmstudio::server_urls(&settings.server_url).map(|u| u.chat),
         LlmProvider::Ollama => ollama::urls(&settings.server_url).map(|u| u.chat),
         LlmProvider::OpenaiCompat => openai_compat::urls(&settings.server_url).map(|u| u.chat),
+    }
+}
+
+/// 에이전트 루프가 만든 OpenAI 모양 채팅 본문을 공급자에 보낼 본문으로 바꾼다.
+/// Ollama는 고유 `/api/chat` 형식으로 바꾸고 `num_ctx`(=`context_length`)·`keep_alive`를 넣는다.
+/// LM Studio·OpenAI 호환은 그대로 보낸다.
+pub fn chat_body<'a>(settings: &AppSettings, body: &'a Value, context_length: u32) -> Cow<'a, Value> {
+    match settings.provider {
+        LlmProvider::Ollama => Cow::Owned(ollama::native_chat_body(body, context_length)),
+        LlmProvider::Lmstudio | LlmProvider::OpenaiCompat => Cow::Borrowed(body),
+    }
+}
+
+/// 채팅 스트림 줄을 에이전트 루프가 읽는 OpenAI 모양 SSE 줄로 맞춘다.
+#[derive(Debug)]
+pub enum ChatStream {
+    /// 이미 SSE(`data: ...`)라 그대로 넘긴다.
+    Sse,
+    /// Ollama `/api/chat` NDJSON.
+    Ollama(ollama::NativeStream),
+}
+
+impl ChatStream {
+    pub fn new(provider: LlmProvider) -> Self {
+        match provider {
+            LlmProvider::Ollama => ChatStream::Ollama(ollama::NativeStream::default()),
+            LlmProvider::Lmstudio | LlmProvider::OpenaiCompat => ChatStream::Sse,
+        }
+    }
+
+    pub fn lines(&mut self, raw: Vec<String>) -> Vec<String> {
+        match self {
+            ChatStream::Sse => raw,
+            ChatStream::Ollama(s) => raw.iter().flat_map(|l| s.translate_line(l)).collect(),
+        }
+    }
+}
+
+/// 스트림을 쓰지 않는 채팅 응답을 OpenAI 모양(`choices[0].message`)으로 맞춘다.
+pub fn chat_response(provider: LlmProvider, v: Value) -> Value {
+    match provider {
+        LlmProvider::Ollama => ollama::native_response_to_openai(&v),
+        LlmProvider::Lmstudio | LlmProvider::OpenaiCompat => v,
+    }
+}
+
+/// 대화 턴 밖의 채팅 요청(대화 압축 요약)에 쓸 컨텍스트. 본문에 컨텍스트를 싣는 공급자(Ollama)만
+/// 조회하고, 나머지는 0(쓰지 않음)을 돌려준다.
+pub async fn request_context(settings: &AppSettings) -> u32 {
+    match settings.provider {
+        LlmProvider::Ollama => ollama::request_context(settings, &settings.model).await,
+        LlmProvider::Lmstudio | LlmProvider::OpenaiCompat => 0,
     }
 }
 

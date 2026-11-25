@@ -1112,10 +1112,12 @@ async fn wait_before_retry<R: Runtime>(
 }
 
 /// 요청을 보내고 일시 장애·혼잡이면 잠시 기다렸다 재시도한다. 취소되면 `Ok(None)`.
+/// `context_length`는 본문에 컨텍스트를 싣는 공급자(Ollama `num_ctx`)에 보낼 값이다.
 async fn send_with_retry<R: Runtime>(
     client: &reqwest::Client,
     settings: &AppSettings,
     body: &Value,
+    context_length: u32,
     sink: &StreamSink<'_, R>,
     cancel: &AtomicBool,
     trace: &mut RoundTrace,
@@ -1125,10 +1127,11 @@ async fn send_with_retry<R: Runtime>(
     let provider_subject = crate::providers::provider_subject(settings.provider);
     let chat_url = crate::providers::chat_url(settings)
         .map_err(|message| SendError { message, recoverable: false })?;
+    let body = crate::providers::chat_body(settings, body, context_length);
     for attempt in 0..=RETRY_DELAYS_SEC.len() {
         trace.attempts = attempt as u32 + 1;
         let req = lmstudio::authorize(client.post(&chat_url), &settings.api_key)
-            .json(body)
+            .json(body.as_ref())
             .send();
 
         let resp = match race_cancel(req, cancel, RESPONSE_HEADER_TIMEOUT).await {
@@ -2411,8 +2414,11 @@ pub async fn summarize_for_compaction(
         .build()
         .map_err(|e| format!("HTTP 클라이언트 생성 실패: {}", e))?;
 
+    // 요약도 대화 모델과 같은 컨텍스트로 보내야 Ollama가 모델을 다른 크기로 다시 로드하지 않는다.
+    let context_length = crate::providers::request_context(settings).await;
+    let wire_body = crate::providers::chat_body(settings, &body, context_length);
     let req = lmstudio::authorize(client.post(&chat_url), &settings.api_key)
-        .json(&body)
+        .json(wire_body.as_ref())
         .send();
 
     let resp = match race_cancel(req, cancel_flag, RESPONSE_HEADER_TIMEOUT).await {
@@ -2433,6 +2439,7 @@ pub async fn summarize_for_compaction(
     }
 
     let parsed: Value = serde_json::from_str(&text_body).map_err(|e| format!("요약 응답 해석 오류: {}", e))?;
+    let parsed = crate::providers::chat_response(settings.provider, parsed);
     let summary = parsed
         .get("choices")
         .and_then(|c| c.get(0))
@@ -2835,7 +2842,7 @@ pub async fn run_agent_turn<R: Runtime>(
         };
         let sent_chars = trace.request_chars;
 
-        let response = match send_with_retry(&client, settings, &body, &sink, &cancel_flag, &mut trace).await {
+        let response = match send_with_retry(&client, settings, &body, req.context_length, &sink, &cancel_flag, &mut trace).await {
             Ok(Some(r)) => r,
             Ok(None) => {
                 cancelled = true;
@@ -2895,6 +2902,8 @@ pub async fn run_agent_turn<R: Runtime>(
         };
         let mut stream = response.bytes_stream();
         let mut decoder = SseDecoder::default();
+        // Ollama `/api/chat` NDJSON은 같은 SSE 줄로 바꿔 읽는다(LM Studio·OpenAI 호환은 그대로).
+        let mut wire = crate::providers::ChatStream::new(settings.provider);
         let mut finished = false;
         let mut thinking_loop_detected = false;
         let mut stream_err: Option<String> = None;
@@ -2947,7 +2956,7 @@ pub async fn run_agent_turn<R: Runtime>(
                         clear_notice_on_chunk = false;
                         sink.notice(String::new());
                     }
-                    for line in decoder.push(&bytes) {
+                    for line in wire.lines(decoder.push(&bytes)) {
                         match streamer.handle_line(&line, &sink) {
                             Ok(true) => {
                                 finished = true;
@@ -2999,10 +3008,13 @@ pub async fn run_agent_turn<R: Runtime>(
             sink.notice(String::new());
         }
         if !cancelled && !finished && stream_err.is_none() {
-            if let Some(line) = decoder.finish() {
+            for line in wire.lines(decoder.finish().into_iter().collect()) {
                 match streamer.handle_line(&line, &sink) {
                     Ok(done) => finished = done,
                     Err(e) => stream_err = Some(e),
+                }
+                if finished || stream_err.is_some() {
+                    break;
                 }
             }
         }
@@ -5030,6 +5042,54 @@ mod tests {
         let transcript = compaction_source_transcript(None, &msgs, None);
         assert!(transcript.contains("read_file"));
         assert!(!transcript.contains("load_skill"), "{}", transcript);
+    }
+
+    /// Ollama는 고유 `/api/chat`(NDJSON)으로 보내고 받아도 같은 루프를 돈다(검토 B-I2).
+    #[tokio::test]
+    async fn ollama_turn_uses_native_chat_with_num_ctx_and_tool_results() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "메모").unwrap();
+        let nd = |v: Value| format!("{v}\n").into_bytes();
+        let tool = vec![
+            nd(json!({"model":"m","message":{"role":"assistant","content":"","thinking":"파일을 보자"},"done":false})),
+            nd(json!({"model":"m","message":{"role":"assistant","content":"",
+                "tool_calls":[{"function":{"name":"read_file","arguments":{"relative_path":"a.md"}}}]},"done":false})),
+            nd(json!({"model":"m","message":{"role":"assistant","content":""},"done_reason":"stop","done":true,
+                "prompt_eval_count":120,"eval_count":9})),
+        ];
+        let answer = vec![
+            nd(json!({"model":"m","message":{"role":"assistant","content":"메모를 "},"done":false})),
+            nd(json!({"model":"m","message":{"role":"assistant","content":"읽었습니다."},"done":false})),
+            // 마지막 줄은 개행 없이 끝나도 읽는다.
+            format!("{}", json!({"model":"m","message":{"role":"assistant","content":""},"done_reason":"stop","done":true,
+                "prompt_eval_count":150,"eval_count":5})).into_bytes(),
+        ];
+        let (url, bodies) = mock_server(vec![tool, answer], 0).await;
+        let app = tauri::test::mock_app();
+        let settings = AppSettings { provider: crate::store::LlmProvider::Ollama, ..test_settings(url) };
+        let project = test_project(dir.path());
+        let history = vec![msg("user", "메모 요약해 줘")];
+        let (out, _) = run_agent_turn(app.handle(), turn_req(&settings, Some(&project), &history), Arc::new(AtomicBool::new(false))).await.unwrap();
+        assert_eq!(out.content, "메모를 읽었습니다.");
+        assert_eq!(out.tool_records.len(), 1);
+        assert_eq!(out.tool_records[0].tool_name, "read_file");
+        assert_eq!(out.tool_records[0].status, "completed");
+        let stats = out.stats.as_ref().unwrap();
+        assert_eq!((stats.prompt_tokens, stats.completion_tokens), (150, 14));
+        let b = bodies.lock().unwrap();
+        assert_eq!(b.len(), 2);
+        for body in b.iter() {
+            assert_eq!(body["options"]["num_ctx"], 32768, "요청마다 컨텍스트를 싣는다");
+            assert_eq!(body["keep_alive"], crate::providers::ollama::KEEP_ALIVE);
+            assert!(body.get("stream_options").is_none() && body.get("tool_choice").is_none());
+            assert!(body["tools"].as_array().is_some_and(|t| !t.is_empty()));
+        }
+        let msgs = b[1]["messages"].as_array().unwrap();
+        let call = msgs.iter().find(|m| m.get("tool_calls").is_some()).unwrap();
+        assert_eq!(call["tool_calls"][0]["function"]["arguments"], json!({"relative_path":"a.md"}));
+        let result = msgs.iter().find(|m| m["role"] == "tool").unwrap();
+        assert_eq!(result["tool_name"], "read_file");
+        assert!(result["content"].as_str().unwrap().contains("메모"));
     }
 
     #[tokio::test]

@@ -1,4 +1,9 @@
-//! Ollama 로컬 서버 어댑터: `/api/tags`, `/api/ps`, `/api/show`, `/api/generate`, `/api/version`, `/v1/chat/completions`.
+//! Ollama 로컬 서버 어댑터: `/api/tags`, `/api/ps`, `/api/show`, `/api/generate`, `/api/version`, `/api/chat`.
+//!
+//! 채팅은 OpenAI 호환 `/v1/chat/completions` 대신 고유 `/api/chat`으로 보낸다. OpenAI 호환 경로에는
+//! 컨텍스트 크기(`num_ctx`)를 넣을 방법이 없어, 모델이 기본 컨텍스트(보통 4096)로 다시 로드되고
+//! 프롬프트 앞부분(시스템 프롬프트·도구)이 오류 없이 잘린다. 에이전트 루프는 OpenAI 모양 본문과
+//! SSE 청크를 그대로 쓰고, 이 모듈의 순수 함수가 요청·스트림·응답을 서로 바꾼다.
 
 use crate::lmstudio::{self, LmModel, LoadPlan, LoadedInstance, TurnModelInfo, DEFAULT_CONTEXT, MIN_CONTEXT};
 use crate::providers::{api_error_message, friendly_error, local_origin, LlmProvider};
@@ -22,7 +27,7 @@ pub struct OllamaUrls {
 pub fn urls(server_url: &str) -> Result<OllamaUrls, String> {
     let base = local_origin(server_url, LlmProvider::Ollama)?;
     Ok(OllamaUrls {
-        chat: format!("{base}/v1/chat/completions"),
+        chat: format!("{base}/api/chat"),
         tags: format!("{base}/api/tags"),
         ps: format!("{base}/api/ps"),
         show: format!("{base}/api/show"),
@@ -45,6 +50,8 @@ const SHOW_TIMEOUT: Duration = Duration::from_secs(3);
 const LOAD_TIMEOUT: Duration = Duration::from_secs(300);
 const UNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 const START_POLL_TIMEOUT: Duration = Duration::from_secs(15);
+/// 요청마다 보내는 `keep_alive`. 미리 로드(`load_model`)와 같은 값이어야 모델을 다시 올리지 않는다.
+pub const KEEP_ALIVE: &str = "5m";
 
 fn client(timeout: Duration) -> Result<reqwest::Client, String> {
     super::local_http_client(timeout)
@@ -301,7 +308,7 @@ pub async fn load_model(
         "model": key,
         "prompt": "",
         "stream": false,
-        "keep_alive": "5m",
+        "keep_alive": KEEP_ALIVE,
         "options": { "num_ctx": context_length }
     });
     let resp = lmstudio::authorize(client(LOAD_TIMEOUT)?.post(&u.generate).json(&body), &settings.api_key)
@@ -380,14 +387,28 @@ pub fn ollama_path() -> Option<PathBuf> {
         }
     }
     let exe_name = if cfg!(target_os = "windows") { "ollama.exe" } else { "ollama" };
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join(exe_name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    find_on_path(&std::env::var_os("PATH")?, exe_name)
+}
+
+/// `PATH`에서 실행 파일을 찾는다. 상대 경로 항목(`.`, `bin` 등)은 앱의 현재 폴더 기준이 되어
+/// 엉뚱한 파일을 실행할 수 있으므로 건너뛴다.
+fn find_on_path(path_var: &std::ffi::OsStr, exe_name: &str) -> Option<PathBuf> {
+    std::env::split_paths(path_var)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(exe_name))
+        .find(|candidate| candidate.is_file())
+}
+
+/// `ollama serve`에 줄 `OLLAMA_HOST`. 앱이 연결할 주소와 포트에서 서버가 열리게 한다
+/// (포트가 없으면 http 기본 포트 80, `localhost`는 Ollama 기본처럼 127.0.0.1).
+pub fn ollama_host_env(server_url: &str) -> Result<String, String> {
+    let url = crate::providers::validate_local_url(server_url, LlmProvider::Ollama)?;
+    let port = url.port_or_known_default().unwrap_or(80);
+    let host = match url.host_str().unwrap_or("localhost") {
+        "localhost" => "127.0.0.1",
+        other => other,
+    };
+    Ok(format!("{host}:{port}"))
 }
 
 pub async fn start_server(settings: &AppSettings) -> Result<(), String> {
@@ -397,8 +418,10 @@ pub async fn start_server(settings: &AppSettings) -> Result<(), String> {
     let bin = ollama_path().ok_or_else(|| {
         "Ollama 실행 파일을 찾지 못했습니다. Ollama를 설치한 뒤 다시 시도해 주세요.".to_string()
     })?;
+    let host = ollama_host_env(&settings.server_url)?;
     let mut cmd = std::process::Command::new(bin);
     cmd.arg("serve")
+        .env("OLLAMA_HOST", host)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -448,13 +471,353 @@ pub async fn turn_model_info(settings: &AppSettings, key: &str) -> TurnModelInfo
         fetch_show(&c, &u.show, &settings.api_key, key, &[])
     );
     let ps_ctx = ps.get(key).map(|i| i.context_length).filter(|&c| c > 0);
-    let loaded_context = ps_ctx.or(pref_ctx);
-    let reasoning_options = show.map(|(_, s)| s.reasoning_options).unwrap_or_default();
+    let show = show.map(|(_, s)| s);
+    // 채팅 요청마다 이 값을 `num_ctx`로 보내므로, 로드되어 있지 않으면(쉬다 내려감) 다음 요청이
+    // 이 값으로 다시 로드한다. 그래서 로드 전에도 앱이 원하는 컨텍스트(설정값, 없으면 기본값)를 쓴다.
+    let max = show.as_ref().map_or(0, |s| s.max_context_length);
+    let wanted = pref_ctx.unwrap_or(DEFAULT_CONTEXT);
+    let wanted = if max > 0 { wanted.min(max) } else { wanted };
+    let loaded_context = ps_ctx.or(Some(wanted));
+    let reasoning_options = show.map(|s| s.reasoning_options).unwrap_or_default();
     TurnModelInfo {
         reasoning_options,
         loaded_context,
         display_name: (!key.trim().is_empty()).then(|| key.to_string()),
     }
+}
+
+// ---------------------------------------------------------------------------
+// `/api/chat` 변환 (OpenAI 모양 ↔ Ollama 고유 형식)
+// ---------------------------------------------------------------------------
+
+/// OpenAI 모양 요청 항목 중 Ollama `options`로 옮길 것. `max_tokens`는 `num_predict`가 된다
+/// (Ollama의 OpenAI 호환 계층이 하는 것과 같은 대응).
+const OPTION_FIELDS: &[(&str, &str)] = &[
+    ("temperature", "temperature"),
+    ("top_p", "top_p"),
+    ("presence_penalty", "presence_penalty"),
+    ("frequency_penalty", "frequency_penalty"),
+    ("seed", "seed"),
+    ("stop", "stop"),
+    ("max_tokens", "num_predict"),
+];
+
+/// 메시지 `content`(문자열·null·OpenAI 조각 배열)를 글과 base64 이미지로 나눈다.
+fn split_content(content: Option<&Value>) -> (String, Vec<String>) {
+    match content {
+        Some(Value::String(s)) => (s.clone(), Vec::new()),
+        Some(Value::Array(parts)) => {
+            let mut text = Vec::new();
+            let mut images = Vec::new();
+            for part in parts {
+                match part.get("type").and_then(Value::as_str) {
+                    Some("text") => {
+                        if let Some(t) = part.get("text").and_then(Value::as_str) {
+                            text.push(t.to_string());
+                        }
+                    }
+                    Some("image_url") => {
+                        let url = part
+                            .pointer("/image_url/url")
+                            .or_else(|| part.get("image_url"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        // Ollama는 data URL이 아니라 base64 본문만 받는다.
+                        if let Some((_, b64)) = url.split_once(";base64,") {
+                            images.push(b64.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            (text.join("\n"), images)
+        }
+        _ => (String::new(), Vec::new()),
+    }
+}
+
+/// OpenAI 모양 도구 인자(JSON 문자열)를 Ollama가 받는 객체로 바꾼다. 못 읽으면 빈 객체.
+fn arguments_object(args: Option<&Value>) -> Value {
+    match args {
+        Some(Value::String(s)) => serde_json::from_str::<Value>(s)
+            .ok()
+            .filter(Value::is_object)
+            .unwrap_or_else(|| json!({})),
+        Some(v @ Value::Object(_)) => v.clone(),
+        _ => json!({}),
+    }
+}
+
+fn native_message(m: &Value, call_names: &mut HashMap<String, String>) -> Value {
+    let role = m.get("role").and_then(Value::as_str).unwrap_or("user");
+    let (text, images) = split_content(m.get("content"));
+    let mut out = json!({ "role": role, "content": text });
+    if !images.is_empty() {
+        out["images"] = json!(images);
+    }
+    match role {
+        "assistant" => {
+            if let Some(r) = m
+                .get("reasoning_content")
+                .or_else(|| m.get("reasoning"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+            {
+                out["thinking"] = json!(r);
+            }
+            if let Some(calls) = m.get("tool_calls").and_then(Value::as_array).filter(|c| !c.is_empty()) {
+                let native: Vec<Value> = calls
+                    .iter()
+                    .map(|c| {
+                        let name = c.pointer("/function/name").and_then(Value::as_str).unwrap_or("");
+                        let mut call = json!({
+                            "function": { "name": name, "arguments": arguments_object(c.pointer("/function/arguments")) }
+                        });
+                        if let Some(id) = c.get("id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                            call_names.insert(id.to_string(), name.to_string());
+                            call["id"] = json!(id);
+                        }
+                        call
+                    })
+                    .collect();
+                out["tool_calls"] = json!(native);
+            }
+        }
+        "tool" => {
+            let id = m.get("tool_call_id").and_then(Value::as_str).filter(|s| !s.is_empty());
+            // 모델이 어느 도구의 결과인지 알 수 있게 도구 이름을 붙인다(`tool_name`).
+            let name = id
+                .and_then(|id| call_names.get(id).cloned())
+                .or_else(|| m.get("name").and_then(Value::as_str).map(String::from))
+                .filter(|n| !n.is_empty());
+            if let Some(name) = name {
+                out["tool_name"] = json!(name);
+            }
+            if let Some(id) = id {
+                out["tool_call_id"] = json!(id);
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// `reasoning_effort`(또는 `reasoning.effort`)를 `think`로 옮긴다. 없으면 보내지 않아 서버 기본값에 맡긴다
+/// (OpenAI 호환 경로와 같다).
+fn think_value(openai: &Value) -> Option<Value> {
+    let effort = openai
+        .get("reasoning_effort")
+        .or_else(|| openai.pointer("/reasoning/effort"))
+        .and_then(Value::as_str)?
+        .trim()
+        .to_ascii_lowercase();
+    match effort.as_str() {
+        "none" | "off" => Some(json!(false)),
+        "low" | "medium" | "high" => Some(json!(effort)),
+        _ => None,
+    }
+}
+
+/// 에이전트 루프의 OpenAI 모양 요청 본문을 `/api/chat` 본문으로 바꾼다.
+/// `num_ctx`(0이면 넣지 않음)와 `keep_alive`를 요청마다 넣어, 모델이 쉬다 내려간 뒤나 다른 옵션을 받은
+/// 뒤에도 Ollama 기본 컨텍스트가 아니라 앱 컨텍스트로 (다시) 로드되게 한다.
+pub fn native_chat_body(openai: &Value, num_ctx: u32) -> Value {
+    let mut call_names = HashMap::new();
+    let messages: Vec<Value> = openai
+        .get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|m| native_message(m, &mut call_names))
+        .collect();
+    let mut options = serde_json::Map::new();
+    if num_ctx > 0 {
+        options.insert("num_ctx".into(), json!(num_ctx));
+    }
+    for (from, to) in OPTION_FIELDS {
+        if let Some(v) = openai.get(*from).filter(|v| !v.is_null()) {
+            options.insert((*to).into(), v.clone());
+        }
+    }
+    let mut body = json!({
+        "model": openai.get("model").cloned().unwrap_or(Value::Null),
+        "messages": messages,
+        "stream": openai.get("stream").and_then(Value::as_bool).unwrap_or(false),
+        "keep_alive": KEEP_ALIVE,
+        "options": options,
+    });
+    if let Some(tools) = openai.get("tools").and_then(Value::as_array).filter(|t| !t.is_empty()) {
+        body["tools"] = json!(tools);
+    }
+    if let Some(think) = think_value(openai) {
+        body["think"] = think;
+    }
+    body
+}
+
+fn native_error(err: &Value) -> Value {
+    let msg = err
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| err.get("message").and_then(Value::as_str).map(str::to_string))
+        .unwrap_or_else(|| err.to_string());
+    json!({ "error": { "message": msg } })
+}
+
+/// 마지막 객체의 `prompt_eval_count`·`eval_count`를 OpenAI `usage`로 바꾼다.
+fn native_usage(v: &Value) -> Option<Value> {
+    let prompt = v.get("prompt_eval_count").and_then(Value::as_u64);
+    let completion = v.get("eval_count").and_then(Value::as_u64);
+    if prompt.is_none() && completion.is_none() {
+        return None;
+    }
+    let (p, c) = (prompt.unwrap_or(0), completion.unwrap_or(0));
+    Some(json!({ "prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c }))
+}
+
+fn finish_reason(v: &Value, had_tool_calls: bool) -> &'static str {
+    if had_tool_calls {
+        return "tool_calls";
+    }
+    match v.get("done_reason").and_then(Value::as_str) {
+        Some("length") => "length",
+        _ => "stop",
+    }
+}
+
+fn sse_line(v: &Value) -> String {
+    format!("data: {v}")
+}
+
+/// `/api/chat` NDJSON 스트림을 에이전트 루프가 읽는 OpenAI 모양 SSE 줄(`data: {...}`, `data: [DONE]`)로 바꾼다.
+/// `message.thinking` → `reasoning_content`, `message.content` → `content`, `message.tool_calls`(인자 객체,
+/// 호출마다 완성된 채로 온다) → 번호를 매긴 `tool_calls`(인자 문자열), 마지막 객체(`done: true`) →
+/// `finish_reason`·`usage`와 `[DONE]`.
+#[derive(Debug)]
+pub struct NativeStream {
+    calls: usize,
+    id_prefix: String,
+    done: bool,
+}
+
+impl Default for NativeStream {
+    fn default() -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        // 서버가 id를 주지 않을 때 쓴다. 라운드마다 달라야 대화 기록의 도구 결과가 섞이지 않는다.
+        Self { calls: 0, id_prefix: format!("call_{nanos:x}"), done: false }
+    }
+}
+
+impl NativeStream {
+    /// Ollama 도구 호출(인자 객체)을 번호와 id가 붙은 OpenAI 모양(인자 문자열)으로 바꾼다.
+    fn convert_calls(&mut self, calls: &[Value]) -> Vec<Value> {
+        calls
+            .iter()
+            .map(|c| {
+                let index = self.calls;
+                self.calls += 1;
+                let id = c
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .unwrap_or_else(|| format!("{}_{index}", self.id_prefix));
+                let args = match c.pointer("/function/arguments") {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(other) if !other.is_null() => other.to_string(),
+                    _ => "{}".to_string(),
+                };
+                json!({
+                    "index": index,
+                    "id": id,
+                    "type": "function",
+                    "function": {
+                        "name": c.pointer("/function/name").and_then(Value::as_str).unwrap_or(""),
+                        "arguments": args
+                    }
+                })
+            })
+            .collect()
+    }
+
+    pub fn translate_line(&mut self, line: &str) -> Vec<String> {
+        let line = line.trim();
+        if line.is_empty() || self.done {
+            return Vec::new();
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            return Vec::new();
+        };
+        if let Some(err) = v.get("error") {
+            return vec![sse_line(&native_error(err))];
+        }
+        let mut out = Vec::new();
+        let mut delta = serde_json::Map::new();
+        if let Some(t) = v.pointer("/message/thinking").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            delta.insert("reasoning_content".into(), json!(t));
+        }
+        if let Some(c) = v.pointer("/message/content").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            delta.insert("content".into(), json!(c));
+        }
+        if let Some(calls) = v.pointer("/message/tool_calls").and_then(Value::as_array).filter(|c| !c.is_empty()) {
+            delta.insert("tool_calls".into(), json!(self.convert_calls(calls)));
+        }
+        if !delta.is_empty() {
+            out.push(sse_line(&json!({ "choices": [{ "index": 0, "delta": delta }] })));
+        }
+        if v.get("done").and_then(Value::as_bool) == Some(true) {
+            self.done = true;
+            let mut last = json!({
+                "choices": [{ "index": 0, "delta": {}, "finish_reason": finish_reason(&v, self.calls > 0) }]
+            });
+            if let Some(u) = native_usage(&v) {
+                last["usage"] = u;
+            }
+            out.push(sse_line(&last));
+            out.push("data: [DONE]".to_string());
+        }
+        out
+    }
+}
+
+/// 스트림을 쓰지 않는 `/api/chat` 응답을 OpenAI 모양(`choices[0].message`)으로 바꾼다.
+pub fn native_response_to_openai(v: &Value) -> Value {
+    if let Some(err) = v.get("error") {
+        return native_error(err);
+    }
+    let mut message = json!({
+        "role": "assistant",
+        "content": v.pointer("/message/content").and_then(Value::as_str).unwrap_or("")
+    });
+    if let Some(t) = v.pointer("/message/thinking").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        message["reasoning_content"] = json!(t);
+    }
+    let calls = v.pointer("/message/tool_calls").and_then(Value::as_array).filter(|c| !c.is_empty());
+    let had_calls = calls.is_some();
+    if let Some(calls) = calls {
+        let mut converted = NativeStream::default().convert_calls(calls);
+        for c in &mut converted {
+            if let Some(o) = c.as_object_mut() {
+                o.remove("index");
+            }
+        }
+        message["tool_calls"] = json!(converted);
+    }
+    let mut out = json!({
+        "choices": [{ "index": 0, "message": message, "finish_reason": finish_reason(v, had_calls) }]
+    });
+    if let Some(u) = native_usage(v) {
+        out["usage"] = u;
+    }
+    out
+}
+
+/// 대화 턴 밖의 요청(대화 압축 요약 등)에 넣을 컨텍스트: 지금 로드된 값, 없으면 앱이 원하는 값.
+pub async fn request_context(settings: &AppSettings, key: &str) -> u32 {
+    crate::context_budget::resolve_context(turn_model_info(settings, key).await.loaded_context)
 }
 
 #[cfg(test)]
@@ -472,7 +835,7 @@ mod tests {
     #[test]
     fn urls_use_origin_only() {
         let u = urls("http://localhost:11434/v1/chat/completions?foo=1").unwrap();
-        assert_eq!(u.chat, "http://localhost:11434/v1/chat/completions");
+        assert_eq!(u.chat, "http://localhost:11434/api/chat");
         assert_eq!(u.tags, "http://localhost:11434/api/tags");
         assert_eq!(u.ps, "http://localhost:11434/api/ps");
         assert_eq!(u.show, "http://localhost:11434/api/show");
@@ -553,6 +916,215 @@ mod tests {
         assert_eq!(q.loaded, vec![LoadedInstance { id: "qwen3:8b".into(), context_length: 32768 }]);
         assert!(q.tool_use && !q.vision);
         assert_eq!(q.reasoning_options, vec!["off", "on"]);
+    }
+
+    // 아래 표본은 Ollama API 문서(docs/api.md, POST /api/chat)의 예시 모양을 따른다.
+
+    #[test]
+    fn native_chat_body_carries_num_ctx_keep_alive_tools_and_history() {
+        let openai = json!({
+            "model": "qwen3:8b",
+            "stream": true,
+            "stream_options": { "include_usage": true },
+            "max_tokens": 4096,
+            "presence_penalty": 1.5,
+            "reasoning_effort": "none",
+            "tool_choice": "auto",
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "날씨",
+                    "parameters": { "type": "object", "properties": { "city": { "type": "string" } }, "required": ["city"] }
+                }
+            }],
+            "messages": [
+                { "role": "system", "content": "시스템 지침" },
+                { "role": "user", "content": "what is the weather in tokyo?" },
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning_content": "도구를 부르자",
+                    "tool_calls": [{ "id": "call_1", "type": "function",
+                        "function": { "name": "get_weather", "arguments": "{\"city\":\"Tokyo\"}" } }]
+                },
+                { "role": "tool", "tool_call_id": "call_1", "content": "11 degrees celsius" },
+                { "role": "user", "content": [
+                    { "type": "text", "text": "이 그림은?" },
+                    { "type": "image_url", "image_url": { "url": "data:image/png;base64,iVBORw0KGgo=" } }
+                ] }
+            ]
+        });
+        let body = native_chat_body(&openai, 16384);
+        assert_eq!(body["model"], "qwen3:8b");
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["keep_alive"], KEEP_ALIVE);
+        assert_eq!(body["options"]["num_ctx"], 16384);
+        assert_eq!(body["options"]["num_predict"], 4096);
+        assert_eq!(body["options"]["presence_penalty"], 1.5);
+        assert_eq!(body["think"], false);
+        assert_eq!(body["tools"], openai["tools"]);
+        for gone in ["stream_options", "tool_choice", "max_tokens", "reasoning_effort", "presence_penalty"] {
+            assert!(body.get(gone).is_none(), "{gone}");
+        }
+        let m = body["messages"].as_array().unwrap();
+        assert_eq!(m[0], json!({ "role": "system", "content": "시스템 지침" }));
+        assert_eq!(m[2]["content"], "");
+        assert_eq!(m[2]["thinking"], "도구를 부르자");
+        assert_eq!(m[2]["tool_calls"][0]["function"], json!({ "name": "get_weather", "arguments": { "city": "Tokyo" } }));
+        assert_eq!(m[3]["role"], "tool");
+        assert_eq!(m[3]["tool_name"], "get_weather");
+        assert_eq!(m[3]["content"], "11 degrees celsius");
+        assert_eq!(m[4]["content"], "이 그림은?");
+        assert_eq!(m[4]["images"], json!(["iVBORw0KGgo="]));
+    }
+
+    #[test]
+    fn native_chat_body_leaves_think_to_the_server_and_skips_zero_context() {
+        let body = native_chat_body(&json!({ "model": "m", "messages": [], "stream": false }), 0);
+        assert!(body.get("think").is_none());
+        assert!(body["options"].get("num_ctx").is_none());
+        assert!(body.get("tools").is_none());
+        assert_eq!(body["stream"], false);
+        let bad_args = native_chat_body(
+            &json!({ "messages": [{ "role": "assistant", "content": "",
+                "tool_calls": [{ "id": "c", "function": { "name": "x", "arguments": "not json" } }] }] }),
+            8192,
+        );
+        assert_eq!(bad_args["messages"][0]["tool_calls"][0]["function"]["arguments"], json!({}));
+        assert_eq!(native_chat_body(&json!({ "reasoning_effort": "high" }), 0)["think"], "high");
+    }
+
+    fn feed(lines: &[Value]) -> (Vec<String>, crate::agent::RoundAccumulator, bool) {
+        use crate::agent::{parse_sse_line, SseEvent};
+        let mut stream = NativeStream::default();
+        let mut acc = crate::agent::RoundAccumulator::default();
+        let mut sse = Vec::new();
+        let mut done = false;
+        for l in lines {
+            for out in stream.translate_line(&l.to_string()) {
+                match parse_sse_line(&out) {
+                    SseEvent::Data(v) => {
+                        acc.apply_chunk_for(&v, "Ollama").unwrap();
+                    }
+                    SseEvent::Done => done = true,
+                    SseEvent::Skip => {}
+                }
+                sse.push(out);
+            }
+        }
+        (sse, acc, done)
+    }
+
+    #[test]
+    fn native_stream_maps_thinking_content_and_final_usage() {
+        let (_, acc, done) = feed(&[
+            json!({ "model": "qwen3", "created_at": "2025-05-30T10:00:00Z",
+                "message": { "role": "assistant", "content": "", "thinking": "Let me think" }, "done": false }),
+            json!({ "model": "qwen3", "message": { "role": "assistant", "content": "The sky" }, "done": false }),
+            json!({ "model": "qwen3", "message": { "role": "assistant", "content": " is blue." }, "done": false }),
+            json!({ "model": "qwen3", "created_at": "2025-05-30T10:00:01Z",
+                "message": { "role": "assistant", "content": "" }, "done_reason": "stop", "done": true,
+                "total_duration": 4883583458u64, "load_duration": 1334875, "prompt_eval_count": 26,
+                "prompt_eval_duration": 342546000, "eval_count": 282, "eval_duration": 4535599000u64 }),
+        ]);
+        assert!(done);
+        assert_eq!(acc.reasoning, "Let me think");
+        assert_eq!(acc.content, "The sky is blue.");
+        assert_eq!(acc.finish_reason.as_deref(), Some("stop"));
+        let usage = acc.usage.unwrap();
+        assert_eq!((usage["prompt_tokens"].as_u64(), usage["completion_tokens"].as_u64()), (Some(26), Some(282)));
+    }
+
+    #[test]
+    fn native_stream_numbers_tool_calls_and_serializes_arguments() {
+        let (_, acc, done) = feed(&[
+            json!({ "model": "llama3.2", "created_at": "2024-07-22T20:33:28.123648Z",
+                "message": { "role": "assistant", "content": "",
+                    "tool_calls": [{ "function": { "name": "get_weather", "arguments": { "city": "Tokyo" } } }] },
+                "done": false }),
+            json!({ "model": "llama3.2", "message": { "role": "assistant", "content": "",
+                    "tool_calls": [
+                        { "id": "call_srv", "function": { "index": 0, "name": "get_time", "arguments": { "zone": "JST" } } },
+                        { "function": { "name": "list_directory", "arguments": {} } }
+                    ] }, "done": false }),
+            json!({ "model": "llama3.2", "message": { "role": "assistant", "content": "" },
+                "done_reason": "stop", "done": true, "total_duration": 182242375, "prompt_eval_count": 169, "eval_count": 15 }),
+        ]);
+        assert!(done);
+        assert_eq!(acc.finish_reason.as_deref(), Some("tool_calls"));
+        let names: Vec<&str> = acc.tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["get_weather", "get_time", "list_directory"]);
+        assert_eq!(serde_json::from_str::<Value>(&acc.tools[0].arguments).unwrap(), json!({ "city": "Tokyo" }));
+        assert_eq!(acc.tools[2].arguments, "{}");
+        assert_eq!(acc.tools[1].id, "call_srv");
+        assert!(!acc.tools[0].id.is_empty() && acc.tools[0].id != acc.tools[2].id);
+    }
+
+    #[test]
+    fn native_stream_reports_length_errors_and_ignores_after_done() {
+        let (sse, acc, _) = feed(&[
+            json!({ "message": { "role": "assistant", "content": "잘린" }, "done": false }),
+            json!({ "message": { "role": "assistant", "content": "" }, "done_reason": "length", "done": true }),
+            json!({ "message": { "role": "assistant", "content": "뒤늦은 글" }, "done": false }),
+        ]);
+        assert_eq!(acc.finish_reason.as_deref(), Some("length"));
+        assert_eq!(acc.content, "잘린");
+        assert_eq!(sse.last().map(String::as_str), Some("data: [DONE]"));
+
+        let mut stream = NativeStream::default();
+        assert!(stream.translate_line("").is_empty());
+        assert!(stream.translate_line("not json").is_empty());
+        let err = stream.translate_line(r#"{"error":"model requires more system memory"}"#);
+        let crate::agent::SseEvent::Data(v) = crate::agent::parse_sse_line(&err[0]) else { panic!("{err:?}") };
+        let msg = crate::agent::RoundAccumulator::default().apply_chunk_for(&v, "Ollama").unwrap_err();
+        assert!(msg.contains("model requires more system memory"), "{msg}");
+    }
+
+    #[test]
+    fn native_response_becomes_openai_message() {
+        let v = native_response_to_openai(&json!({
+            "model": "llama3.2", "created_at": "2023-12-12T14:13:43.416799Z",
+            "message": { "role": "assistant", "content": "Hello! How are you today?", "thinking": "인사" },
+            "done_reason": "stop", "done": true, "prompt_eval_count": 26, "eval_count": 298
+        }));
+        assert_eq!(v["choices"][0]["message"]["content"], "Hello! How are you today?");
+        assert_eq!(v["choices"][0]["message"]["reasoning_content"], "인사");
+        assert_eq!(v["choices"][0]["finish_reason"], "stop");
+        assert_eq!(v["usage"]["completion_tokens"], 298);
+
+        let tools = native_response_to_openai(&json!({
+            "message": { "role": "assistant", "content": "",
+                "tool_calls": [{ "function": { "name": "get_weather", "arguments": { "city": "Tokyo" } } }] },
+            "done": true
+        }));
+        assert_eq!(tools["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(tools["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"], r#"{"city":"Tokyo"}"#);
+        assert!(tools["choices"][0]["message"]["tool_calls"][0].get("index").is_none());
+        assert_eq!(native_response_to_openai(&json!({ "error": "boom" }))["error"]["message"], "boom");
+    }
+
+    #[test]
+    fn ollama_host_env_matches_the_configured_address() {
+        assert_eq!(ollama_host_env("http://localhost:11434").unwrap(), "127.0.0.1:11434");
+        assert_eq!(ollama_host_env("http://127.0.0.1:12000/v1").unwrap(), "127.0.0.1:12000");
+        assert_eq!(ollama_host_env("http://[::1]:11500").unwrap(), "[::1]:11500");
+        assert_eq!(ollama_host_env("http://localhost").unwrap(), "127.0.0.1:80");
+        assert!(ollama_host_env("http://192.168.0.2:11434").is_err());
+    }
+
+    #[test]
+    fn path_lookup_skips_relative_entries() {
+        let rel_root = tempfile::tempdir_in(".").unwrap();
+        let rel_name = rel_root.path().file_name().unwrap().to_owned();
+        let abs = tempfile::tempdir().unwrap();
+        for d in [rel_root.path(), abs.path()] {
+            std::fs::write(d.join("ollama-test.exe"), b"").unwrap();
+        }
+        let path = std::env::join_paths([std::path::PathBuf::from(&rel_name), abs.path().to_path_buf()]).unwrap();
+        assert_eq!(find_on_path(&path, "ollama-test.exe"), Some(abs.path().join("ollama-test.exe")));
+        let only_rel = std::env::join_paths([std::path::PathBuf::from(&rel_name)]).unwrap();
+        assert_eq!(find_on_path(&only_rel, "ollama-test.exe"), None);
     }
 
     async fn mock_ollama_server(generate_requests: Arc<Mutex<Vec<Value>>>) -> String {
@@ -670,6 +1242,12 @@ mod tests {
 
         let info = turn_model_info(&settings, "qwen3:8b").await;
         assert_eq!(info.loaded_context, Some(16384));
+        // 로드되어 있지 않으면 다음 요청의 num_ctx가 될 원하는 값(모델 최대로 자름)
+        settings
+            .model_prefs
+            .insert("other:1b".into(), ModelPref { context_length: Some(65536), reasoning: None });
+        assert_eq!(turn_model_info(&settings, "other:1b").await.loaded_context, Some(40960));
+        assert_eq!(request_context(&settings, "other:1b").await, 40960);
         assert_eq!(info.reasoning_options, vec!["off", "on"]);
         assert_eq!(info.display_name.as_deref(), Some("qwen3:8b"));
     }
