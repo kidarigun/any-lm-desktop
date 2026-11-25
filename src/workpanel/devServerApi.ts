@@ -19,13 +19,18 @@ export interface ServerInfo {
   url: string | null;
 }
 
+/** Tauri가 앱 자신으로 취급하는 예약 호스트: 미리보기에서도 브라우저에서도 열지 않는다. */
+const RESERVED_HOSTS = ["ipc.localhost", "tauri.localhost", "asset.localhost"];
+const FRAME_HOSTS = ["localhost", "127.0.0.1", "[::1]", "anylm-preview.localhost"];
+
 export function previewDestination(input: string, appOrigin = globalThis.location?.origin): { url: string; local: boolean } | null {
   try {
     const url = new URL(input.trim());
     if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password || url.port === "0") return null;
     if (url.hostname === "0.0.0.0") url.hostname = "localhost";
-    if (url.origin === appOrigin || ["ipc.localhost", "tauri.localhost"].includes(url.hostname)) return null;
-    const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) || url.hostname.endsWith(".localhost");
+    if (url.origin === appOrigin || RESERVED_HOSTS.includes(url.hostname)) return null;
+    // 앱 CSP(frame-src)가 프레임에 허용하는 호스트만 미리보기 창에 넣는다. 다른 *.localhost는 브라우저로 연다 (결정 0019).
+    const local = FRAME_HOSTS.includes(url.hostname);
     return { url: url.href, local };
   } catch {
     return null;

@@ -5,6 +5,7 @@ pub mod agent;
 mod dev_servers;
 pub mod fs_ops;
 pub mod html_preview;
+pub mod ipc_guard;
 pub mod lmstudio;
 pub mod providers;
 pub mod knowledge;
@@ -2587,7 +2588,8 @@ pub fn is_app_url(url: &tauri::Url) -> bool {
     match url.scheme() {
         "tauri" => true,
         "http" | "https" => match url.host_str() {
-            Some("tauri.localhost") => true,
+            // 포트가 붙은 tauri.localhost는 앱이 아니라 네트워크(로컬 서버)로 간다 (결정 0019).
+            Some("tauri.localhost") => url.port().is_none(),
             Some("localhost") => cfg!(debug_assertions) && url.port() == Some(1420),
             _ => false,
         },
@@ -2604,6 +2606,7 @@ fn navigation_guard<R: Runtime>() -> tauri::plugin::TauriPlugin<R> {
             }
             ok
         })
+        .on_webview_ready(|webview| ipc_guard::install_frame_guard(&webview))
         .build()
 }
 
@@ -2681,7 +2684,8 @@ pub fn run() {
             app.manage(html_preview::PreviewServer::start().map_err(|err| format!("HTML 미리보기 서버를 시작할 수 없습니다: {err}")));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
+        // 앱 명령은 앱 화면의 출처에서 온 요청만 실행한다 (결정 0019).
+        .invoke_handler(ipc_guard::guard_invoke(tauri::generate_handler![
             get_initial_state,
             save_settings,
             clear_api_key,
@@ -2781,7 +2785,7 @@ pub fn run() {
             dev_servers::dev_server_start,
             dev_servers::dev_server_list,
             dev_servers::dev_preview_check,
-        ])
+        ]))
         .build(tauri::generate_context!())
         .expect("error while running Any LM Desktop")
         .run(|app, event| {
@@ -3043,6 +3047,8 @@ mod tests {
         let ok = |u: &str| is_app_url(&tauri::Url::parse(u).unwrap());
         assert!(ok("tauri://localhost/index.html"));
         assert!(ok("http://tauri.localhost/"));
+        assert!(!ok("http://tauri.localhost:5173/x"));
+        assert!(ok("http://tauri.localhost:80/"), "기본 포트는 포트 없음과 같다");
         assert!(!ok("http://anylm-preview.localhost:12345/token/site/index.html"));
         assert!(!ok("https://evil.example.com/"));
         assert!(!ok("http://tauri.localhost.evil.com/"));

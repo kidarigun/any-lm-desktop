@@ -37,6 +37,9 @@ portable-pty = "0.9.0"
 [target.'cfg(windows)'.dependencies]
 # 터미널 프로세스 트리를 Job Object로 묶어 닫기·앱 종료 때 함께 끝낸다.
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+# iframe이 Tauri 예약 호스트로 이동하지 못하게 WebView2 프레임 이벤트를 건다 (결정 0019). wry와 같은 버전.
+webview2-com = "0.39.1"
+windows-core = "0.62.2"
 
 [dev-dependencies]
 tempfile = "3"

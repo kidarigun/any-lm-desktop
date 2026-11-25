@@ -22,7 +22,8 @@ mod tests {
             Some("http://localhost:5173/view"));
         assert_eq!(address_in_output("http://localhost.example.org:5173/\nhttp://[::1]:3000/").as_deref(),
             Some("http://[::1]:3000/"));
-        for url in ["javascript:alert(1)", "http://remote.test:7", "http://user@localhost:9"] {
+        for url in ["javascript:alert(1)", "http://remote.test:7", "http://user@localhost:9",
+            "http://tauri.localhost:5173/x", "http://ipc.localhost:1/", "http://asset.localhost:80/"] {
             assert!(local_url(url).is_err(), "{url}");
         }
     }
@@ -153,7 +154,7 @@ pub(crate) fn local_url(raw: &str) -> Result<Url, String> {
         return Err(invalid());
     }
     match url.host_str() {
-        Some("ipc.localhost" | "tauri.localhost") => return Err(invalid()),
+        Some(host) if crate::ipc_guard::RESERVED_HOSTS.contains(&host) => return Err(invalid()),
         Some("localhost" | "127.0.0.1" | "[::1]") => {}
         Some("0.0.0.0") => url.set_host(Some("localhost")).map_err(|_| invalid())?,
         Some(host) if host.ends_with(".localhost") => {}
