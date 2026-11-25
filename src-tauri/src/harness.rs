@@ -626,6 +626,7 @@ async fn live() {
                         model_display_name: &display_name,
                         reasoning_options: &info.reasoning_options,
                         context_length: config.context_length,
+                        loaded_context: Some(config.context_length),
                         project: project.as_ref(),
                         conversation_id: &sc.id,
                         history: &history,
