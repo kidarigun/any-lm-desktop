@@ -1326,10 +1326,13 @@ fn compact_tool_arguments(args: &str, cap: usize) -> Option<String> {
 }
 
 /// 보낼 메시지를 줄인다 (원본은 그대로 둔다).
-/// - 1단계: 지난 턴의 큰 도구 인자를 500자 이하 요약으로 줄이고, 최근 4개를 뺀 오래된 도구 결과를 3천 자로
+/// `turn_start`는 이번 턴의 실제 사용자 메시지 위치(턴 시작 때 한 번 정한다). 그 뒤에 앱이 넣는 이어 쓰기 요청·빈 답 재요청은
+/// 사용자 역할이지만 턴 경계가 아니다.
+/// - 1단계: 지난 턴(`turn_start` 앞)의 큰 도구 인자를 500자 이하 요약으로, 지난 턴 도구 결과 중 마지막 4개를 뺀 나머지를 3천 자로.
+///   이번 턴의 도구 호출·결과는 건드리지 않는다(방금 읽은 파일이 잘려 다시 읽는 일과 매 라운드 앞부분이 바뀌어 캐시가 깨지는 일을 막는다).
 /// - 2단계(컨텍스트 초과 오류 뒤): 최근 2개를 뺀 도구 호출 인자·결과를 줄이고, 최근 8개를 뺀 대화 글을 2천 자로
 /// - 3단계(긴급 추가 압축): 최근 1개를 뺀 도구 호출 인자·결과를 줄이고, 최근 4개를 뺀 대화 글을 4백 자로
-fn compact_messages(msgs: &[Value], level: u8) -> Vec<Value> {
+fn compact_messages(msgs: &[Value], level: u8, turn_start: usize) -> Vec<Value> {
     if level == 0 {
         return msgs.to_vec();
     }
@@ -1338,18 +1341,15 @@ fn compact_messages(msgs: &[Value], level: u8) -> Vec<Value> {
         2 => (2, 800, 8, 2_000),
         _ => (1, 300, 4, 400),
     };
+    // 1단계는 지난 턴 도구 결과만 줄일 대상으로 본다. 그 범위는 턴 동안 바뀌지 않아 요청 앞부분이 라운드마다 같다.
     let tool_idx: Vec<usize> = msgs
         .iter()
         .enumerate()
-        .filter(|(_, m)| m.get("role").and_then(|r| r.as_str()) == Some("tool"))
+        .filter(|(i, m)| m.get("role").and_then(|r| r.as_str()) == Some("tool") && (level >= 2 || *i < turn_start))
         .map(|(i, _)| i)
         .collect();
     let recent_tools: std::collections::HashSet<usize> = tool_idx.iter().rev().take(keep_tools).copied().collect();
     let earliest_recent_tool = recent_tools.iter().copied().min().unwrap_or(usize::MAX);
-    let last_user_idx = msgs
-        .iter()
-        .rposition(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-        .unwrap_or(0);
     let old_before = if keep_msgs == 0 { 0 } else { msgs.len().saturating_sub(keep_msgs) };
     msgs.iter()
         .enumerate()
@@ -1365,7 +1365,7 @@ fn compact_messages(msgs: &[Value], level: u8) -> Vec<Value> {
                 return m.clone();
             }
             let mut next = m.clone();
-            let shrink_args = i < last_user_idx || (level >= 2 && i < earliest_recent_tool);
+            let shrink_args = i < turn_start || (level >= 2 && i < earliest_recent_tool);
             if role == "assistant" && shrink_args {
                 if let Some(calls) = next.get_mut("tool_calls").and_then(Value::as_array_mut) {
                     for call in calls {
@@ -1382,7 +1382,7 @@ fn compact_messages(msgs: &[Value], level: u8) -> Vec<Value> {
                 }
             }
             let cap = match role {
-                "tool" if !recent_tools.contains(&i) => Some(tool_cap),
+                "tool" if (level >= 2 || i < turn_start) && !recent_tools.contains(&i) => Some(tool_cap),
                 "user" | "assistant" if i < old_before => Some(msg_cap),
                 _ => None,
             };
@@ -1405,6 +1405,21 @@ fn is_readonly_tool(name: &str) -> bool {
         name,
         "read_file" | "list_directory" | "search_files" | "search_knowledge" | "server_logs" | "load_skill" | "read_skill_file"
     )
+}
+
+/// 같은 호출을 되풀이하면 같은 결과가 나오는 조회. `server_logs`는 서버 출력이 계속 바뀌어 반복으로 세지 않는다.
+fn counts_as_repeated_read(name: &str) -> bool {
+    is_readonly_tool(name) && name != "server_logs"
+}
+
+/// 파일·프로세스·외부 상태를 바꿀 수 있는 도구. 성공하면 같은 조회·같은 실행도 결과가 달라질 수 있다.
+/// MCP 도구는 무엇을 하는지 알 수 없어 상태를 바꾸는 것으로 본다. `open_preview`, `remember`처럼 프로젝트 파일과
+/// 프로세스를 바꾸지 않는 도구는 넣지 않는다(읽기 반복을 숨기지 않게).
+fn is_state_changing_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "write_file" | "modify_file" | "delete_path" | "run_command" | "run_python" | "start_server" | "stop_server"
+    ) || name.starts_with(mcp::TOOL_PREFIX)
 }
 
 fn canonical_tool_key(name: &str, args_json: &str) -> (String, String) {
@@ -1437,9 +1452,11 @@ impl ToolLoopGuard {
         if executed.is_empty() {
             return ToolLoopAction::Continue;
         }
-        // 상태 변경 작업이 성공하면 파일·로그 내용이 달라졌을 수 있으므로 읽기 반복 횟수를 초기화한다.
-        if executed.iter().any(|r| r.status == "completed" && !is_readonly_tool(&r.tool_name)) {
+        // 상태 변경 작업이 성공하면 파일·로그 내용이 달라졌을 수 있으므로 읽기 반복 횟수와 같은 오류 횟수를 초기화한다
+        // (스크립트를 고친 뒤 다시 실행해 또 실패한 것은 같은 오류의 되풀이가 아니다).
+        if executed.iter().any(|r| r.status == "completed" && is_state_changing_tool(&r.tool_name)) {
             self.read_call_counts.clear();
+            self.error_call_counts.clear();
         }
         if executed.iter().all(|r| r.status == "error") {
             self.consecutive_error_rounds += 1;
@@ -1455,7 +1472,7 @@ impl ToolLoopGuard {
                 let count = self.error_call_counts.entry(key).or_insert(0);
                 *count += 1;
                 max_err = max_err.max(*count);
-            } else if r.status == "completed" && is_readonly_tool(&r.tool_name) {
+            } else if r.status == "completed" && counts_as_repeated_read(&r.tool_name) {
                 let count = self.read_call_counts.entry(key).or_insert(0);
                 *count += 1;
                 max_read = max_read.max(*count);
@@ -1476,6 +1493,43 @@ impl ToolLoopGuard {
         }
         ToolLoopAction::Continue
     }
+
+    /// 앱이 요청을 줄이면서 결과를 잘라 낸 호출은, 모델이 다시 읽어도 반복으로 세지 않는다.
+    fn forget_reads(&mut self, keys: &[(String, String)]) {
+        for key in keys {
+            self.read_call_counts.remove(key);
+        }
+    }
+}
+
+/// `compact_messages`가 결과 내용을 줄인 도구 호출의 (도구 이름, 정규화한 인자) 목록.
+/// 같은 호출의 가장 최근 결과가 줄어든 경우만 넣는다(온전한 최근 결과가 있는데 또 읽는 것은 반복이다).
+fn compacted_tool_keys(original: &[Value], compacted: &[Value]) -> Vec<(String, String)> {
+    let mut calls: std::collections::HashMap<&str, (&str, &str)> = std::collections::HashMap::new();
+    for m in original {
+        for call in m.get("tool_calls").and_then(Value::as_array).into_iter().flatten() {
+            let id = call.get("id").and_then(Value::as_str).unwrap_or("");
+            let name = call.pointer("/function/name").and_then(Value::as_str).unwrap_or("");
+            let args = call.pointer("/function/arguments").and_then(Value::as_str).unwrap_or("");
+            calls.insert(id, (name, args));
+        }
+    }
+    let mut latest_truncated: Vec<((String, String), bool)> = Vec::new();
+    for (o, c) in original.iter().zip(compacted) {
+        if o.get("role").and_then(Value::as_str) != Some("tool") {
+            continue;
+        }
+        let Some((name, args)) = o.get("tool_call_id").and_then(Value::as_str).and_then(|id| calls.get(id)) else {
+            continue;
+        };
+        let key = canonical_tool_key(name, args);
+        let truncated = o.get("content") != c.get("content");
+        match latest_truncated.iter_mut().find(|(k, _)| *k == key) {
+            Some(entry) => entry.1 = truncated,
+            None => latest_truncated.push((key, truncated)),
+        }
+    }
+    latest_truncated.into_iter().filter(|(_, t)| *t).map(|(k, _)| k).collect()
 }
 
 /// 추론("생각하기")이 켜진 모델에 반복 사고 루프를 억제하는 `presence_penalty`를 정한다.
@@ -2337,6 +2391,12 @@ pub async fn run_agent_turn<R: Runtime>(
     if let Some(s) = auto_skill {
         insert_skill_message(&mut api_messages, &s.text);
     }
+    // 이번 턴의 실제 사용자 메시지 위치. 이 뒤로는 메시지를 덧붙이기만 하므로 턴 동안 바뀌지 않는다.
+    // 앱이 넣는 이어 쓰기 요청·빈 답 재요청도 사용자 역할이라, 그때마다 다시 찾으면 이번 턴 도구 인자를 지난 턴 것으로 오인한다.
+    let turn_start = api_messages
+        .iter()
+        .rposition(|m| m.get("role").and_then(Value::as_str) == Some("user"))
+        .unwrap_or(0);
     let start_round = msg
         .tool_records
         .iter()
@@ -2398,7 +2458,10 @@ pub async fn run_agent_turn<R: Runtime>(
 
         let budget = crate::context_budget::trim_trigger_chars(req.context_length);
         let level = compact_level.max(u8::from(total_chars(&api_messages) > budget));
-        let messages = compact_messages(&api_messages, level);
+        let messages = compact_messages(&api_messages, level, turn_start);
+        if level > 0 {
+            loop_guard.forget_reads(&compacted_tool_keys(&api_messages, &messages));
+        }
         let mut body = json!({
             "model": req.model_key,
             "messages": messages,
@@ -4910,19 +4973,212 @@ mod tests {
             msgs.push(json!({"role": "assistant", "content": null, "tool_calls": []}));
             msgs.push(json!({"role": "tool", "tool_call_id": format!("c{}", i), "content": big.clone()}));
         }
+        // 지난 턴의 도구 결과들 뒤에 이번 턴 질문이 온다.
+        msgs.push(json!({"role": "user", "content": "이어서 정리해 줘"}));
+        let turn_start = msgs.len() - 1;
         let len = |v: &Value| v["content"].as_str().map_or(0, |s| s.chars().count());
-        assert_eq!(compact_messages(&msgs, 0), msgs);
-        let l1 = compact_messages(&msgs, 1);
+        assert_eq!(compact_messages(&msgs, 0, turn_start), msgs);
+        let l1 = compact_messages(&msgs, 1, turn_start);
         let tool_lens: Vec<usize> = l1.iter().filter(|m| m["role"] == "tool").map(len).collect();
         assert!(tool_lens[..2].iter().all(|&n| n < 3_200), "{:?}", tool_lens);
-        assert!(tool_lens[2..].iter().all(|&n| n == 10_000), "최근 4개는 그대로");
+        assert!(tool_lens[2..].iter().all(|&n| n == 10_000), "지난 턴의 마지막 4개는 그대로");
         assert_eq!(len(&l1[1]), 10_000, "1단계는 사용자 글을 줄이지 않는다");
-        let l2 = compact_messages(&msgs, 2);
+        let l2 = compact_messages(&msgs, 2, turn_start);
         assert!(len(&l2[1]) < 2_200, "2단계는 오래된 사용자 글도 줄인다");
         assert!(l2[1]["content"].as_str().unwrap().contains("줄였습니다"));
         assert_eq!(l2[0]["content"], "sys");
-        let l3 = compact_messages(&msgs, 3);
+        let l3 = compact_messages(&msgs, 3, turn_start);
         assert!(len(&l3[1]) < 600, "3단계는 더 짧게 줄인다");
+    }
+
+    /// 1단계는 이번 턴(실제 사용자 메시지 뒤)의 도구 결과와 인자를 줄이지 않는다. 2단계부터는 줄인다.
+    #[test]
+    fn level_one_compaction_leaves_the_current_turn_alone() {
+        let big = "나".repeat(10_000);
+        let mut msgs = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "파일 6개를 읽고 고쳐 줘"})];
+        for i in 0..6 {
+            let args = json!({"relative_path": format!("f{i}.txt"), "content": big.clone()}).to_string();
+            msgs.push(json!({"role": "assistant", "content": null, "tool_calls": [
+                {"id": format!("c{i}"), "type": "function", "function": {"name": "write_file", "arguments": args}}
+            ]}));
+            msgs.push(json!({"role": "tool", "tool_call_id": format!("c{i}"), "content": big.clone()}));
+        }
+        let l1 = compact_messages(&msgs, 1, 1);
+        assert_eq!(l1, msgs, "이번 턴은 1단계에서 그대로");
+        let l2 = compact_messages(&msgs, 2, 1);
+        let shortened = l2.iter().filter(|m| m["role"] == "tool" && m["content"].as_str().unwrap().chars().count() < 1_000).count();
+        assert_eq!(shortened, 4, "2단계는 최근 2개를 뺀 이번 턴 결과도 줄인다");
+    }
+
+    /// 앱이 넣은 이어 쓰기 요청(사용자 역할) 뒤에도 이번 턴의 write_file 인자는 요약되지 않는다.
+    #[test]
+    fn injected_continue_prompt_is_not_taken_for_the_turn_boundary() {
+        let content = "다".repeat(6_000);
+        let args = json!({"relative_path": "report.md", "content": content}).to_string();
+        let mut msgs = vec![
+            json!({"role": "system", "content": "sys"}),
+            json!({"role": "user", "content": "보고서를 써 줘"}),
+            json!({"role": "assistant", "content": null, "tool_calls": [
+                {"id": "w1", "type": "function", "function": {"name": "write_file", "arguments": args.clone()}}
+            ]}),
+            json!({"role": "tool", "tool_call_id": "w1", "content": "저장됨"}),
+            json!({"role": "assistant", "content": "요약을 쓰는 중"}),
+        ];
+        msgs.push(json!({"role": "user", "content": continue_prompt("요약을 쓰는 중", "")}));
+        let l1 = compact_messages(&msgs, 1, 1);
+        assert_eq!(l1[2]["tool_calls"][0]["function"]["arguments"], args.as_str(), "턴 시작은 실제 사용자 메시지");
+        // 예전처럼 마지막 사용자 역할 메시지를 턴 시작으로 보면 인자가 요약된다.
+        let wrong = compact_messages(&msgs, 1, msgs.len() - 1);
+        assert!(wrong[2]["tool_calls"][0]["function"]["arguments"].as_str().unwrap().contains("_omitted"));
+    }
+
+    #[tokio::test]
+    async fn continue_prompt_round_keeps_current_turn_write_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = "라".repeat(7_000);
+        let r1 = vec![
+            sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"w1","function":{"name":"write_file",
+                "arguments":json!({"relative_path":"report.md","content":content}).to_string()}}]},"finish_reason":"tool_calls"}]})),
+            sse_done(),
+        ];
+        let r2 = vec![sse(json!({"choices":[{"delta":{"content":"저장한 보고서를 요약하면"},"finish_reason":"length"}]})), sse_done()];
+        let r3 = vec![sse(json!({"choices":[{"delta":{"content":" 세 부분입니다."},"finish_reason":"stop"}]})), sse_done()];
+        let (url, bodies) = mock_server(vec![r1, r2, r3], 0).await;
+        let app = tauri::test::mock_app();
+        let settings = test_settings(url);
+        let project = test_project(dir.path());
+        let history = vec![msg("user", "보고서를 써서 저장해 줘")];
+        let (out, _) = run_agent_turn(app.handle(), TurnRequest {
+            context_length: 8192,
+            ..turn_req(&settings, Some(&project), &history)
+        }, Arc::new(AtomicBool::new(false))).await.unwrap();
+        assert!(out.content.ends_with("세 부분입니다."));
+        let b = bodies.lock().unwrap();
+        assert_eq!(b.len(), 3);
+        assert!(b[2]["messages"].to_string().chars().count() > crate::context_budget::trim_trigger_chars(8192), "1단계 줄이기 조건");
+        let sent = b[2]["messages"].as_array().unwrap();
+        assert!(sent.last().unwrap()["content"].as_str().unwrap().starts_with("[이어서 작성 요청]"));
+        let write_args = sent.iter().find_map(|m| m["tool_calls"][0]["function"]["arguments"].as_str()).unwrap();
+        assert!(!write_args.contains("_omitted"), "이번 턴 write_file 인자가 요약되면 안 된다");
+        assert!(write_args.contains(&"라".repeat(7_000)));
+    }
+
+    #[tokio::test]
+    async fn current_turn_reads_are_not_truncated_by_level_one_compaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut responses: Vec<Vec<Vec<u8>>> = (0..6)
+            .map(|i| {
+                std::fs::write(dir.path().join(format!("f{i}.txt")), format!("MARK{i}_{}", "x".repeat(3_500))).unwrap();
+                vec![
+                    sse(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":format!("rd_{i}"),
+                        "function":{"name":"read_file","arguments":json!({"relative_path":format!("f{i}.txt")}).to_string()}}]},
+                        "finish_reason":"tool_calls"}]})),
+                    sse_done(),
+                ]
+            })
+            .collect();
+        responses.push(vec![sse(json!({"choices":[{"delta":{"content":"모두 확인"},"finish_reason":"stop"}]})), sse_done()]);
+        let (url, bodies) = mock_server(responses, 0).await;
+        let app = tauri::test::mock_app();
+        let settings = test_settings(url);
+        let project = test_project(dir.path());
+        let history = vec![msg("user", "f0~f5를 읽고 종합해 줘")];
+        let (out, _) = run_agent_turn(app.handle(), TurnRequest {
+            context_length: 8192,
+            ..turn_req(&settings, Some(&project), &history)
+        }, Arc::new(AtomicBool::new(false))).await.unwrap();
+        assert_eq!(out.content, "모두 확인");
+        let b = bodies.lock().unwrap();
+        assert!(b[6]["messages"].to_string().chars().count() > crate::context_budget::trim_trigger_chars(8192), "1단계 줄이기 조건");
+        let tools: Vec<&str> = b[6]["messages"].as_array().unwrap().iter()
+            .filter(|m| m["role"] == "tool").map(|m| m["content"].as_str().unwrap()).collect();
+        assert_eq!(tools.len(), 6);
+        assert!(tools.iter().all(|t| !t.contains("다시 읽으세요")), "이번 턴 읽기 결과는 잘리지 않는다");
+    }
+
+    fn call_rec(name: &str, args: Value, status: &str) -> ToolExecutionRecord {
+        ToolExecutionRecord { arguments_json: args.to_string(), ..rec("x", name, status, "", 0) }
+    }
+
+    fn observe(guard: &mut ToolLoopGuard, r: ToolExecutionRecord) -> &'static str {
+        match guard.observe_round(&[&r]) {
+            ToolLoopAction::Continue => "continue",
+            ToolLoopAction::Warn(_) => "warn",
+            ToolLoopAction::Stop(_) => "stop",
+        }
+    }
+
+    #[test]
+    fn fixing_between_failed_runs_resets_the_same_error_count() {
+        let run = || call_rec("run_python", json!({"path": "x.py"}), "error");
+        let fix = || call_rec("modify_file", json!({"relative_path": "x.py", "target": "a", "replacement": "b"}), "completed");
+        let mut g = ToolLoopGuard::default();
+        let seq = [observe(&mut g, run()), observe(&mut g, fix()), observe(&mut g, run()), observe(&mut g, fix()), observe(&mut g, run())];
+        assert_eq!(seq, ["continue", "continue", "continue", "continue", "continue"]);
+
+        let mut g = ToolLoopGuard::default();
+        let seq = [observe(&mut g, run()), observe(&mut g, run()), observe(&mut g, run())];
+        assert_eq!(seq, ["continue", "warn", "stop"], "고치지 않고 같은 호출이 3번 실패하면 멈춘다");
+    }
+
+    #[test]
+    fn server_log_polling_is_not_a_repeated_read() {
+        let mut g = ToolLoopGuard::default();
+        assert_eq!(observe(&mut g, call_rec("start_server", json!({"command": "npm run dev"}), "completed")), "continue");
+        for _ in 0..5 {
+            assert_eq!(observe(&mut g, call_rec("server_logs", json!({"id": "t1"}), "completed")), "continue");
+        }
+    }
+
+    #[test]
+    fn non_mutating_tools_do_not_hide_a_read_loop() {
+        let read = || call_rec("read_file", json!({"relative_path": "a.txt"}), "completed");
+        let mut g = ToolLoopGuard::default();
+        assert_eq!(observe(&mut g, read()), "continue");
+        assert_eq!(observe(&mut g, call_rec("open_preview", json!({"url": "http://127.0.0.1:5173"}), "completed")), "continue");
+        assert_eq!(observe(&mut g, read()), "continue");
+        assert_eq!(observe(&mut g, call_rec("remember", json!({"text": "메모"}), "completed")), "continue");
+        assert_eq!(observe(&mut g, read()), "warn");
+        assert_eq!(observe(&mut g, read()), "stop", "open_preview·remember는 읽기 횟수를 초기화하지 않는다");
+
+        let mut g = ToolLoopGuard::default();
+        for _ in 0..3 {
+            observe(&mut g, read());
+        }
+        assert_eq!(observe(&mut g, call_rec("mcp__srv__tool", json!({}), "completed")), "continue");
+        assert_eq!(observe(&mut g, read()), "continue", "MCP 도구는 상태를 바꾸는 것으로 본다");
+    }
+
+    #[test]
+    fn rereading_a_result_the_app_truncated_is_not_counted() {
+        let args = json!({"relative_path": "a.txt"}).to_string();
+        let original = vec![
+            json!({"role": "user", "content": "q"}),
+            json!({"role": "assistant", "content": null, "tool_calls": [{"id": "r1", "type": "function", "function": {"name": "read_file", "arguments": args}}]}),
+            json!({"role": "tool", "tool_call_id": "r1", "content": "긴 내용"}),
+            json!({"role": "assistant", "content": null, "tool_calls": [{"id": "r2", "type": "function", "function": {"name": "read_file", "arguments": json!({"relative_path": "b.txt"}).to_string()}}]}),
+            json!({"role": "tool", "tool_call_id": "r2", "content": "b 내용"}),
+        ];
+        let mut compacted = original.clone();
+        compacted[2]["content"] = json!("긴 ... 필요하면 다시 읽으세요");
+        let keys = compacted_tool_keys(&original, &compacted);
+        assert_eq!(keys, vec![canonical_tool_key("read_file", r#"{"relative_path":"a.txt"}"#)]);
+
+        // 같은 파일의 최근 결과가 온전하면 예전 결과가 줄었어도 반복으로 센다.
+        let mut later = original.clone();
+        later.push(json!({"role": "assistant", "content": null, "tool_calls": [{"id": "r3", "type": "function", "function": {"name": "read_file", "arguments": json!({"relative_path": "a.txt"}).to_string()}}]}));
+        later.push(json!({"role": "tool", "tool_call_id": "r3", "content": "긴 내용"}));
+        let mut later_compacted = later.clone();
+        later_compacted[2]["content"] = json!("줄임");
+        assert!(compacted_tool_keys(&later, &later_compacted).is_empty());
+
+        let read = || call_rec("read_file", json!({"relative_path": "a.txt"}), "completed");
+        let mut g = ToolLoopGuard::default();
+        for _ in 0..3 {
+            observe(&mut g, read());
+        }
+        g.forget_reads(&keys);
+        assert_eq!(observe(&mut g, read()), "continue", "앱이 잘라 낸 결과를 다시 읽는 것은 처음 읽기로 센다");
     }
 
     #[test]
@@ -5659,7 +5915,7 @@ content-length: {}
         assert_eq!(out[3]["content"], "지금 할 새 질문");
 
         // 긴급 압축 단계에서도 요약 쌍(인덱스 1·2)은 보존된다.
-        let compacted = compact_messages(&out, 3);
+        let compacted = compact_messages(&out, 3, 3);
         assert!(compacted[1]["content"].as_str().unwrap().contains("API 설계 완료"));
     }
 
