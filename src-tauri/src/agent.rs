@@ -1532,17 +1532,76 @@ fn compacted_tool_keys(original: &[Value], compacted: &[Value]) -> Vec<(String, 
     latest_truncated.into_iter().filter(|(_, t)| *t).map(|(k, _)| k).collect()
 }
 
-/// 추론("생각하기")이 켜진 모델에 반복 사고 루프를 억제하는 `presence_penalty`를 정한다.
-/// 코딩 모드("code")는 문법 토큰(괄호·키워드 등) 훼손을 줄이기 위해 0.8, 그 외 모드는 1.2를 쓴다.
-/// 추론 선택지가 없거나 추론을 끈 경우("off")에는 넣지 않는다.
-fn thinking_presence_penalty(reasoning_options: &[String], pref: Option<&str>, mode: &str) -> Option<f64> {
+/// 일반 채팅에서 추론이 켜져 있을 때 넣는 `presence_penalty`(결정 0017 갱신)
+const CHAT_THINKING_PRESENCE_PENALTY: f64 = 0.5;
+/// 사고 반복이 감지된 바로 다음 한 라운드(추론은 켠 채 다시 시도)에만 넣는 값
+const LOOP_RETRY_PRESENCE_PENALTY: f64 = 1.0;
+/// 한 턴에서 사고 반복 때문에 라운드를 다시 시도하는 최대 횟수(라운드마다 최대 2번: 반복 억제 → 추론 끄기)
+const MAX_THINKING_LOOP_RETRIES: usize = 4;
+
+/// 요청에 넣을 `presence_penalty`를 정한다(결정 0017 갱신).
+/// - 추론 선택지가 없거나 추론을 끈 요청(추론 끄기 재시도·요약 포함)에는 넣지 않는다.
+/// - 사고 반복 직후의 재시도 라운드(`loop_retry`)는 `LOOP_RETRY_PRESENCE_PENALTY`.
+/// - 프로젝트·코딩 화면은 넣지 않는다(도구 JSON 인자, 파일 내용, 표의 `"` `,` `|` 괄호가 벌점을 받아 깨지지 않게).
+/// - 일반 채팅은 `CHAT_THINKING_PRESENCE_PENALTY`.
+fn thinking_presence_penalty(reasoning_options: &[String], pref: Option<&str>, mode: &str, loop_retry: bool) -> Option<f64> {
     if reasoning_options.is_empty() || pref == Some("off") {
         return None;
     }
-    if mode == "code" {
-        Some(0.8)
-    } else {
-        Some(1.2)
+    if loop_retry {
+        return Some(LOOP_RETRY_PRESENCE_PENALTY);
+    }
+    match mode {
+        "project" | "code" => None,
+        _ => Some(CHAT_THINKING_PRESENCE_PENALTY),
+    }
+}
+
+/// 사고 반복이 감지된 라운드를 어떻게 다시 보낼지
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum LoopRetry {
+    /// 보통 요청
+    #[default]
+    None,
+    /// 추론은 켠 채 `presence_penalty`를 올려 다시 보낸다
+    Penalty,
+    /// 추론을 끄고 다시 보낸다
+    ReasoningOff,
+}
+
+/// 사고 반복 복구 단계. 재시도 라운드가 연결 복구·컨텍스트 압축 단계 올리기로 다시 보내지더라도,
+/// 그 라운드가 정상으로 끝날 때(`round_completed`)까지 같은 단계를 유지한다.
+#[derive(Default)]
+struct ThinkingLoopRecovery {
+    stage: LoopRetry,
+    turn_retries: usize,
+}
+
+impl ThinkingLoopRecovery {
+    /// 이번 요청에 쓸 단계
+    fn stage(&self) -> LoopRetry {
+        self.stage
+    }
+
+    /// 사고 반복이 감지되었다. 다음으로 시도할 단계를 돌려주고, 더 시도할 수 없으면 `None`(멈춤).
+    /// 추론 선택지가 있으면 먼저 반복 억제를 올려 보고, 그래도 반복되면 "off"를 지원할 때만 추론을 끈다.
+    fn next_after_loop(&mut self, has_reasoning_options: bool, can_turn_off: bool) -> Option<LoopRetry> {
+        if self.turn_retries >= MAX_THINKING_LOOP_RETRIES {
+            return None;
+        }
+        let next = match self.stage {
+            LoopRetry::None if has_reasoning_options => LoopRetry::Penalty,
+            LoopRetry::None | LoopRetry::Penalty if can_turn_off => LoopRetry::ReasoningOff,
+            _ => return None,
+        };
+        self.stage = next;
+        self.turn_retries += 1;
+        Some(next)
+    }
+
+    /// 라운드가 반복 없이 정상으로 끝났다: 다음 라운드부터 보통 요청으로 돌아간다.
+    fn round_completed(&mut self) {
+        self.stage = LoopRetry::None;
     }
 }
 
@@ -2444,10 +2503,7 @@ pub async fn run_agent_turn<R: Runtime>(
     // 생각만 하고 보이는 답 없이 끝난 라운드를 한 턴에 한 번만 다시 시킨다(작은 모델에서 잦음).
     let mut empty_nudged = false;
     let mut loop_guard = ToolLoopGuard::default();
-    const MAX_THINKING_LOOP_RETRIES: usize = 2;
-    let mut thinking_loop_retries_used = 0usize;
-    let mut round_thinking_retried = false;
-    let mut force_reasoning_off = false;
+    let mut loop_recovery = ThinkingLoopRecovery::default();
     let mut clear_notice_on_chunk = false;
 
     loop {
@@ -2473,12 +2529,15 @@ pub async fn run_agent_turn<R: Runtime>(
             body["max_tokens"] = json!(n);
         }
         let pref = req.settings.model_prefs.get(req.model_key).and_then(|p| p.reasoning.as_deref());
-        let retry_without_reasoning = std::mem::take(&mut force_reasoning_off);
-        let effective_pref = if retry_without_reasoning { Some("off") } else { pref };
+        // 사고 반복 재시도 단계는 이 라운드가 정상으로 끝날 때까지 유지한다(연결 복구·압축 단계 올리기로 다시 보내도 같다).
+        let loop_retry = loop_recovery.stage();
+        let effective_pref = if loop_retry == LoopRetry::ReasoningOff { Some("off") } else { pref };
         for (k, v) in crate::lmstudio::reasoning_fields(req.reasoning_options, effective_pref) {
             body[k] = v;
         }
-        if let Some(penalty) = thinking_presence_penalty(req.reasoning_options, effective_pref, req.mode) {
+        if let Some(penalty) =
+            thinking_presence_penalty(req.reasoning_options, effective_pref, req.mode, loop_retry == LoopRetry::Penalty)
+        {
             body["presence_penalty"] = json!(penalty);
         }
         if let Some(tools) = &tools {
@@ -2748,17 +2807,28 @@ pub async fn run_agent_turn<R: Runtime>(
         if thinking_loop_detected {
             let no_output_yet =
                 acc.content.trim().is_empty() && acc.tools.iter().all(|t| t.name.is_empty());
-            let can_retry_without_reasoning = no_output_yet
-                && !round_thinking_retried
-                && thinking_loop_retries_used < MAX_THINKING_LOOP_RETRIES
-                && req.reasoning_options.iter().any(|o| o == "off");
-            if can_retry_without_reasoning {
-                round_thinking_retried = true;
-                thinking_loop_retries_used += 1;
-                force_reasoning_off = true;
-                let marker = "\n\n[생각 반복이 감지되어 추론을 끄고 바로 진행합니다]\n\n";
+            let next = if no_output_yet {
+                loop_recovery.next_after_loop(
+                    !req.reasoning_options.is_empty(),
+                    req.reasoning_options.iter().any(|o| o == "off"),
+                )
+            } else {
+                None
+            };
+            if let Some(stage) = next {
+                let (marker, notice) = if stage == LoopRetry::Penalty {
+                    (
+                        "\n\n[생각 반복이 감지되어 반복 억제를 높여 다시 생각합니다]\n\n",
+                        "생각 과정이 반복되어 반복 억제를 높여 다시 시도합니다...",
+                    )
+                } else {
+                    (
+                        "\n\n[생각 반복이 감지되어 추론을 끄고 바로 진행합니다]\n\n",
+                        "생각 과정이 반복되어 추론을 끄고 바로 진행합니다...",
+                    )
+                };
                 sink.reasoning(marker);
-                sink.notice("생각 과정이 반복되어 추론을 끄고 바로 진행합니다...".to_string());
+                sink.notice(notice.to_string());
                 clear_notice_on_chunk = true;
                 let saved_reasoning = format!("{}{}", acc.reasoning, marker);
                 append_round_to_msg(&mut msg, "", &saved_reasoning, continuing);
@@ -2772,7 +2842,7 @@ pub async fn run_agent_turn<R: Runtime>(
             break;
         }
 
-        round_thinking_retried = false;
+        loop_recovery.round_completed();
         if clear_notice_on_chunk {
             clear_notice_on_chunk = false;
             sink.notice(String::new());
@@ -5984,70 +6054,92 @@ content-length: {}
     #[test]
     fn thinking_presence_penalty_scales_by_mode_and_reasoning_pref() {
         let opts = vec!["off".to_string(), "on".to_string()];
-        assert_eq!(thinking_presence_penalty(&[], None, "chat"), None);
-        assert_eq!(thinking_presence_penalty(&[], Some("on"), "code"), None);
-        assert_eq!(thinking_presence_penalty(&opts, Some("off"), "chat"), None);
-        assert_eq!(thinking_presence_penalty(&opts, Some("off"), "code"), None);
-        assert_eq!(thinking_presence_penalty(&opts, None, "code"), Some(0.8));
-        assert_eq!(thinking_presence_penalty(&opts, Some("on"), "code"), Some(0.8));
-        assert_eq!(thinking_presence_penalty(&opts, None, "chat"), Some(1.2));
-        assert_eq!(thinking_presence_penalty(&opts, Some("on"), "project"), Some(1.2));
-        assert_eq!(thinking_presence_penalty(&opts, None, ""), Some(1.2));
+        assert_eq!(thinking_presence_penalty(&[], None, "chat", false), None);
+        assert_eq!(thinking_presence_penalty(&[], Some("on"), "code", true), None, "추론 선택지가 없으면 넣지 않는다");
+        assert_eq!(thinking_presence_penalty(&opts, Some("off"), "chat", false), None);
+        assert_eq!(thinking_presence_penalty(&opts, Some("off"), "code", true), None, "추론 끄기 재시도·요약에는 넣지 않는다");
+        assert_eq!(thinking_presence_penalty(&opts, None, "code", false), None, "코딩 화면 기본은 0");
+        assert_eq!(thinking_presence_penalty(&opts, Some("on"), "project", false), None, "프로젝트 화면 기본은 0");
+        assert_eq!(thinking_presence_penalty(&opts, None, "chat", false), Some(CHAT_THINKING_PRESENCE_PENALTY));
+        assert_eq!(thinking_presence_penalty(&opts, None, "", false), Some(0.5));
+        assert_eq!(thinking_presence_penalty(&opts, None, "code", true), Some(LOOP_RETRY_PRESENCE_PENALTY));
+        assert_eq!(thinking_presence_penalty(&opts, Some("on"), "chat", true), Some(1.0));
+    }
+
+    #[test]
+    fn thinking_loop_recovery_raises_penalty_then_turns_reasoning_off_and_holds_until_the_round_completes() {
+        let mut r = ThinkingLoopRecovery::default();
+        assert_eq!(r.stage(), LoopRetry::None);
+        assert_eq!(r.next_after_loop(true, true), Some(LoopRetry::Penalty));
+        assert_eq!(r.stage(), LoopRetry::Penalty, "연결 복구로 다시 보내도 같은 단계");
+        assert_eq!(r.next_after_loop(true, true), Some(LoopRetry::ReasoningOff));
+        assert_eq!(r.stage(), LoopRetry::ReasoningOff);
+        assert_eq!(r.stage(), LoopRetry::ReasoningOff, "압축 단계 올리기로 다시 보내도 추론은 꺼진 채");
+        assert_eq!(r.next_after_loop(true, true), None, "추론을 꺼도 반복되면 멈춘다");
+        r.round_completed();
+        assert_eq!(r.stage(), LoopRetry::None, "정상으로 끝난 뒤에는 보통 요청");
+
+        // "off"가 없는 모델: 반복 억제만 한 번 올려 보고 멈춘다.
+        let mut r = ThinkingLoopRecovery::default();
+        assert_eq!(r.next_after_loop(true, false), Some(LoopRetry::Penalty));
+        assert_eq!(r.next_after_loop(true, false), None);
+        // 추론 선택지가 없는 모델: 조절할 방법이 없어 멈춘다.
+        assert_eq!(ThinkingLoopRecovery::default().next_after_loop(false, false), None);
+
+        // 한 턴 전체 상한
+        let mut r = ThinkingLoopRecovery::default();
+        let mut tries = 0;
+        while r.next_after_loop(true, true).is_some() {
+            tries += 1;
+            if r.stage() == LoopRetry::ReasoningOff {
+                r.round_completed();
+            }
+        }
+        assert_eq!(tries, MAX_THINKING_LOOP_RETRIES);
     }
 
     #[tokio::test]
     async fn request_body_includes_presence_penalty_only_when_thinking_on() {
         let ok = vec![sse(json!({"choices":[{"delta":{"content":"네"}}]})), sse_done()];
-        let (url, bodies) = mock_server(vec![ok.clone(), ok.clone(), ok], 0).await;
+        let (url, bodies) = mock_server(vec![ok.clone(), ok.clone(), ok.clone(), ok], 0).await;
         let app = tauri::test::mock_app();
         let mut settings = test_settings(url);
         let history = vec![msg("user", "안녕")];
         let opts = vec!["off".to_string(), "on".to_string()];
+        let send = |settings: &AppSettings, mode: &'static str, id: &'static str| {
+            let app = app.handle().clone();
+            let settings = settings.clone();
+            let history = history.clone();
+            let opts = opts.clone();
+            async move {
+                run_agent_turn(
+                    &app,
+                    TurnRequest {
+                        settings: &settings, model_key: "qwen3.6-35b-a3b", model_display_name: "", reasoning_options: &opts,
+                        context_length: 32768, project: None, conversation_id: id, history: &history,
+                        compaction: None, continue_from: None, mode, checkpoint: None, knowledge: "", auto_skill: None,
+                    },
+                    Arc::new(AtomicBool::new(false)),
+                ).await.unwrap();
+            }
+        };
 
-        // 1. 코딩 모드 + 추론 ON -> 0.8
-        run_agent_turn(
-            app.handle(),
-            TurnRequest {
-                settings: &settings, model_key: "qwen3.6-35b-a3b", model_display_name: "", reasoning_options: &opts,
-                context_length: 32768, project: None, conversation_id: "c-pp1", history: &history,
-                compaction: None, continue_from: None, mode: "code", checkpoint: None, knowledge: "", auto_skill: None,
-            },
-            Arc::new(AtomicBool::new(false)),
-        ).await.unwrap();
-
-        // 2. 프로젝트 모드 + 추론 ON -> 1.2
-        run_agent_turn(
-            app.handle(),
-            TurnRequest {
-                settings: &settings, model_key: "qwen3.6-35b-a3b", model_display_name: "", reasoning_options: &opts,
-                context_length: 32768, project: None, conversation_id: "c-pp2", history: &history,
-                compaction: None, continue_from: None, mode: "project", checkpoint: None, knowledge: "", auto_skill: None,
-            },
-            Arc::new(AtomicBool::new(false)),
-        ).await.unwrap();
-
-        // 3. 코딩 모드 + 추론 OFF -> presence_penalty 없음
+        send(&settings, "code", "c-pp1").await; // 코딩 + 추론 ON -> 없음
+        send(&settings, "project", "c-pp2").await; // 프로젝트 + 추론 ON -> 없음
+        send(&settings, "chat", "c-pp3").await; // 일반 채팅 + 추론 ON -> 0.5
         settings.model_prefs.insert(
             "qwen3.6-35b-a3b".into(),
             crate::store::ModelPref { context_length: None, reasoning: Some("off".into()) },
         );
-        run_agent_turn(
-            app.handle(),
-            TurnRequest {
-                settings: &settings, model_key: "qwen3.6-35b-a3b", model_display_name: "", reasoning_options: &opts,
-                context_length: 32768, project: None, conversation_id: "c-pp3", history: &history,
-                compaction: None, continue_from: None, mode: "code", checkpoint: None, knowledge: "", auto_skill: None,
-            },
-            Arc::new(AtomicBool::new(false)),
-        ).await.unwrap();
+        send(&settings, "chat", "c-pp4").await; // 추론 OFF -> 없음
 
         let b = bodies.lock().unwrap();
-        assert_eq!(b[0]["presence_penalty"], 0.8);
+        assert!(b[0].get("presence_penalty").is_none());
         assert!(b[0].get("reasoning_effort").is_none());
-        assert_eq!(b[1]["presence_penalty"], 1.2);
-        assert!(b[1].get("reasoning_effort").is_none());
-        assert_eq!(b[2]["reasoning_effort"], "none");
-        assert!(b[2].get("presence_penalty").is_none());
+        assert!(b[1].get("presence_penalty").is_none());
+        assert_eq!(b[2]["presence_penalty"], 0.5);
+        assert_eq!(b[3]["reasoning_effort"], "none");
+        assert!(b[3].get("presence_penalty").is_none());
     }
 
     fn paraphrased_thinking_loop_sample() -> String {
@@ -6208,81 +6300,96 @@ content-length: {}
         assert!(detect_repetition_loop(&endless), "끝 2,000자 전체가 같은 행이면 퇴화 반복");
     }
 
-    #[tokio::test]
-    async fn thinking_loop_retries_once_with_reasoning_off_and_succeeds() {
+    fn looping_round() -> Vec<Vec<u8>> {
         let looped = paraphrased_thinking_loop_sample();
         let half = looped.char_indices().nth(looped.chars().count() / 2).map(|(i, _)| i).unwrap();
-        let r1 = vec![
+        vec![
             sse(json!({"choices":[{"delta":{"reasoning_content": &looped[..half]}}]})),
             sse(json!({"choices":[{"delta":{"reasoning_content": &looped[half..]}}]})),
             sse(json!({"choices":[{"delta":{},"finish_reason":"length"}]})),
             sse_done(),
-        ];
-        let r2 = vec![
-            sse(json!({"choices":[{"delta":{"content":"수정을 완료했습니다."}}]})),
-            sse(json!({"choices":[{"delta":{},"finish_reason":"stop"}]})),
-            sse_done(),
-        ];
-        let (url, bodies) = mock_server(vec![r1, r2], 0).await;
+        ]
+    }
+
+    async fn looping_turn(responses: Vec<Vec<Vec<u8>>>, opts: &[String]) -> (ChatMessage, Vec<Value>) {
+        let (url, bodies) = mock_server(responses, 0).await;
         let app = tauri::test::mock_app();
         let settings = test_settings(url);
         let history = vec![msg("user", "버그 원인을 고쳐 줘")];
-        let opts = vec!["off".to_string(), "on".to_string()];
-
         let (out, _) = run_agent_turn(
             app.handle(),
             TurnRequest {
-                settings: &settings, model_key: "qwen3.6-35b-a3b", model_display_name: "", reasoning_options: &opts,
-                context_length: 32768, project: None, conversation_id: "c-tloop-ok", history: &history,
+                settings: &settings, model_key: "qwen3.6-35b-a3b", model_display_name: "", reasoning_options: opts,
+                context_length: 32768, project: None, conversation_id: "c-tloop", history: &history,
                 compaction: None, continue_from: None, mode: "code", checkpoint: None, knowledge: "", auto_skill: None,
             },
             Arc::new(AtomicBool::new(false)),
         ).await.unwrap();
+        let b = bodies.lock().unwrap().clone();
+        (out, b)
+    }
 
-        let b = bodies.lock().unwrap();
-        assert_eq!(b.len(), 2);
-        assert_eq!(b[0]["presence_penalty"], 0.8);
-        assert!(b[0].get("reasoning_effort").is_none());
-        assert_eq!(b[1]["reasoning_effort"], "none");
-        assert!(b[1].get("presence_penalty").is_none());
-        assert_eq!(out.content, "수정을 완료했습니다.");
-        assert!(
-            out.reasoning_content
-                .as_deref()
-                .unwrap_or("")
-                .contains("[생각 반복이 감지되어 추론을 끄고 바로 진행합니다]")
-        );
+    fn done_round(text: &str) -> Vec<Vec<u8>> {
+        vec![
+            sse(json!({"choices":[{"delta":{"content": text}}]})),
+            sse(json!({"choices":[{"delta":{},"finish_reason":"stop"}]})),
+            sse_done(),
+        ]
     }
 
     #[tokio::test]
-    async fn thinking_loop_stops_after_single_retry_if_still_looping() {
-        let looped = paraphrased_thinking_loop_sample();
-        let half = looped.char_indices().nth(looped.chars().count() / 2).map(|(i, _)| i).unwrap();
-        let r = vec![
-            sse(json!({"choices":[{"delta":{"reasoning_content": &looped[..half]}}]})),
-            sse(json!({"choices":[{"delta":{"reasoning_content": &looped[half..]}}]})),
-            sse(json!({"choices":[{"delta":{},"finish_reason":"length"}]})),
-            sse_done(),
-        ];
-        let (url, bodies) = mock_server(vec![r.clone(), r.clone(), r], 0).await;
-        let app = tauri::test::mock_app();
-        let settings = test_settings(url);
-        let history = vec![msg("user", "버그 원인을 고쳐 줘")];
+    async fn thinking_loop_first_retries_with_higher_penalty_and_succeeds() {
         let opts = vec!["off".to_string(), "on".to_string()];
+        let (out, b) = looping_turn(vec![looping_round(), done_round("수정을 완료했습니다.")], &opts).await;
+        assert_eq!(b.len(), 2);
+        assert!(b[0].get("presence_penalty").is_none(), "코딩 화면 기본은 0");
+        assert!(b[0].get("reasoning_effort").is_none());
+        assert_eq!(b[1]["presence_penalty"], LOOP_RETRY_PRESENCE_PENALTY, "반복 직후 라운드만 반복 억제를 올린다");
+        assert!(b[1].get("reasoning_effort").is_none(), "첫 재시도는 추론을 켠 채");
+        assert_eq!(out.content, "수정을 완료했습니다.");
+        assert!(out.reasoning_content.as_deref().unwrap_or("").contains("[생각 반복이 감지되어 반복 억제를 높여 다시 생각합니다]"));
+    }
 
-        let (out, _) = run_agent_turn(
-            app.handle(),
-            TurnRequest {
-                settings: &settings, model_key: "qwen3.6-35b-a3b", model_display_name: "", reasoning_options: &opts,
-                context_length: 32768, project: None, conversation_id: "c-tloop-stop", history: &history,
-                compaction: None, continue_from: None, mode: "code", checkpoint: None, knowledge: "", auto_skill: None,
-            },
-            Arc::new(AtomicBool::new(false)),
-        ).await.unwrap();
-
-        let b = bodies.lock().unwrap();
-        assert_eq!(b.len(), 2, "같은 라운드에서는 추론 끄기 재시도를 최대 1회만 한다");
-        assert_eq!(b[1]["reasoning_effort"], "none");
+    #[tokio::test]
+    async fn thinking_loop_turns_reasoning_off_on_second_detection_then_stops() {
+        let opts = vec!["off".to_string(), "on".to_string()];
+        let (out, b) = looping_turn(vec![looping_round(), looping_round(), looping_round(), done_round("안 와야 함")], &opts).await;
+        assert_eq!(b.len(), 3, "같은 라운드에서는 반복 억제 1회, 추론 끄기 1회까지만 다시 시도한다");
+        assert_eq!(b[1]["presence_penalty"], 1.0);
+        assert_eq!(b[2]["reasoning_effort"], "none");
+        assert!(b[2].get("presence_penalty").is_none());
         assert!(out.content.contains("모델이 같은 내용을 반복해 무한 루프를 막기 위해 생성을 멈췄습니다"));
+        assert!(out.reasoning_content.as_deref().unwrap_or("").contains("[생각 반복이 감지되어 추론을 끄고 바로 진행합니다]"));
+    }
+
+    #[tokio::test]
+    async fn model_without_off_option_gets_one_penalty_retry() {
+        let opts = vec!["low".to_string(), "high".to_string()];
+        let (out, b) = looping_turn(vec![looping_round(), done_round("고쳤습니다.")], &opts).await;
+        assert_eq!(b.len(), 2, "첫 오탐·반복에서 바로 멈추지 않는다");
+        assert_eq!(b[1]["presence_penalty"], 1.0);
+        assert_eq!(out.content, "고쳤습니다.");
+
+        let (out, b) = looping_turn(vec![looping_round(), looping_round(), done_round("안 와야 함")], &opts).await;
+        assert_eq!(b.len(), 2, "끌 수 없으면 두 번째 반복에서 멈춘다");
+        assert!(out.content.contains("무한 루프를 막기 위해 생성을 멈췄습니다"));
+    }
+
+    #[tokio::test]
+    async fn reasoning_stays_off_when_the_retry_round_reconnects() {
+        let opts = vec!["off".to_string(), "on".to_string()];
+        let broken = vec![
+            sse(json!({"choices":[{"delta":{"content":"원인은"}}]})),
+            sse(json!({"error":{"message":"upstream disconnected"}})),
+        ];
+        let (out, b) = looping_turn(
+            vec![looping_round(), looping_round(), broken, done_round(" app.js의 필드 이름입니다.")],
+            &opts,
+        ).await;
+        assert_eq!(b.len(), 4);
+        assert_eq!(b[2]["reasoning_effort"], "none");
+        assert_eq!(b[3]["reasoning_effort"], "none", "연결 복구로 다시 보낸 재시도 라운드도 추론을 끈 채");
+        assert!(b[3].get("presence_penalty").is_none());
+        assert!(out.content.ends_with("app.js의 필드 이름입니다."), "{}", out.content);
     }
 }
