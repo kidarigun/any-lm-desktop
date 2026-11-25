@@ -55,23 +55,37 @@ mod tests {
             knowledge_folders: Vec::new(), memory: Vec::new(), dev_servers: Vec::new(),
         };
         let expected = fs_ops::process_path(&dir.path().canonicalize().unwrap()).display().to_string();
-        // cmd 설정(셸 자체가 cmd)과 PowerShell에서 부른 cmd(npm 스크립트가 도는 방식) 둘 다
-        for (shell, command) in [("cmd", "cd"), ("powershell", "cmd /c cd")] {
+        // 짧은 명령의 ConPTY 출력은 프로세스가 끝나는 순간 잃을 수 있어(전체 테스트에서 자주 빈 출력),
+        // 화면 대신 파일에 쓴 작업 폴더를 읽는다. 파일은 절대 경로라 작업 폴더가 틀려도 같은 곳에 생긴다.
+        let out_dir = dir.path().display().to_string();
+        assert!(!out_dir.contains(' ') && !out_dir.contains('"'), "임시 폴더 경로에 공백이 없어야 한다: {out_dir}");
+        // cmd 설정(셸 자체가 cmd)과 PowerShell에서 부른 cmd(npm 스크립트가 도는 방식) 둘 다.
+        // PowerShell의 `>`는 UTF-16으로 쓰므로 리디렉션은 cmd가 하게 따옴표로 넘긴다.
+        for (shell, command) in [("cmd", "cd > {out}"), ("powershell", "cmd /c 'cd > {out}'")] {
+            let out = dir.path().join(format!("{shell}-cwd.txt"));
+            let command = command.replace("{out}", &out.display().to_string());
             let config = DevServerConfig {
-                id: shell.into(), name: format!("{shell} 위치"), cwd: ".".into(), url: None, command: command.into(),
+                id: shell.into(), name: format!("{shell} 위치"), cwd: ".".into(), url: None, command,
             };
             let info = start(app.handle(), &project, shell, &config).unwrap();
             assert_eq!(info.terminal.cwd, expected);
             let terminals = app.state::<TerminalManager>();
-            let done = tokio::time::timeout(Duration::from_secs(15), async {
-                while terminals.list().iter().any(|t| t.id == info.terminal.id && t.running) {
+            let written = tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    let exited = !terminals.list().iter().any(|t| t.id == info.terminal.id && t.running);
+                    if let Ok(text) = std::fs::read_to_string(&out) {
+                        if exited && text.trim_end().ends_with(|c: char| !c.is_whitespace()) {
+                            return text;
+                        }
+                    }
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
             }).await;
-            let text = terminal::plain_text(&terminals.text(&info.terminal.id).unwrap());
+            let screen = terminal::plain_text(&terminals.text(&info.terminal.id).unwrap_or_default());
             let _ = stop(app.handle(), "p", &info.terminal.id);
-            done.unwrap_or_else(|_| panic!("{shell}: 명령이 끝나지 않았습니다: {text}"));
-            assert!(text.to_lowercase().contains(&expected.to_lowercase()), "{shell}: {text}");
+            let text = written.unwrap_or_else(|_| panic!("{shell}: 명령이 끝나지 않았거나 파일을 쓰지 않았습니다: {screen}"));
+            let text = text.trim();
+            assert!(text.eq_ignore_ascii_case(&expected), "{shell}: {text} (화면: {screen})");
             assert!(!text.contains("UNC"), "{shell}: {text}");
             assert!(!text.to_lowercase().contains(r"c:\windows"), "{shell}: {text}");
         }
