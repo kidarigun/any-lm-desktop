@@ -48,7 +48,19 @@ describe("OutputFlow", () => {
     expect(flow.pending).toBeLessThanOrEqual(1 + 6);
     t.finishAll();
     expect(t.written).toEqual(["x", droppedMarker(9), "ccc", "ddd"]);
-    expect(droppedMarker(9)).toBe("\r\n[출력 9바이트 생략]\r\n");
+    expect(droppedMarker(9)).toBe("\x18\x1b[0m\r\n[출력 9바이트 생략]\r\n");
+  });
+
+  it("stops writing after dispose even when earlier writes finish", () => {
+    const t = fakeTerm();
+    const flow = new OutputFlow(t.write, 1, 100);
+    flow.push("a");
+    flow.push("b");
+    flow.dispose();
+    t.finishAll();
+    flow.push("c");
+    expect(t.written).toEqual(["a"]);
+    expect(flow.pending).toBe(0);
   });
 
   it("stays bounded under a flood that xterm never finishes", () => {

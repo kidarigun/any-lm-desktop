@@ -322,8 +322,10 @@ impl Utf8Decoder {
 }
 
 /// 버린 화면 출력 자리에 넣는 표시 (화면 쪽 `outputFlow.ts`와 같은 문구).
+/// 앞부분을 버리면 OSC·CSI 같은 제어 순서 중간에서 이어질 수 있다. 그러면 xterm이 표시를 그 순서의
+/// 일부로 먹어 버리므로, CAN(0x18)으로 진행 중인 순서를 끊고 SGR 초기화로 색을 되돌린 뒤 쓴다.
 pub fn dropped_marker(bytes: usize) -> String {
-    format!("\r\n[출력 {bytes}바이트 생략]\r\n")
+    format!("\x18\x1b[0m\r\n[출력 {bytes}바이트 생략]\r\n")
 }
 
 /// 화면으로 보낼 출력의 대기열과 속도 제한(검토 C-I2). 출력이 아무리 많아도

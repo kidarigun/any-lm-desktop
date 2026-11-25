@@ -186,7 +186,7 @@ fn ninth_session_is_refused_with_a_reason() {
 
 #[test]
 fn dropped_marker_text() {
-    assert_eq!(dropped_marker(1234), "\r\n[출력 1234바이트 생략]\r\n");
+    assert_eq!(dropped_marker(1234), "\x18\x1b[0m\r\n[출력 1234바이트 생략]\r\n");
 }
 
 #[test]
@@ -198,6 +198,7 @@ fn throttle_drops_oldest_at_a_line_and_char_boundary() {
     let now = Instant::now();
     let out = t.take(now, false).unwrap();
     assert_eq!(out, format!("{}0123456789ab\n", dropped_marker(13)));
+    assert!(out.starts_with("\x18\x1b[0m"), "잘린 제어 순서를 끊고 시작한다");
     assert!(t.is_idle());
     assert_eq!(t.take(now + Duration::from_secs(1), false), None);
 }

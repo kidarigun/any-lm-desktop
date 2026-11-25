@@ -10,9 +10,12 @@ export const XTERM_HIGH_WATER = 256 * 1024;
 /** 화면 대기열의 상한(글자 수). 넘치면 오래된 것부터 버린다. */
 export const XTERM_MAX_QUEUED = 1024 * 1024;
 
-/** 백엔드 `terminal::dropped_marker`와 같은 문구 */
+/**
+ * 백엔드 `terminal::dropped_marker`와 같은 문구. 버린 자리가 OSC·CSI 순서 중간일 수 있어
+ * CAN(0x18)으로 그 순서를 끊고 SGR 초기화(ESC[0m)로 색을 되돌린 뒤 쓴다.
+ */
 export function droppedMarker(bytes: number): string {
-  return `\r\n[출력 ${bytes}바이트 생략]\r\n`;
+  return `\x18\x1b[0m\r\n[출력 ${bytes}바이트 생략]\r\n`;
 }
 
 const encoder = new TextEncoder();
@@ -25,6 +28,7 @@ export class OutputFlow {
   private queue: string[] = [];
   private queued = 0;
   private droppedBytes = 0;
+  private disposed = false;
 
   constructor(
     private readonly write: WriteFn,
@@ -37,8 +41,16 @@ export class OutputFlow {
     return this.inFlight + this.queued;
   }
 
+  /** 화면을 닫을 때 부른다. 그 뒤로는 쓰지 않고(이미 쓴 것의 콜백이 와도) 대기열을 비운다. */
+  dispose(): void {
+    this.disposed = true;
+    this.queue = [];
+    this.queued = 0;
+    this.droppedBytes = 0;
+  }
+
   push(data: string): void {
-    if (!data) return;
+    if (!data || this.disposed) return;
     if (this.queue.length === 0 && this.droppedBytes === 0 && this.inFlight < this.highWater) {
       this.send(data);
       return;
@@ -56,12 +68,12 @@ export class OutputFlow {
     this.inFlight += data.length;
     this.write(data, () => {
       this.inFlight -= data.length;
-      this.drain();
+      if (!this.disposed) this.drain();
     });
   }
 
   private drain() {
-    while (this.inFlight < this.highWater && this.queue.length > 0) {
+    while (!this.disposed && this.inFlight < this.highWater && this.queue.length > 0) {
       if (this.droppedBytes > 0) {
         const marker = droppedMarker(this.droppedBytes);
         this.droppedBytes = 0;

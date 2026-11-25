@@ -148,6 +148,7 @@ export function TerminalView({ sessionId, active, isDark, onLink }: TerminalView
       if (timer) clearTimeout(timer);
       observer.disconnect();
       input.dispose();
+      flow.dispose();
       unlisten?.();
       fitRef.current = null;
       termRef.current = null;
