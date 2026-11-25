@@ -1114,12 +1114,15 @@ async fn wait_before_retry<R: Runtime>(
 }
 
 /// 요청을 보내고 일시 장애·혼잡이면 잠시 기다렸다 재시도한다. 취소되면 `Ok(None)`.
-/// `context_length`는 본문에 컨텍스트를 싣는 공급자(Ollama `num_ctx`)에 보낼 값이다.
+/// `context_length`는 본문에 컨텍스트를 싣는 공급자(Ollama `num_ctx`)에 보낼 값이고, `thinking`은 모델이
+/// 생각하기를 지원하는지다(Ollama `think`).
+#[allow(clippy::too_many_arguments)]
 async fn send_with_retry<R: Runtime>(
     client: &reqwest::Client,
     settings: &AppSettings,
     body: &Value,
     context_length: u32,
+    thinking: bool,
     sink: &StreamSink<'_, R>,
     cancel: &AtomicBool,
     trace: &mut RoundTrace,
@@ -1129,7 +1132,7 @@ async fn send_with_retry<R: Runtime>(
     let provider_subject = crate::providers::provider_subject(settings.provider);
     let chat_url = crate::providers::chat_url(settings)
         .map_err(|message| SendError { message, recoverable: false })?;
-    let body = crate::providers::chat_body(settings, body, context_length);
+    let body = crate::providers::chat_body(settings, body, context_length, thinking);
     for attempt in 0..=RETRY_DELAYS_SEC.len() {
         trace.attempts = attempt as u32 + 1;
         let req = lmstudio::authorize(client.post(&chat_url), &settings.api_key)
@@ -2629,7 +2632,7 @@ pub async fn summarize_for_compaction(
 
     // 요약도 대화 모델과 같은 컨텍스트로 보내야 Ollama가 모델을 다른 크기로 다시 로드하지 않는다.
     let context_length = crate::providers::request_context(settings).await;
-    let wire_body = crate::providers::chat_body(settings, &body, context_length);
+    let wire_body = crate::providers::chat_body(settings, &body, context_length, !reasoning_options.is_empty());
     let req = lmstudio::authorize(client.post(&chat_url), &settings.api_key)
         .json(wire_body.as_ref())
         .send();
@@ -3054,7 +3057,17 @@ pub async fn run_agent_turn<R: Runtime>(
         };
         let sent_chars = trace.request_chars;
 
-        let response = match send_with_retry(&client, settings, &body, req.context_length, &sink, &cancel_flag, &mut trace).await {
+        let response = match send_with_retry(
+            &client,
+            settings,
+            &body,
+            req.context_length,
+            !req.reasoning_options.is_empty(),
+            &sink,
+            &cancel_flag,
+            &mut trace,
+        )
+        .await {
             Ok(Some(r)) => r,
             Ok(None) => {
                 cancelled = true;
@@ -3115,7 +3128,7 @@ pub async fn run_agent_turn<R: Runtime>(
         let mut stream = response.bytes_stream();
         let mut decoder = SseDecoder::default();
         // Ollama `/api/chat` NDJSON은 같은 SSE 줄로 바꿔 읽는다(LM Studio·OpenAI 호환은 그대로).
-        let mut wire = crate::providers::ChatStream::new(settings.provider);
+        let mut wire = crate::providers::ChatStream::new(settings.provider, req.context_length);
         let mut finished = false;
         let mut thinking_loop_detected = false;
         let mut stream_err: Option<String> = None;
@@ -5306,7 +5319,8 @@ mod tests {
         assert_eq!(b.len(), 2);
         for body in b.iter() {
             assert_eq!(body["options"]["num_ctx"], 32768, "요청마다 컨텍스트를 싣는다");
-            assert_eq!(body["keep_alive"], crate::providers::ollama::KEEP_ALIVE);
+            assert!(body.get("keep_alive").is_none(), "사용자의 OLLAMA_KEEP_ALIVE를 따른다");
+            assert!(body.get("think").is_none(), "생각하기 선택지가 없는 모델에는 think를 보내지 않는다");
             assert!(body.get("stream_options").is_none() && body.get("tool_choice").is_none());
             assert!(body["tools"].as_array().is_some_and(|t| !t.is_empty()));
         }

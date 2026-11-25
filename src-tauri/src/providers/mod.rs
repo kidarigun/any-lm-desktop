@@ -143,11 +143,11 @@ pub fn chat_url(settings: &AppSettings) -> Result<String, String> {
 }
 
 /// 에이전트 루프가 만든 OpenAI 모양 채팅 본문을 공급자에 보낼 본문으로 바꾼다.
-/// Ollama는 고유 `/api/chat` 형식으로 바꾸고 `num_ctx`(=`context_length`)·`keep_alive`를 넣는다.
-/// LM Studio·OpenAI 호환은 그대로 보낸다.
-pub fn chat_body<'a>(settings: &AppSettings, body: &'a Value, context_length: u32) -> Cow<'a, Value> {
+/// Ollama는 고유 `/api/chat` 형식으로 바꾸고 `num_ctx`(=`context_length`)를 넣으며, `thinking`(모델이
+/// 생각하기를 지원함)이면 `think`도 정한다. LM Studio·OpenAI 호환은 그대로 보낸다.
+pub fn chat_body<'a>(settings: &AppSettings, body: &'a Value, context_length: u32, thinking: bool) -> Cow<'a, Value> {
     match settings.provider {
-        LlmProvider::Ollama => Cow::Owned(ollama::native_chat_body(body, context_length)),
+        LlmProvider::Ollama => Cow::Owned(ollama::native_chat_body(body, context_length, thinking)),
         LlmProvider::Lmstudio | LlmProvider::OpenaiCompat => Cow::Borrowed(body),
     }
 }
@@ -162,9 +162,10 @@ pub enum ChatStream {
 }
 
 impl ChatStream {
-    pub fn new(provider: LlmProvider) -> Self {
+    /// `context_length`는 이 요청에 보낸 컨텍스트(Ollama `num_ctx`)로, 프롬프트가 거의 찼는지 보는 데 쓴다.
+    pub fn new(provider: LlmProvider, context_length: u32) -> Self {
         match provider {
-            LlmProvider::Ollama => ChatStream::Ollama(ollama::NativeStream::default()),
+            LlmProvider::Ollama => ChatStream::Ollama(ollama::NativeStream::new(context_length)),
             LlmProvider::Lmstudio | LlmProvider::OpenaiCompat => ChatStream::Sse,
         }
     }

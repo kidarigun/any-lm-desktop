@@ -50,8 +50,11 @@ const SHOW_TIMEOUT: Duration = Duration::from_secs(3);
 const LOAD_TIMEOUT: Duration = Duration::from_secs(300);
 const UNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 const START_POLL_TIMEOUT: Duration = Duration::from_secs(15);
-/// 요청마다 보내는 `keep_alive`. 미리 로드(`load_model`)와 같은 값이어야 모델을 다시 올리지 않는다.
+/// 미리 로드(`load_model`)할 때 보내는 `keep_alive`. 채팅·요약 요청에는 넣지 않아 사용자의
+/// `OLLAMA_KEEP_ALIVE`(서버 기본값)를 따른다. 같은 `num_ctx`만 보내면 모델을 다시 올리지 않는다.
 pub const KEEP_ALIVE: &str = "5m";
+/// 응답의 `prompt_eval_count`가 `num_ctx`에서 이만큼 안쪽까지 차면 넘침에 가까운 것으로 본다.
+pub const NEAR_CONTEXT_MARGIN: u64 = 256;
 
 fn client(timeout: Duration) -> Result<reqwest::Client, String> {
     super::local_http_client(timeout)
@@ -602,26 +605,32 @@ fn native_message(m: &Value, call_names: &mut HashMap<String, String>) -> Value 
     out
 }
 
-/// `reasoning_effort`(또는 `reasoning.effort`)를 `think`로 옮긴다. 없으면 보내지 않아 서버 기본값에 맡긴다
-/// (OpenAI 호환 경로와 같다).
-fn think_value(openai: &Value) -> Option<Value> {
+/// `think` 값을 정한다. 생각하기를 지원하지 않는 모델(`thinking` 능력 없음)에는 보내지 않는다.
+/// 지원하는 모델은 `reasoning_effort`(또는 `reasoning.effort`)가 꺼짐(none·off)이면 false, low·medium·high면
+/// 그 값, 그 밖(설정 없음·켬)이면 true. Ollama는 `think`가 없으면 생각을 `message.thinking`으로 나누지 않고
+/// 본문에 섞어 보낼 수 있어, 켜 둔 모델은 분명히 true로 보낸다.
+fn think_value(openai: &Value, thinking: bool) -> Option<Value> {
+    if !thinking {
+        return None;
+    }
     let effort = openai
         .get("reasoning_effort")
         .or_else(|| openai.pointer("/reasoning/effort"))
-        .and_then(Value::as_str)?
-        .trim()
-        .to_ascii_lowercase();
-    match effort.as_str() {
-        "none" | "off" => Some(json!(false)),
-        "low" | "medium" | "high" => Some(json!(effort)),
-        _ => None,
-    }
+        .and_then(Value::as_str)
+        .map(|e| e.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    Some(match effort.as_str() {
+        "none" | "off" => json!(false),
+        "low" | "medium" | "high" => json!(effort),
+        _ => json!(true),
+    })
 }
 
 /// 에이전트 루프의 OpenAI 모양 요청 본문을 `/api/chat` 본문으로 바꾼다.
-/// `num_ctx`(0이면 넣지 않음)와 `keep_alive`를 요청마다 넣어, 모델이 쉬다 내려간 뒤나 다른 옵션을 받은
-/// 뒤에도 Ollama 기본 컨텍스트가 아니라 앱 컨텍스트로 (다시) 로드되게 한다.
-pub fn native_chat_body(openai: &Value, num_ctx: u32) -> Value {
+/// `num_ctx`(0이면 넣지 않음)를 요청마다 넣어, 모델이 쉬다 내려간 뒤에도 Ollama 기본 컨텍스트가 아니라
+/// 앱 컨텍스트로 (다시) 로드되게 한다. `keep_alive`는 넣지 않는다(사용자의 `OLLAMA_KEEP_ALIVE`를 따른다).
+/// `thinking`은 모델이 생각하기를 지원하는지(`think_value` 참고).
+pub fn native_chat_body(openai: &Value, num_ctx: u32, thinking: bool) -> Value {
     let mut call_names = HashMap::new();
     let messages: Vec<Value> = openai
         .get("messages")
@@ -643,13 +652,12 @@ pub fn native_chat_body(openai: &Value, num_ctx: u32) -> Value {
         "model": openai.get("model").cloned().unwrap_or(Value::Null),
         "messages": messages,
         "stream": openai.get("stream").and_then(Value::as_bool).unwrap_or(false),
-        "keep_alive": KEEP_ALIVE,
         "options": options,
     });
     if let Some(tools) = openai.get("tools").and_then(Value::as_array).filter(|t| !t.is_empty()) {
         body["tools"] = json!(tools);
     }
-    if let Some(think) = think_value(openai) {
+    if let Some(think) = think_value(openai, thinking) {
         body["think"] = think;
     }
     body
@@ -698,20 +706,32 @@ pub struct NativeStream {
     calls: usize,
     id_prefix: String,
     done: bool,
+    /// 이 요청에 보낸 `num_ctx`(0이면 모름). 프롬프트가 거의 다 찼는지 보는 데만 쓴다.
+    num_ctx: u32,
 }
 
 impl Default for NativeStream {
     fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+/// 프롬프트가 `num_ctx`를 거의 다 채웠는지. Ollama는 넘친 앞부분을 조용히 잘라 내므로(오류 없음)
+/// 응답의 `prompt_eval_count`로만 알 수 있다.
+pub fn near_context_limit(prompt_eval_count: u64, num_ctx: u32) -> bool {
+    num_ctx > 0 && prompt_eval_count + NEAR_CONTEXT_MARGIN >= u64::from(num_ctx)
+}
+
+impl NativeStream {
+    pub fn new(num_ctx: u32) -> Self {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         // 서버가 id를 주지 않을 때 쓴다. 라운드마다 달라야 대화 기록의 도구 결과가 섞이지 않는다.
-        Self { calls: 0, id_prefix: format!("call_{nanos:x}"), done: false }
+        Self { calls: 0, id_prefix: format!("call_{nanos:x}"), done: false, num_ctx }
     }
-}
 
-impl NativeStream {
     /// Ollama 도구 호출(인자 객체)을 번호와 id가 붙은 OpenAI 모양(인자 문자열)으로 바꾼다.
     fn convert_calls(&mut self, calls: &[Value]) -> Vec<Value> {
         calls
@@ -770,6 +790,15 @@ impl NativeStream {
         }
         if v.get("done").and_then(Value::as_bool) == Some(true) {
             self.done = true;
+            if let Some(prompt) = v.get("prompt_eval_count").and_then(Value::as_u64) {
+                if near_context_limit(prompt, self.num_ctx) {
+                    // 다음 라운드의 넘침 처리로 이어 주는 것은 아직 없다(STATUS 남은 위험 참고).
+                    eprintln!(
+                        "[ollama] 프롬프트가 컨텍스트에 거의 찼습니다: prompt_eval_count {prompt} / num_ctx {} — 앞부분이 잘렸을 수 있습니다",
+                        self.num_ctx
+                    );
+                }
+            }
             let mut last = json!({
                 "choices": [{ "index": 0, "delta": {}, "finish_reason": finish_reason(&v, self.calls > 0) }]
             });
@@ -921,7 +950,7 @@ mod tests {
     // 아래 표본은 Ollama API 문서(docs/api.md, POST /api/chat)의 예시 모양을 따른다.
 
     #[test]
-    fn native_chat_body_carries_num_ctx_keep_alive_tools_and_history() {
+    fn native_chat_body_carries_num_ctx_tools_and_history_without_keep_alive() {
         let openai = json!({
             "model": "qwen3:8b",
             "stream": true,
@@ -955,10 +984,11 @@ mod tests {
                 ] }
             ]
         });
-        let body = native_chat_body(&openai, 16384);
+        let body = native_chat_body(&openai, 16384, true);
         assert_eq!(body["model"], "qwen3:8b");
         assert_eq!(body["stream"], true);
-        assert_eq!(body["keep_alive"], KEEP_ALIVE);
+        // 사용자의 OLLAMA_KEEP_ALIVE를 덮어쓰지 않는다.
+        assert!(body.get("keep_alive").is_none());
         assert_eq!(body["options"]["num_ctx"], 16384);
         assert_eq!(body["options"]["num_predict"], 4096);
         assert_eq!(body["options"]["presence_penalty"], 1.5);
@@ -980,8 +1010,8 @@ mod tests {
     }
 
     #[test]
-    fn native_chat_body_leaves_think_to_the_server_and_skips_zero_context() {
-        let body = native_chat_body(&json!({ "model": "m", "messages": [], "stream": false }), 0);
+    fn native_chat_body_skips_think_for_non_thinking_models_and_zero_context() {
+        let body = native_chat_body(&json!({ "model": "m", "messages": [], "stream": false }), 0, false);
         assert!(body.get("think").is_none());
         assert!(body["options"].get("num_ctx").is_none());
         assert!(body.get("tools").is_none());
@@ -990,9 +1020,28 @@ mod tests {
             &json!({ "messages": [{ "role": "assistant", "content": "",
                 "tool_calls": [{ "id": "c", "function": { "name": "x", "arguments": "not json" } }] }] }),
             8192,
+            false,
         );
         assert_eq!(bad_args["messages"][0]["tool_calls"][0]["function"]["arguments"], json!({}));
-        assert_eq!(native_chat_body(&json!({ "reasoning_effort": "high" }), 0)["think"], "high");
+        // 생각하기가 없는 모델에는 꺼짐 설정도 보내지 않는다.
+        assert!(native_chat_body(&json!({ "reasoning_effort": "none" }), 0, false).get("think").is_none());
+    }
+
+    #[test]
+    fn native_chat_body_turns_thinking_on_for_thinking_models_unless_off() {
+        let think = |v: Value| native_chat_body(&v, 0, true).get("think").cloned();
+        assert_eq!(think(json!({ "model": "m", "messages": [] })), Some(json!(true)));
+        assert_eq!(think(json!({ "reasoning_effort": "none" })), Some(json!(false)));
+        assert_eq!(think(json!({ "reasoning": { "effort": "off" } })), Some(json!(false)));
+        assert_eq!(think(json!({ "reasoning_effort": "high" })), Some(json!("high")));
+    }
+
+    #[test]
+    fn near_context_limit_uses_the_margin_and_ignores_unknown_context() {
+        assert!(!near_context_limit(16_000, 16_384));
+        assert!(near_context_limit(16_128, 16_384));
+        assert!(near_context_limit(20_000, 16_384));
+        assert!(!near_context_limit(1_000_000, 0));
     }
 
     fn feed(lines: &[Value]) -> (Vec<String>, crate::agent::RoundAccumulator, bool) {
