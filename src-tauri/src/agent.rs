@@ -1888,11 +1888,12 @@ fn prose_only(text: &str, drop_code_like_lines: bool) -> String {
     split_prose(text, drop_code_like_lines).prose
 }
 
-/// 줄의 내용 낱말(두 글자 이상, 소문자). 숫자가 든 낱말("7번째", "step7")과 추임새는 뺀다:
-/// 줄마다 바뀌는 번호는 새 내용이 아니다.
+/// 줄의 내용 낱말(두 글자 이상, 소문자). 숫자로만 된 낱말과 추임새는 뺀다.
+/// 숫자가 섞인 낱말("0에서", "arr[3]")은 남긴다: 계산 따라가기처럼 값이 바뀌며 나아가는 사고를 반복으로 보지 않게.
+/// 줄 앞의 차례 번호("7번째", "Step 7")는 `line_novelty`가 따로 떼어 낸다.
 fn content_words(text: &str) -> impl Iterator<Item = String> + '_ {
     text.split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.chars().count() >= 2 && !w.chars().any(|c| c.is_ascii_digit()))
+        .filter(|w| w.chars().count() >= 2 && !w.chars().all(|c| c.is_ascii_digit()))
         .map(str::to_lowercase)
         .filter(|w| !THINKING_FILLERS.contains(&w.as_str()))
 }
@@ -1910,6 +1911,8 @@ fn code_line_loop(lines: &[(usize, bool, String)], total_chars: usize) -> bool {
     // 줄 -> (센 횟수, 마지막으로 나온 줄 번호)
     let mut counts: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
     let mut last_fresh: Option<usize> = None;
+    // 바로 앞 코드 같은 줄과 같은 줄은 세지 않는다(스켈레톤·자리표시 행처럼 같은 줄을 몇 개 나란히 쓰는 정상 초안).
+    let mut prev_key: Option<String> = None;
     for (idx, (start, dropped, line)) in lines.iter().enumerate() {
         if start + CODE_RUN_WINDOW_CHARS < total_chars {
             continue;
@@ -1932,6 +1935,10 @@ fn code_line_loop(lines: &[(usize, bool, String)], total_chars: usize) -> bool {
         if distinct.len() < 8 {
             continue;
         }
+        if prev_key.as_deref() == Some(key.as_str()) {
+            continue;
+        }
+        prev_key = Some(key.clone());
         let entry = counts.entry(key).or_insert((0, idx));
         if entry.0 == 0 || last_fresh.is_none_or(|f| f <= entry.1) {
             entry.0 += 1;
@@ -2302,7 +2309,8 @@ fn shingle_loop(prose: &str) -> bool {
             if distinct.len() < 8 {
                 continue;
             }
-            let prefix = words[..offset].join(" ");
+            // 앞 낱말은 숫자를 빼고 비교한다("i = 3" / "i = 4"처럼 값만 바뀐 말머리는 같은 자리로 본다).
+            let prefix: String = words[..offset].join(" ").chars().filter(|c| !c.is_ascii_digit()).collect();
             match seen.get_mut(&shingle) {
                 Some((last_offset, last_prefix, count)) => {
                     if *last_offset != offset || (!fresh && *last_prefix != prefix) {
@@ -2343,8 +2351,11 @@ fn line_novelty(prose: &str) -> Option<f64> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut novel = 0usize;
     for (i, line) in lines.iter().enumerate() {
+        // 줄 앞의 차례 번호("7번째 확인:", "Step 7:")는 새 내용이 아니다.
+        let lowered = line.to_lowercase();
+        let body = strip_counter(&lowered).unwrap_or(&lowered);
         let mut fresh = false;
-        for w in content_words(line) {
+        for w in content_words(body) {
             fresh |= seen.insert(w);
         }
         if i >= half && fresh {
@@ -7594,5 +7605,70 @@ content-length: {}
         let mut r = ThinkingLoopRecovery::default();
         r.penalize_next_round(true);
         assert_eq!(r.next_after_loop(true, true), Some(LoopRetry::Penalty));
+    }
+
+    // ---- 리뷰 수정 3차: 값이 바뀌며 나아가는 계산 따라가기, 나란히 쓴 같은 자리표시 줄 ----
+
+    #[test]
+    fn numeric_traces_and_restated_plans_are_not_loops() {
+        let arr = [3, 8, 2, 9, 4, 11, 7, 1, 12, 5, 6, 13, 0, 10, 14];
+        let mut mx = String::from("Let me find the maximum by hand. Start with max = arr[0] = 3.\n");
+        let mut cur = 3;
+        for (i, v) in arr.iter().enumerate().skip(1) {
+            if *v > cur {
+                mx.push_str(&format!("i = {i}: arr[{i}] = {v} is greater than max = {cur}, so max becomes {v}.\n"));
+                cur = *v;
+            } else {
+                mx.push_str(&format!("i = {i}: arr[{i}] = {v} is not greater than max = {cur}, so max stays {cur}.\n"));
+            }
+        }
+        mx.push_str("So the maximum is 14.");
+        assert!(!detect_thinking_loop(&mx), "최댓값 찾기 따라가기 15줄");
+
+        let mut sm = String::from("배열의 합을 손으로 따라가 보자. 합계는 0에서 시작한다.\n");
+        let mut sum = 0;
+        for (i, v) in [4, 7, 1, 5, 9, 2, 8, 3, 6, 1, 7, 4, 2, 9, 5, 3].iter().enumerate() {
+            sum += v;
+            sm.push_str(&format!("i가 {i}일 때 값은 {v}이고 합계는 {sum}이 된다. 아직 끝이 아니니 다음 원소로 간다.\n"));
+        }
+        assert!(!detect_thinking_loop(&sm), "합계 따라가기 16줄");
+
+        let mut ex = String::from("Let me check the examples one by one.\n");
+        for n in 1..=10 {
+            let (a, b) = (n * 3, n * 5 + 1);
+            ex.push_str(&format!("Example {n}: input [{a}, {b}] gives output {}, which matches the expected value.\n", a + b));
+        }
+        assert!(!detect_thinking_loop(&ex), "예제 10개 확인");
+
+        let plan = "정리하면 app.js의 success 필드를 ok로 바꾸고, index.php는 그대로 두고, 서버 응답 형식은 바꾸지 않는다.";
+        let mut rv = String::from("버그 원인을 찾자. index.php를 읽었고 app.js도 읽었다. 응답 형식도 확인했다. 원인은 필드 이름 차이다.\n");
+        for i in 0..4 {
+            rv.push_str(&format!("{plan}\n다시 한 번 확인해 보자. 단계 {i}에서 빠진 것이 있는지 본다. 응답 본문에 ok 필드가 있고 app.js는 success를 본다.\n"));
+        }
+        rv.push_str("좋다, 이제 수정하자.");
+        assert!(!detect_thinking_loop(&rv), "단계마다 계획을 다시 적는 사고 4번");
+    }
+
+    #[test]
+    fn side_by_side_placeholder_lines_are_not_loops_but_endless_ones_are() {
+        let mut sk = String::from("로딩 중 스켈레톤을 그리자. 행 8개를 같은 모양으로 둔다.\n<div className=\"space-y-2\">\n");
+        for _ in 0..8 {
+            sk.push_str("  <div className=\"h-4 w-full animate-pulse rounded bg-gray-200\" />\n");
+        }
+        sk.push_str("</div>\n이렇게 하면 된다.");
+        assert!(!detect_thinking_loop(&sk), "코드 블록 밖 스켈레톤 행 8개");
+
+        let mut tr = String::from("빈 표를 먼저 만든다.\n<tbody>\n");
+        for _ in 0..9 {
+            tr.push_str("  <tr><td className=\"px-4 py-2\">-</td><td className=\"px-4 py-2\">-</td></tr>\n");
+        }
+        tr.push_str("</tbody>\n");
+        assert!(!detect_thinking_loop(&tr), "코드 블록 밖 자리표시 행 9개");
+
+        let mut endless = String::from("조건을 보자.\n");
+        for _ in 0..60 {
+            endless.push_str("if (user && user.token) { headers.Authorization = token; }\n");
+        }
+        assert!(detect_thinking_loop(&endless), "같은 코드 줄을 끝없이 쓰는 퇴화는 원문 주기 검사가 잡는다");
     }
 }
