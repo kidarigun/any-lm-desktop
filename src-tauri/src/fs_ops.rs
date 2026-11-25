@@ -17,6 +17,24 @@ pub struct FileNode {
     pub children: Option<Vec<FileNode>>,
 }
 
+/// 다른 프로세스에 넘길 경로: `canonicalize()`가 붙이는 `\\?\` 접두사를 뗀다.
+/// `\\?\C:\x` → `C:\x`, `\\?\UNC\서버\공유` → `\\서버\공유`. cmd는 `\\?\` 작업 폴더를 UNC로 보고
+/// C:\Windows에서 실행하므로(npm·pnpm·yarn 스크립트도 cmd로 돈다) 작업 폴더에는 이 형태를 쓴다.
+/// 포함 여부 검사는 정규 경로로 한다. 드라이브 문자도 UNC도 아닌 `\\?\` 경로는 그대로 둔다.
+pub fn process_path(path: &Path) -> PathBuf {
+    let Some(text) = path.to_str() else { return path.to_path_buf() };
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        let bytes = rest.as_bytes();
+        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            return PathBuf::from(rest);
+        }
+    }
+    path.to_path_buf()
+}
+
 /// Ensures a target path stays strictly inside the project root directory.
 pub fn resolve_safe_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
     let clean_rel = relative
@@ -729,7 +747,7 @@ pub async fn execute_shell_command(
         c
     };
 
-    cmd.current_dir(root)
+    cmd.current_dir(process_path(root))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -771,6 +789,25 @@ pub async fn execute_shell_command(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn process_path_drops_the_verbatim_prefix_only() {
+        let p = |s: &str| process_path(Path::new(s)).to_string_lossy().into_owned();
+        assert_eq!(p(r"\\?\C:\work\웹 앱"), r"C:\work\웹 앱");
+        assert_eq!(p(r"\\?\d:\"), r"d:\");
+        assert_eq!(p(r"\\?\UNC\server\share\dir"), r"\\server\share\dir");
+        assert_eq!(p(r"C:\plain"), r"C:\plain");
+        assert_eq!(p(r"\\server\share"), r"\\server\share");
+        assert_eq!(p(r"\\?\Volume{0b6f}\x"), r"\\?\Volume{0b6f}\x");
+        #[cfg(windows)]
+        {
+            let dir = tempdir().unwrap();
+            let canon = dir.path().canonicalize().unwrap();
+            assert!(canon.to_string_lossy().starts_with(r"\\?\"));
+            assert!(!process_path(&canon).to_string_lossy().starts_with(r"\\?\"));
+            assert!(process_path(&canon).is_dir());
+        }
+    }
 
     #[test]
     fn test_read_write_modify_delete_and_undo() {

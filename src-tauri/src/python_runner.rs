@@ -352,7 +352,7 @@ pub async fn run_script_at(root: &Path, script: &Path, display: &str, timeout: D
     let mut c = command(Path::new(&python.path));
     c.args(["-X", "utf8", "-u"])
         .arg(&script)
-        .current_dir(root)
+        .current_dir(crate::fs_ops::process_path(root))
         .env("PYTHONIOENCODING", "utf-8")
         .env("PYTHONUTF8", "1")
         .env("PYTHONDONTWRITEBYTECODE", "1")
@@ -446,7 +446,7 @@ pub async fn install_package(root: Option<&Path>, package: &str) -> Result<Strin
     }
     c.arg(package).env("PYTHONIOENCODING", "utf-8");
     if let Some(root) = root {
-        c.current_dir(root);
+        c.current_dir(crate::fs_ops::process_path(root));
     }
     let out = tokio::time::timeout(INSTALL_TIMEOUT, c.output())
         .await

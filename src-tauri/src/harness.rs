@@ -536,13 +536,13 @@ async fn live() {
                 std::fs::create_dir_all(p.parent().unwrap()).unwrap();
                 std::fs::write(p, content).unwrap();
             }
-            kb_folders.push(kb.to_string_lossy().trim_start_matches(r"\\?\").to_string());
+            kb_folders.push(crate::fs_ops::process_path(&kb).to_string_lossy().into_owned());
         }
         let project = (sc.mode == "project").then(|| Project {
             id: format!("harness-{}", sc.id),
             name: format!("시험 프로젝트 {}", sc.id),
             // 앱과 같은 모양(\\?\ 없는 경로)으로 준다.
-            root_path: work.to_string_lossy().trim_start_matches(r"\\?\").to_string(),
+            root_path: crate::fs_ops::process_path(&work).to_string_lossy().into_owned(),
             instructions: sc.instructions.clone(),
             created_at: chrono::Local::now().to_rfc3339(),
             auto_approve: Vec::new(),

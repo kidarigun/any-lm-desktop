@@ -30,6 +30,41 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
+    async fn server_commands_run_in_the_project_folder_not_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = tauri::test::mock_app();
+        app.manage(TerminalManager::new(terminal::tauri_sink(app.handle().clone())));
+        app.manage(DevServers::default());
+        let project = Project {
+            id: "p".into(), name: "작업 폴더 확인".into(), root_path: dir.path().display().to_string(),
+            instructions: String::new(), created_at: String::new(), auto_approve: Vec::new(),
+            knowledge_folders: Vec::new(), memory: Vec::new(), dev_servers: Vec::new(),
+        };
+        let expected = fs_ops::process_path(&dir.path().canonicalize().unwrap()).display().to_string();
+        // cmd 설정(셸 자체가 cmd)과 PowerShell에서 부른 cmd(npm 스크립트가 도는 방식) 둘 다
+        for (shell, command) in [("cmd", "cd"), ("powershell", "cmd /c cd")] {
+            let config = DevServerConfig {
+                id: shell.into(), name: format!("{shell} 위치"), cwd: ".".into(), url: None, command: command.into(),
+            };
+            let info = start(app.handle(), &project, shell, &config).unwrap();
+            assert_eq!(info.terminal.cwd, expected);
+            let terminals = app.state::<TerminalManager>();
+            let done = tokio::time::timeout(Duration::from_secs(15), async {
+                while terminals.list().iter().any(|t| t.id == info.terminal.id && t.running) {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }).await;
+            let text = terminal::plain_text(&terminals.text(&info.terminal.id).unwrap());
+            let _ = stop(app.handle(), "p", &info.terminal.id);
+            done.unwrap_or_else(|_| panic!("{shell}: 명령이 끝나지 않았습니다: {text}"));
+            assert!(text.to_lowercase().contains(&expected.to_lowercase()), "{shell}: {text}");
+            assert!(!text.contains("UNC"), "{shell}: {text}");
+            assert!(!text.to_lowercase().contains(r"c:\windows"), "{shell}: {text}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
     async fn project_server_opens_once_reaches_ready_and_releases_port() {
         let dir = tempfile::tempdir().unwrap();
         let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -301,6 +336,8 @@ fn opened<R: Runtime>(
     config: &DevServerConfig,
 ) -> Result<(ServerInfo, bool), String> {
     let (cwd, url) = validate(Path::new(&project.root_path), config)?;
+    // 포함 검사는 정규 경로로 끝났다. 터미널과 세션 비교에는 `\\?\` 없는 경로를 쓴다.
+    let cwd = fs_ops::process_path(&cwd);
     let terminals = app.try_state::<TerminalManager>().ok_or("터미널을 사용할 수 없습니다.")?;
     let servers = app.try_state::<DevServers>().ok_or("개발 서버를 사용할 수 없습니다.")?;
     let mut sessions = servers.0.lock().map_err(|e| e.to_string())?;

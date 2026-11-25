@@ -658,7 +658,9 @@ impl TerminalManager {
         let command = req.command.as_deref().map(str::trim).filter(|c| !c.is_empty()).map(str::to_string);
         let argv = shell_argv(shell, command.as_deref());
         let mut cmd = portable_pty::CommandBuilder::from_argv(argv.iter().map(OsString::from).collect());
-        cmd.cwd(cwd);
+        // 정규 경로(`\\?\C:\...`)를 그대로 주면 cmd가 C:\Windows에서 돈다 (fs_ops::process_path).
+        let cwd = crate::fs_ops::process_path(cwd);
+        cmd.cwd(&cwd);
         for (k, v) in extra_env {
             if !k.eq_ignore_ascii_case("PATH") {
                 cmd.env(k, v);
