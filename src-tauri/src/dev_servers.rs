@@ -57,12 +57,16 @@ mod tests {
         let expected = fs_ops::process_path(&dir.path().canonicalize().unwrap()).display().to_string();
         // 짧은 명령의 ConPTY 출력은 프로세스가 끝나는 순간 잃을 수 있어(전체 테스트에서 자주 빈 출력),
         // 화면 대신 파일에 쓴 작업 폴더를 읽는다. 파일은 절대 경로라 작업 폴더가 틀려도 같은 곳에 생긴다.
-        let out_dir = dir.path().display().to_string();
-        assert!(!out_dir.contains(' ') && !out_dir.contains('"'), "임시 폴더 경로에 공백이 없어야 한다: {out_dir}");
         // cmd 설정(셸 자체가 cmd)과 PowerShell에서 부른 cmd(npm 스크립트가 도는 방식) 둘 다.
-        // PowerShell의 `>`는 UTF-16으로 쓰므로 리디렉션은 cmd가 하게 따옴표로 넘긴다.
-        for (shell, command) in [("cmd", "cd > {out}"), ("powershell", "cmd /c 'cd > {out}'")] {
+        // PowerShell의 `>`는 UTF-16으로 쓰므로 리디렉션은 cmd가 하게 넘기고, 경로는 따옴표로 감싼다.
+        // cmd 셸은 명령 인자가 `"..\"..\".."`로 바뀌어(portable-pty의 argv 따옴표 규칙) 안쪽 따옴표를
+        // 쓸 수 없으므로, 따옴표 없이 쓰고 임시 경로에 공백이 있으면 그 경우만 건너뛴다.
+        for (shell, command) in [("cmd", "cd > {out}"), ("powershell", "cmd /c 'cd > \"{out}\"'")] {
             let out = dir.path().join(format!("{shell}-cwd.txt"));
+            if shell == "cmd" && out.display().to_string().contains(' ') {
+                eprintln!("임시 경로에 공백이 있어 cmd 셸 경우를 건너뜁니다: {}", out.display());
+                continue;
+            }
             let command = command.replace("{out}", &out.display().to_string());
             let config = DevServerConfig {
                 id: shell.into(), name: format!("{shell} 위치"), cwd: ".".into(), url: None, command,
