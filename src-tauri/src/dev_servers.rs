@@ -205,7 +205,7 @@ pub(crate) fn local_url(raw: &str) -> Result<Url, String> {
         return Err(invalid());
     }
     match url.host_str() {
-        Some(host) if crate::ipc_guard::RESERVED_HOSTS.contains(&host) => return Err(invalid()),
+        Some(host) if crate::ipc_guard::is_reserved_host(host) => return Err(invalid()),
         Some("localhost" | "127.0.0.1" | "[::1]") => {}
         Some("0.0.0.0") => url.set_host(Some("localhost")).map_err(|_| invalid())?,
         Some(host) if host.ends_with(".localhost") => {}
@@ -214,7 +214,7 @@ pub(crate) fn local_url(raw: &str) -> Result<Url, String> {
     if url.port_or_known_default() == Some(0) {
         return Err(invalid());
     }
-    if crate::is_app_url(&url) {
+    if crate::is_app_url(&url, &crate::ipc_guard::remembered_origins()) {
         return Err("Any LM Desktop 자체 주소는 미리보기에서 열 수 없습니다.".into());
     }
     Ok(url)

@@ -2584,23 +2584,15 @@ fn open_external_url(url: String) -> Result<(), String> {
 }
 
 /// 앱 화면이 외부 사이트로 이동하지 못하게 한다 (외부 링크는 open_external_url로 브라우저에서 연다).
-pub fn is_app_url(url: &tauri::Url) -> bool {
-    match url.scheme() {
-        "tauri" => true,
-        "http" | "https" => match url.host_str() {
-            // 포트가 붙은 tauri.localhost는 앱이 아니라 네트워크(로컬 서버)로 간다 (결정 0019).
-            Some("tauri.localhost") => url.port().is_none(),
-            Some("localhost") => cfg!(debug_assertions) && url.port() == Some(1420),
-            _ => false,
-        },
-        _ => false,
-    }
+/// 앱 출처(`ipc_guard::origins_of`)와 scheme·호스트·포트가 정확히 같아야 한다 (결정 0019).
+pub fn is_app_url(url: &tauri::Url, app_origins: &[String]) -> bool {
+    ipc_guard::is_app_origin(url.as_str(), app_origins)
 }
 
 fn navigation_guard<R: Runtime>() -> tauri::plugin::TauriPlugin<R> {
     tauri::plugin::Builder::new("navigation-guard")
-        .on_navigation(|_webview, url| {
-            let ok = is_app_url(url);
+        .on_navigation(|webview, url| {
+            let ok = is_app_url(url, &ipc_guard::origins_of(webview.app_handle()));
             if !ok {
                 eprintln!("차단한 화면 이동: {}", url);
             }
@@ -2632,6 +2624,7 @@ pub fn run() {
         .plugin(navigation_guard())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
+            ipc_guard::remember_origins(ipc_guard::origins_of(app.handle()));
             if let Some(listener) = instance.take() {
                 let handle = app.handle().clone();
                 let guard = single_instance::listen(listener, move || {
@@ -3044,18 +3037,26 @@ mod tests {
 
     #[test]
     fn navigation_is_limited_to_the_app() {
-        let ok = |u: &str| is_app_url(&tauri::Url::parse(u).unwrap());
-        assert!(ok("tauri://localhost/index.html"));
-        assert!(ok("http://tauri.localhost/"));
-        assert!(!ok("http://tauri.localhost:5173/x"));
-        assert!(ok("http://tauri.localhost:80/"), "기본 포트는 포트 없음과 같다");
-        assert!(!ok("http://anylm-preview.localhost:12345/token/site/index.html"));
-        assert!(!ok("https://evil.example.com/"));
-        assert!(!ok("http://tauri.localhost.evil.com/"));
-        assert!(!ok("file:///C:/Windows/win.ini"));
-        assert!(!ok("javascript:alert(1)"));
-        assert_eq!(ok("http://localhost:1420/"), cfg!(debug_assertions));
-        assert!(!ok("http://localhost:9999/"));
+        let prod = ipc_guard::app_origins(false, None, false);
+        let dev = ipc_guard::app_origins(true, Some(&tauri::Url::parse("http://localhost:1420").unwrap()), false);
+        let ok = |u: &str, origins: &[String]| is_app_url(&tauri::Url::parse(u).unwrap(), origins);
+        assert!(ok("tauri://localhost/index.html", &prod));
+        assert!(ok("http://tauri.localhost/", &prod));
+        assert!(ok("http://tauri.localhost:80/", &prod), "기본 포트는 포트 없음과 같다");
+        assert!(!ok("http://tauri.localhost:5173/x", &prod));
+        assert!(!ok("https://tauri.localhost/", &prod), "useHttpsScheme이 아니면 https는 앱이 아니다");
+        assert!(ok("https://tauri.localhost/", &ipc_guard::app_origins(false, None, true)));
+        assert!(!ok("http://anylm-preview.localhost:12345/token/site/index.html", &prod));
+        assert!(!ok("https://evil.example.com/", &prod));
+        assert!(!ok("http://tauri.localhost.evil.com/", &prod));
+        assert!(!ok("file:///C:/Windows/win.ini", &prod));
+        assert!(!ok("javascript:alert(1)", &prod));
+        assert!(!ok("http://localhost:1420/", &prod));
+        assert!(ok("http://localhost:1420/settings", &dev));
+        assert!(!ok("https://localhost:1420/", &dev));
+        assert!(!ok("http://127.0.0.1:1420/", &dev));
+        assert!(!ok("http://tauri.localhost/", &dev));
+        assert!(!ok("http://localhost:9999/", &dev));
     }
 
     #[test]

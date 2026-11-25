@@ -19,7 +19,8 @@ export interface ServerInfo {
   url: string | null;
 }
 
-/** Tauri가 앱 자신으로 취급하는 예약 호스트: 미리보기에서도 브라우저에서도 열지 않는다. */
+/** Tauri가 앱 자신으로 취급하는 예약 호스트: 미리보기에서도 브라우저에서도 열지 않는다.
+ * Rust `ipc_guard::is_reserved_host`(TAURI_PROTOCOLS + APP_PROTOCOLS)와 같게 유지한다. */
 const RESERVED_HOSTS = ["ipc.localhost", "tauri.localhost", "asset.localhost"];
 const FRAME_HOSTS = ["localhost", "127.0.0.1", "[::1]", "anylm-preview.localhost"];
 

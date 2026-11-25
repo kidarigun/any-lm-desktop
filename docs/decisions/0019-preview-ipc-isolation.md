@@ -15,25 +15,29 @@
 
 1. **앱 명령 출처 확인** (`src-tauri/src/ipc_guard.rs`, `guard_invoke`): `generate_handler!`가 만든 처리기를 감싼다. 요청의 `Origin`이 앱 출처와 scheme·호스트·포트까지 정확히 같지 않으면 `"허용되지 않은 출처의 요청입니다."`로 거절한다.
    - 앱 출처는 개발 모드(`tauri::is_dev()`)에서 `build.devUrl`의 출처(`http://localhost:1420`)다. 배포본에서는 `http://tauri.localhost`이고, 창이 `useHttpsScheme`을 쓸 때만 `https://tauri.localhost`가 된다. macOS·Linux용 `tauri://localhost`도 앱 출처에 들어간다.
-   - `Origin` 헤더가 없으면 허용한다. 사용자 정의 프로토콜(`http://ipc.localhost`)로 오는 요청은 교차 출처 POST라서 브라우저가 언제나 `Origin`을 붙인다. 헤더가 없는 요청은 `postMessage` 대체 경로에서만 나온다. WebView2는 최상위 문서의 `chrome.webview.postMessage`만 `CoreWebView2.WebMessageReceived`로 넘긴다. wry도 이 이벤트 하나만 듣는다. 최상위 문서는 탐색 가드가 앱 주소에 묶어 둔다(아래 4).
+   - `Origin` 헤더가 없으면 웹뷰 최상위 문서의 주소(`Webview::url()`)가 앱 출처일 때만 허용한다. 사용자 정의 프로토콜(`http://ipc.localhost`)로 오는 요청은 교차 출처 POST라서 브라우저가 언제나 `Origin`을 붙인다. 헤더가 없는 요청은 `postMessage` 대체 경로에서만 나온다. WebView2는 최상위 문서의 `chrome.webview.postMessage`만 `CoreWebView2.WebMessageReceived`로 넘기고, wry도 이 이벤트 하나만 듣는다. 최상위 주소 확인은 탐색 가드(아래 4)가 뚫렸을 때를 위한 둘째 겹이다. 주소 조회는 메인 스레드에서 바로 처리된다(tauri-runtime-wry `send_user_message`).
 2. **하위 프레임 이동 차단** (Windows, `install_frame_guard`, `navigation-guard` 플러그인의 `on_webview_ready`): `ICoreWebView2.FrameNavigationStarting`이 최상위 문서의 직속 iframe을 본다. `ICoreWebView2_4.FrameCreated`는 새 프레임마다 `ICoreWebView2Frame2.NavigationStarting`과 `ICoreWebView2Frame7.FrameCreated`(중첩 프레임, 재귀)를 건다. 다음 두 경우의 이동은 취소한다(`blocks_frame_navigation`).
    - 호스트가 `tauri.localhost`, `ipc.localhost`, `asset.localhost` 중 하나다. 포트는 있든 없든 막는다. 대소문자와 끝의 점도 가리지 않는다. `blob:` 주소는 안쪽 출처로 판단한다.
    - 이동할 곳이 앱 출처와 같다(개발 모드의 `http://localhost:1420`).
-   - 이 앱은 따로 등록한 사용자 정의 프로토콜이 없다. 그래서 예약 호스트 목록은 Tauri가 쓰는 이름으로 고정했다. 리디렉션도 `NavigationStarting`으로 다시 들어오므로 함께 막힌다. webview2-com은 wry와 같은 0.39.1(직접 의존성)이다.
+   - 예약 호스트는 `ipc_guard::is_reserved_host`가 정한다. 이름은 Tauri가 등록하는 `TAURI_PROTOCOLS`(tauri·ipc·asset)와 앱이 등록하는 `APP_PROTOCOLS`(지금은 비어 있음)에서 온다. 앱이 사용자 정의 프로토콜을 새로 등록하면 그 이름을 `APP_PROTOCOLS`에 넣고 등록 코드에서 이 상수를 써야 한다. 리디렉션도 `NavigationStarting`으로 다시 들어오므로 함께 막힌다. webview2-com은 wry와 같은 0.39.1(직접 의존성)이다.
 3. **CSP 좁히기**: `tauri.conf.json`의 `csp`·`devCsp` 두 곳에서 `frame-src`의 `*.localhost` 와일드카드를 뺐다. 이제 `http://localhost:* https://localhost:* http://127.0.0.1:* https://127.0.0.1:* http://anylm-preview.localhost:*`만 남는다. `anylm-preview.localhost`는 캔버스 HTML 미리보기 서버(`html_preview.rs`)용이다.
    - 미리보기 창(`previewDestination`)은 `localhost`, `127.0.0.1`, `[::1]`, `anylm-preview.localhost`만 프레임에 넣는다. 그 밖의 `*.localhost`는 기존 안내("외부 사이트는 브라우저에서 엽니다.")를 띄우고 기본 브라우저로 연다.
    - 예약 호스트(`tauri`·`ipc`·`asset.localhost`)는 프레임에도 브라우저에도 열지 않는다. Rust `local_url`도 같은 예약 호스트를 거부한다. 개발 서버 주소 감지와 확인용으로 다른 `*.localhost`는 계속 허용한다.
-4. **최상위 탐색 가드**: `is_app_url`은 이제 포트가 붙은 `tauri.localhost`를 앱 주소로 보지 않는다. 기본 포트는 포트가 없는 것과 같게 본다.
+4. **최상위 탐색 가드**: `is_app_url`은 앱 출처 목록(`ipc_guard::origins_of`)과 scheme·호스트·포트를 정확히 비교한다. 포트가 붙은 `tauri.localhost`, `useHttpsScheme`이 아닐 때의 https, 개발 모드의 `https://localhost:1420`은 앱 주소가 아니다. 기본 포트는 포트가 없는 것과 같게 본다. 앱 핸들이 없는 `dev_servers::local_url`은 setup 때 기억해 둔 목록(`remembered_origins`)을 쓴다.
+5. **이벤트 권한 줄이기**: `capabilities/default.json`은 `core:event:default`(listen·unlisten·emit·emit_to) 대신 `core:event:allow-listen`과 `core:event:allow-unlisten`만 준다. 화면은 `@tauri-apps/api/event`의 `listen`과 그 반환값(unlisten)만 쓴다(`api.ts`, `docs/bridge.ts`, `workpanel/devServerApi.ts`, `workpanel/terminalApi.ts`). 이벤트는 모두 Rust가 보내며, Rust 쪽 `emit`에는 ACL이 없다. 업데이터 플러그인도 Rust 앱 명령(`check_update`·`install_update`)으로만 쓰므로 플러그인 권한이 필요 없다.
 
 ## 남는 것 (적용 범위 밖)
 
-- **플러그인 명령과 이벤트는 1번 확인을 거치지 않는다.** Tauri는 `plugin:` 명령을 앱 처리기에 넘기지 않는다. 이 앱의 권한은 `capabilities/default.json`의 `core:event:default`(listen·unlisten·emit·emit_to)뿐이다.
-  - 2번 차단이 뚫려 어떤 프레임이 예약 호스트 출처를 얻으면, 그 프레임은 `plugin:event|emit`으로 앱 이벤트를 위조할 수 있다. 예: `anylm-open-preview`, `anylm-dev-server`, 문서 변환 요청 이벤트. 2번 차단이 뚫리는 경우는 아래 셋이다.
+- **플러그인 명령은 1번 확인을 거치지 않는다.** Tauri는 `plugin:` 명령을 앱 처리기에 넘기지 않는다. 남은 플러그인 권한은 `core:event:allow-listen`·`allow-unlisten`뿐이다(5번).
+  - 2번 차단이 뚫려 어떤 프레임이 예약 호스트 출처를 얻으면, 그 프레임이 할 수 있는 일은 다음 둘뿐이다.
+    - 앱 화면의 이벤트 구독을 `unlisten`으로 끊는다. 리스너 id는 차례로 매겨져 맞히기 쉽다. 피해는 화면이 이벤트를 못 받는 서비스 거부다.
+    - 자기 `listen`을 건다. 이벤트 내용은 최상위 문서에서 `eval`로 전달되므로 iframe은 받지 못한다. 이것은 소스를 읽고 내린 판단이다.
+  - 앱 이벤트를 위조하는 `emit`은 이제 권한이 없다.
+  - 2번 차단이 뚫리는 경우는 아래 셋이다.
     - 오래된 WebView2 런타임: 중첩 iframe을 감시하지 못한다.
     - WebView2가 `NavigationStarting`을 내지 않는 경로.
     - 감시를 거는 시점보다 앞서 일어나는 이동.
-  - `listen` 콜백은 최상위 문서에서 `eval`되므로 iframe이 이벤트 내용을 받아 가지는 못한다고 판단한다. 이것은 소스를 읽고 내린 판단이다.
-  - 플러그인 명령까지 막으려면 원격 출처를 명시한 capability나 Tauri 업스트림 수정(`is_local_url`의 포트 비교)이 필요하다.
+  - 이것까지 막으려면 Tauri 업스트림 수정(`is_local_url`의 포트 비교)이 필요하다.
 - **오래된 WebView2 런타임**: `ICoreWebView2Frame7`이 없는 런타임은 1.0.2420보다 오래된 것이다. 이런 런타임에서는 최상위 문서의 직속 iframe만 감시하고, 로그에 "중첩 iframe 이동은 감시하지 못합니다"를 한 번 남긴다. 앱 명령은 이때도 1번이 막는다.
 - **실행 중 확인**: 프레임 감시가 실제로 걸리는지는 Windows 개발 창에서 확인해야 한다. 절차는 STATUS 수동 확인 목록의 "미리보기 IPC 격리 (결정 0019)"에 있다. 단위 테스트는 출처·호스트 판정과 Tauri 모의 런타임에서의 거절을 확인한다.
 

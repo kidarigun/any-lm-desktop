@@ -1,11 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window: only event listen/emit from core. App commands are checked in Rust.",
+  "description": "Main window: only event listen/unlisten from core (the frontend never emits). App commands are checked in Rust (decision 0019).",
   "windows": [
     "main"
   ],
   "permissions": [
-    "core:event:default"
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
   ]
 }
