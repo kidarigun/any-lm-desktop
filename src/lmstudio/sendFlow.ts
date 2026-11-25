@@ -1,4 +1,4 @@
-import type { AppSettings, LlmProvider, LmModel, LoadPlan } from "../types";
+import type { AppSettings, Conversation, LlmProvider, LmModel, LoadPlan } from "../types";
 import { MIN_CONTEXT } from "./modelText";
 import { PROVIDER_META } from "./providerMeta";
 
@@ -62,4 +62,38 @@ export function smallerContext(attempted: number): number | null {
 /** "16K로 다시 시도" 버튼 글자 */
 export function smallerContextLabel(n: number): string {
   return `${Math.round(n / 1024)}K로 다시 시도`;
+}
+
+/**
+ * 대화에 저장된 모델 key가 지금 공급자에서 고른 것이면 그 key, 아니면 빈 문자열(기본 모델을 따른다).
+ * 공급자 표시가 없는 예전 대화는 LM Studio에서 고른 것으로 본다(백엔드 `Conversation::model_key_for`와 같다).
+ */
+export function conversationModelKey(
+  conv: Pick<Conversation, "modelKey" | "modelProvider"> | null | undefined,
+  provider: LlmProvider
+): string {
+  const key = conv?.modelKey?.trim() ?? "";
+  return key && (conv?.modelProvider ?? "lmstudio") === provider ? key : "";
+}
+
+/** 받은 모델 목록과 그 목록을 준 공급자. 다른 공급자의 목록은 쓰지 않는다. */
+export interface ModelList {
+  provider: LlmProvider | null;
+  models: LmModel[];
+}
+
+export const EMPTY_MODEL_LIST: ModelList = { provider: null, models: [] };
+
+/** 지금 공급자의 모델 목록. 공급자를 바꾼 뒤 새 목록을 받기 전에는 비어 있다. */
+export function modelsFor(list: ModelList, provider: LlmProvider): LmModel[] {
+  return list.provider === provider ? list.models : [];
+}
+
+/**
+ * 목록 새로 고침 결과를 반영한다. `fetched`가 null이면 실패(서버 꺼짐 등):
+ * 같은 공급자의 목록은 그대로 두고(잠깐 끊겨도 선택이 사라지지 않게), 다른 공급자의 목록은 지운다.
+ */
+export function modelListAfterRefresh(list: ModelList, provider: LlmProvider, fetched: LmModel[] | null): ModelList {
+  if (fetched) return { provider, models: fetched };
+  return list.provider === provider ? list : { provider, models: [] };
 }

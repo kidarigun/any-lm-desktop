@@ -286,6 +286,8 @@ export interface Conversation {
   compaction?: ContextCompaction | null;
   /** 이 대화에서 쓸 모델 key. 없으면 기본 모델 */
   modelKey?: string | null;
+  /** modelKey를 고른 공급자. 없으면(예전 대화) LM Studio. 지금 공급자와 다르면 modelKey는 쓰지 않는다 */
+  modelProvider?: LlmProvider | null;
 }
 
 export interface FileSnapshot {

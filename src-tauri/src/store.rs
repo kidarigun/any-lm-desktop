@@ -372,6 +372,18 @@ pub struct Conversation {
     /// 이 대화에서 쓸 모델 key. 없으면 설정의 기본 모델을 쓴다.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_key: Option<String>,
+    /// `model_key`를 고른 공급자. 지금 공급자와 다르면 `model_key`는 쓰지 않는다(다른 서버의 모델 이름이다).
+    /// 이 항목이 없는 예전 대화는 LM Studio에서 고른 것으로 본다(`model_key_for`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider: Option<LlmProvider>,
+}
+
+impl Conversation {
+    /// 지금 공급자에서 쓸 수 있는 대화 모델 key. 다른 공급자에서 고른 것이면 `None`.
+    pub fn model_key_for(&self, provider: LlmProvider) -> Option<&str> {
+        let owner = self.model_provider.unwrap_or(LlmProvider::Lmstudio);
+        self.model_key.as_deref().filter(|_| owner == provider)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

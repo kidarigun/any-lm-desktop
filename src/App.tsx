@@ -72,8 +72,13 @@ import { ModelPicker, ReasoningToggle } from "./lmstudio/ModelPicker";
 import { PROVIDER_META, activeProvider } from "./lmstudio/providerMeta";
 import { reasoningEnabled, withReasoning } from "./lmstudio/modelText";
 import {
+  EMPTY_MODEL_LIST,
   MODEL_MISSING_TEXT,
+  type ModelList,
+  conversationModelKey,
   isServerOffMessage,
+  modelListAfterRefresh,
+  modelsFor,
   nextSendStep,
   smallerContext,
   smallerContextLabel,
@@ -559,7 +564,11 @@ export default function App() {
   const isStreaming = !!activeRun;
 
   // --- 대화별 모델 선택 ---
-  const [models, setModels] = useState<LmModel[]>([]);
+  /** 받은 모델 목록과 그 공급자. 공급자를 바꾸면 새 목록을 받기 전까지 `models`는 비어 있다. */
+  const [modelList, setModelList] = useState<ModelList>(EMPTY_MODEL_LIST);
+  const models = modelsFor(modelList, currentProvider);
+  const providerRef = useRef(currentProvider);
+  providerRef.current = currentProvider;
   /** 대화가 아직 없을 때 고른 모델 (첫 메시지를 보낼 때 대화에 저장한다) */
   const [pendingModelKey, setPendingModelKey] = useState("");
   const [modelNotice, setModelNotice] = useState<string | null>(null);
@@ -573,17 +582,22 @@ export default function App() {
   const [loadFailure, setLoadFailure] = useState<{ key: string; context: number } | null>(null);
   const preparingModel = useRef(false);
   const refreshModels = React.useCallback(async () => {
+    const provider = providerRef.current;
+    let fetched: LmModel[] | null = null;
     try {
-      setModels(await BackendAPI.listModels());
+      fetched = await BackendAPI.listModels();
     } catch {
-      // 서버가 꺼져 있으면 목록을 비우지 않고 그대로 둔다.
+      // 서버가 꺼져 있으면 같은 공급자의 목록은 그대로 두고, 다른 공급자의 목록은 지운다.
     }
+    // 받는 사이에 공급자가 바뀌었으면 이전 공급자의 결과는 버린다.
+    if (providerRef.current !== provider) return;
+    setModelList((prev) => modelListAfterRefresh(prev, provider, fetched));
   }, []);
   useEffect(() => {
     if (serverUp) void refreshModels();
   }, [serverUp, showSettingsModal, refreshModels]);
   const effectiveModelKey = activeConversation
-    ? activeConversation.modelKey || settings.model
+    ? conversationModelKey(activeConversation, currentProvider) || settings.model
     : pendingModelKey || settings.model;
   const modelName = (key: string) => models.find((m) => m.key === key)?.displayName ?? key;
   const loadedContext =
@@ -3261,7 +3275,8 @@ export default function App() {
             setSettings({ ...saved, apiKey: "" });
             setShowSettingsModal(false);
             if (prevProvider !== nextProvider || prevUrl !== saved.serverUrl) {
-              setModels([]);
+              setModelList(EMPTY_MODEL_LIST);
+              if (prevProvider !== nextProvider) setPendingModelKey("");
               setReloadHint(null);
               setLoadFailure(null);
               setErrorBanner(null);

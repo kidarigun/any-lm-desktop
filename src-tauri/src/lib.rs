@@ -83,8 +83,7 @@ fn conversation_model(settings: &AppSettings, conv: &Conversation) -> Result<Str
         let t = s.trim();
         (!t.is_empty()).then(|| t.to_string())
     };
-    conv.model_key
-        .as_deref()
+    conv.model_key_for(settings.provider)
         .and_then(pick)
         .or_else(|| pick(&settings.model))
         .ok_or_else(|| {
@@ -894,6 +893,7 @@ fn create_conversation(
         mode: None,
         compaction: None,
         model_key: None,
+        model_provider: None,
     };
     db.conversations.insert(0, conv.clone());
     state.store.save(&db)?;
@@ -908,9 +908,11 @@ fn set_conversation_model(
     model_key: String,
 ) -> Result<Conversation, String> {
     let mut db = state.db.lock().map_err(|e| e.to_string())?;
+    let provider = db.settings.provider;
     let conv = find_conv_mut(&mut db, &conversation_id)?;
     let key = model_key.trim();
     conv.model_key = (!key.is_empty()).then(|| key.to_string());
+    conv.model_provider = conv.model_key.is_some().then_some(provider);
     let snapshot = conv.clone();
     state.store.save(&db)?;
     Ok(snapshot)
@@ -3007,6 +3009,32 @@ mod tests {
         assert!(conversation_model(&s, &c).unwrap_err().contains("사용할 모델을 고르세요"));
         c.model_key = Some("  ".into());
         assert!(conversation_model(&s, &c).is_err());
+    }
+
+    #[test]
+    fn conversation_model_ignores_a_key_chosen_under_another_provider() {
+        use store::LlmProvider;
+        let mut s = AppSettings { provider: LlmProvider::Ollama, model: "qwen3:8b".into(), ..Default::default() };
+        // 공급자 표시가 없는 예전 대화의 모델은 LM Studio에서 고른 것이다.
+        let mut c = Conversation { model_key: Some("qwen3.5-9b".into()), ..Default::default() };
+        assert_eq!(conversation_model(&s, &c).unwrap(), "qwen3:8b");
+        c.model_provider = Some(LlmProvider::Ollama);
+        assert_eq!(conversation_model(&s, &c).unwrap(), "qwen3.5-9b");
+        s.provider = LlmProvider::Lmstudio;
+        s.model = "lm-default".into();
+        assert_eq!(conversation_model(&s, &c).unwrap(), "lm-default");
+        c.model_provider = None;
+        assert_eq!(conversation_model(&s, &c).unwrap(), "qwen3.5-9b");
+
+        let old: Conversation = serde_json::from_str(
+            r#"{"id":"c","projectId":"p","title":"t","messages":[],"updatedAt":"","modelKey":"m"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.model_provider, None);
+        assert_eq!(old.model_key_for(LlmProvider::Lmstudio), Some("m"));
+        let tagged = Conversation { model_provider: Some(LlmProvider::OpenaiCompat), ..old };
+        let json = serde_json::to_value(&tagged).unwrap();
+        assert_eq!(json["modelProvider"], "openai_compat");
     }
 
     #[test]

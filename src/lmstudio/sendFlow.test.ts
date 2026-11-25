@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
 import type { AppSettings, LmModel } from "../types";
-import { canStartServerForError, isServerOffMessage, nextSendStep, smallerContext, smallerContextLabel, wantedContext } from "./sendFlow";
+import {
+  canStartServerForError,
+  conversationModelKey,
+  EMPTY_MODEL_LIST,
+  isServerOffMessage,
+  modelListAfterRefresh,
+  modelsFor,
+  nextSendStep,
+  smallerContext,
+  smallerContextLabel,
+  wantedContext,
+} from "./sendFlow";
 
 describe("sendFlow", () => {
   it("maps load plans to the next step", () => {
@@ -48,5 +59,29 @@ describe("sendFlow", () => {
 
     expect(canStartServerForError("Ollama 서버가 꺼져 있습니다.", "ollama")).toBe(true);
     expect(canStartServerForError("OpenAI 호환 서버가 꺼져 있습니다.", "openai_compat")).toBe(false);
+  });
+
+  it("uses a conversation's model only under the provider it was chosen with", () => {
+    expect(conversationModelKey({ modelKey: "qwen3.5-9b" }, "lmstudio")).toBe("qwen3.5-9b");
+    expect(conversationModelKey({ modelKey: "qwen3.5-9b" }, "ollama")).toBe("");
+    expect(conversationModelKey({ modelKey: "qwen3:8b", modelProvider: "ollama" }, "ollama")).toBe("qwen3:8b");
+    expect(conversationModelKey({ modelKey: "qwen3:8b", modelProvider: "ollama" }, "openai_compat")).toBe("");
+    expect(conversationModelKey({ modelKey: "  ", modelProvider: "ollama" }, "ollama")).toBe("");
+    expect(conversationModelKey(null, "lmstudio")).toBe("");
+  });
+
+  it("drops another provider's model list on switch and on a failed refresh", () => {
+    const lm = [{ key: "lm-model" } as LmModel];
+    const ol = [{ key: "qwen3:8b" } as LmModel];
+    let list = modelListAfterRefresh(EMPTY_MODEL_LIST, "lmstudio", lm);
+    expect(modelsFor(list, "lmstudio")).toEqual(lm);
+    // 공급자를 바꾸면 새 목록을 받기 전까지 비어 있다.
+    expect(modelsFor(list, "ollama")).toEqual([]);
+    // 새 공급자가 꺼져 있으면 이전 공급자의 목록을 남기지 않는다.
+    list = modelListAfterRefresh(list, "ollama", null);
+    expect(list).toEqual({ provider: "ollama", models: [] });
+    list = modelListAfterRefresh(list, "ollama", ol);
+    // 같은 공급자가 잠깐 끊기면 목록을 지우지 않는다.
+    expect(modelListAfterRefresh(list, "ollama", null).models).toEqual(ol);
   });
 });

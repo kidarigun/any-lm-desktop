@@ -694,6 +694,7 @@ export const BackendAPI = {
     const conv = db.conversations.find((c) => c.id === conversationId);
     if (!conv) throw new Error("대화 세션을 찾을 수 없습니다.");
     conv.modelKey = modelKey.trim() || null;
+    conv.modelProvider = conv.modelKey ? db.settings.provider ?? "lmstudio" : null;
     localStorage.setItem(FALLBACK_STORAGE_KEY, JSON.stringify(db));
     return conv;
   },
