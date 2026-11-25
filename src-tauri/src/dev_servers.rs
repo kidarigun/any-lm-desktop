@@ -119,9 +119,9 @@ mod tests {
         }).await;
         assert!(list(app.handle(), "other").unwrap().is_empty());
         let args = serde_json::json!({"id":first.terminal.id,"lines":2});
-        assert!(logs(app.handle(), "other", &args).is_err());
+        assert!(logs(app.handle(), "other", &args, 4_000).is_err());
         assert!(stop(app.handle(), "other", &first.terminal.id).is_err());
-        let logged = logs(app.handle(), "p", &args).unwrap();
+        let logged = logs(app.handle(), "p", &args, 4_000).unwrap();
         stop(app.handle(), "p", &first.terminal.id).unwrap();
         let ready = result.expect("테스트 서버 시작 시간 초과");
         assert_eq!(ready.status, "ready");
@@ -143,6 +143,23 @@ mod tests {
         }).await.unwrap();
         assert!(stopped.unwrap_err().contains("중지"));
         assert!(list(app.handle(), "p").unwrap().is_empty());
+    }
+
+    #[test]
+    fn long_server_logs_keep_the_newest_lines_within_the_tool_cap() {
+        let logs: String = (0..2_000).map(|i| format!("[vite] \"line\" {i}: hmr update /src/App.tsx")).collect::<Vec<_>>().join("\n");
+        let cap = 4_000;
+        let out = output_json("t1", "dev", "ready", Some("http://127.0.0.1:5173/"), None, &logs, cap);
+        let text = out.to_string();
+        assert!(text.chars().count() <= cap, "{}", text.chars().count());
+        let kept = out["logs"].as_str().unwrap();
+        assert!(kept.starts_with("[앞부분 "), "{kept}");
+        assert!(kept.lines().next().unwrap().ends_with("자 생략]"));
+        assert!(kept.ends_with("\"line\" 1999: hmr update /src/App.tsx"), "가장 최근 줄이 남아야 한다");
+        assert!(!kept.contains("\"line\" 0: "), "오래된 앞부분을 버린다");
+
+        let short = output_json("t1", "dev", "ready", None, None, "ready in 300ms", cap);
+        assert_eq!(short["logs"], "ready in 300ms");
     }
 }
 // 프로젝트 개발 서버 감지, ConPTY 세션과 연결, 로컬 주소 확인.
@@ -501,15 +518,45 @@ fn find_server<R: Runtime>(app: &AppHandle<R>, project_id: &str, id: &str) -> Re
         .ok_or_else(|| "이 프로젝트에서 해당 개발 서버 세션을 찾을 수 없습니다.".into())
 }
 
-fn server_output<R: Runtime>(app: &AppHandle<R>, server: &ServerInfo, lines: usize) -> serde_json::Value {
+/// 서버 출력은 최근 줄이 중요하므로, 길면 끝을 남기고 앞을 잘라 낸 뒤 첫 줄에 생략한 글자 수를 적는다.
+fn keep_tail(text: &str, max_chars: usize) -> String {
+    let total = text.chars().count();
+    if total <= max_chars {
+        return text.to_string();
+    }
+    let tail: String = text.chars().skip(total - max_chars).collect();
+    format!("[앞부분 {}자 생략]\n{}", total - max_chars, tail)
+}
+
+/// 도구 결과(JSON 문자열 전체)가 `cap`자를 넘지 않게 로그 끝부분만 담는다.
+/// 모델에 돌려줄 때의 공통 자르기(`truncate_for_model`)는 앞을 남기므로, 그보다 먼저 여기서 끝을 남겨 둔다.
+fn output_json(
+    id: &str, name: &str, status: &str, url: Option<&str>, exit_code: Option<u32>, logs: &str, cap: usize,
+) -> serde_json::Value {
+    let make = |logs: String| serde_json::json!({
+        "id": id, "name": name, "status": status, "url": url, "exitCode": exit_code, "logs": logs
+    });
+    let mut budget = cap.saturating_sub(300);
+    loop {
+        let value = make(keep_tail(logs, budget));
+        let len = value.to_string().chars().count();
+        if len <= cap || budget == 0 {
+            return value;
+        }
+        // JSON으로 바꾸면 줄바꿈·따옴표가 늘어나므로 넘친 만큼 더 줄여 다시 만든다.
+        budget = budget.saturating_sub(len - cap);
+    }
+}
+
+fn server_output<R: Runtime>(app: &AppHandle<R>, server: &ServerInfo, lines: usize, cap: usize) -> serde_json::Value {
     let text = app.try_state::<TerminalManager>()
         .and_then(|terminals| terminals.text(&server.terminal.id).ok()).unwrap_or_default();
     let mut lines: Vec<_> = text.lines().rev().take(lines).collect();
     lines.reverse();
-    serde_json::json!({
-        "id": server.terminal.id, "name": server.terminal.title, "status": server.status,
-        "url": server.url, "exitCode": server.terminal.exit_code, "logs": lines.join("\n")
-    })
+    output_json(
+        &server.terminal.id, &server.terminal.title, server.status, server.url.as_deref(),
+        server.terminal.exit_code, &lines.join("\n"), cap,
+    )
 }
 
 pub(crate) async fn start_for_model<R: Runtime>(
@@ -542,7 +589,7 @@ pub(crate) async fn start_for_model<R: Runtime>(
         tokio::time::sleep(POLL_INTERVAL).await;
         info = find_server(app, &project.id, &info.terminal.id)?;
     }
-    let output = server_output(app, &info, 40).to_string();
+    let output = server_output(app, &info, 40, crate::agent::current_tool_cap()).to_string();
     if info.status == "exited" {
         return Err(output);
     }
@@ -550,7 +597,7 @@ pub(crate) async fn start_for_model<R: Runtime>(
 }
 
 pub(crate) fn logs<R: Runtime>(
-    app: &AppHandle<R>, project_id: &str, args: &serde_json::Value,
+    app: &AppHandle<R>, project_id: &str, args: &serde_json::Value, cap: usize,
 ) -> Result<String, String> {
     #[derive(Deserialize)]
     struct Args { id: Option<String>, lines: Option<u32> }
@@ -558,11 +605,12 @@ pub(crate) fn logs<R: Runtime>(
         .map_err(|e| format!("서버 로그 인자가 올바르지 않습니다: {e}"))?;
     if let Some(id) = args.id {
         let info = find_server(app, project_id, &id)?;
-        return Ok(server_output(app, &info, args.lines.unwrap_or(80).clamp(1, 400) as usize).to_string());
+        return Ok(server_output(app, &info, args.lines.unwrap_or(80).clamp(1, 400) as usize, cap).to_string());
     }
     let servers = list(app, project_id)?;
-    let output: Vec<_> = servers.iter().filter(|s| s.terminal.running)
-        .map(|s| server_output(app, s, 10)).collect();
+    let running: Vec<_> = servers.iter().filter(|s| s.terminal.running).collect();
+    let each = cap / running.len().max(1);
+    let output: Vec<_> = running.into_iter().map(|s| server_output(app, s, 10, each)).collect();
     Ok(serde_json::json!(output).to_string())
 }
 

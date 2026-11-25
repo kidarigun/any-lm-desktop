@@ -920,7 +920,7 @@ fn base_system_prompt(project: Option<&Project>, model_display_name: &str) -> St
 - 작업이 끝나면 한 일을 짧게 요약해 답하세요. 파일에 쓴 내용을 답변에 다시 길게 옮기지 마세요.\n\
 - modify_file의 target은 파일 내용과 정확히 일치해야 합니다. 처음 보는 파일은 먼저 read_file로 확인하세요. 이 대화에서 당신이 직접 쓰거나 읽은 파일은 내용을 이미 알고 있으니 다시 읽지 말고 바로 수정하세요 (그사이 파일이 바뀌었으면 modify_file이 알려 줍니다). 파일 맨 끝에 내용을 덧붙일 때는 target을 빈 문자열로 주세요.\n\
 - delete_path, run_command, run_python은 사용자가 승인해야 실행됩니다. 거부되면 다른 방법을 제안하세요.\n\
-- 끝나지 않는 개발 서버 명령은 승인형 start_server로 실행하세요. 열린 로컬 주소를 open_preview로 보여 주세요. 오류는 server_logs로 읽고, 사용자가 종료를 요청하면 stop_server를 쓰세요.\n\
+- 개발 서버처럼 끝나지 않는 명령(npm run dev, python manage.py runserver 등)은 run_command가 아니라 start_server로 실행하세요. 서버가 뜨면 open_preview로 보여 주고, 오류가 나면 server_logs로 출력을 확인하세요. start_server는 사용자가 승인해야 실행되고, 사용자가 종료를 요청하면 stop_server를 쓰세요.\n\
 - 명령은 Windows PowerShell에서, 이미 프로젝트 폴더를 현재 위치로 하여 실행됩니다. cd로 이동하지 말고 cmd 문법(cd /d, &&, %VAR%)은 쓰지 마세요.\n\
 - Python 스크립트는 run_command가 아니라 run_python으로 실행하세요. 새 스크립트는 write_file을 따로 부르지 말고 run_python의 code에 내용을 넣어 한 번에 저장·실행하세요. 실행이 실패하면 _b, _c처럼 새 파일을 만들지 말고, 고친 전체 스크립트를 같은 경로의 code로 다시 보내세요.\n\
 - 보고서·문서를 만들 때 사용자가 Word, 한글(HWP/HWPX/아래아한글) 또는 PowerPoint를 원하면 write_file 경로를 .docx, .hwpx 또는 .pptx로 지정하고 content는 Markdown으로 작성하세요. 한글 문서는 늘 .hwpx로 만듭니다(.hwp는 만들 수 없음). 결과는 사용자의 문서 캔버스에서 바로 열립니다.\n\
@@ -2317,6 +2317,11 @@ tokio::task_local! {
     static TOOL_CAP: usize;
 }
 
+/// 이번 턴의 도구 결과 글자 수 상한(도구 실행 밖에서는 `MAX_TOOL_OUTPUT_CHARS`)
+pub(crate) fn current_tool_cap() -> usize {
+    TOOL_CAP.try_with(|c| *c).unwrap_or(MAX_TOOL_OUTPUT_CHARS)
+}
+
 /// 한 쪽의 글자 수: 상한(`READ_PAGE_CHARS`)과 이번 턴의 도구 상한에서 안내문 몫(400자)을 뺀 값 중 작은 쪽(최소 1,000자).
 /// 안내문(범위·이어 읽을 offset)이 도구 상한에 잘리지 않게 한다.
 fn page_chars() -> usize {
@@ -3020,7 +3025,11 @@ pub async fn run_agent_turn<R: Runtime>(
                 record.status = "running".to_string();
                 sink.tool(record.clone(), snap.clone());
                 let args: Value = serde_json::from_str(&record.arguments_json).unwrap_or_default();
-                let run = crate::run_approved_tool(app, Some(project), &record.id, &record.tool_name, &args, false, &cancel_flag);
+                // 도구 결과 상한(서버 출력 끝부분 자르기 등)이 이번 턴 컨텍스트에 맞게 적용되도록 같은 범위에서 실행한다.
+                let run = TOOL_CAP.scope(
+                    tool_cap,
+                    crate::run_approved_tool(app, Some(project), &record.id, &record.tool_name, &args, false, &cancel_flag),
+                );
                 let outcome = if record.tool_name == "start_server" {
                     // 서버 시작은 자체적으로 취소와 소유한 세션 정리를 끝낸 뒤 반환한다.
                     Raced::Done(run.await)
@@ -3467,7 +3476,7 @@ async fn run_tool<R: Runtime>(
         },
         "server_logs" | "stop_server" | "open_preview" => {
             let result = match name {
-                "server_logs" => crate::dev_servers::logs(app, project_id, args),
+                "server_logs" => crate::dev_servers::logs(app, project_id, args, current_tool_cap()),
                 "stop_server" => crate::dev_servers::stop(app, project_id, str_arg(args, "id")),
                 _ => crate::dev_servers::preview(app, project_id, str_arg(args, "url")),
             };
@@ -4413,6 +4422,18 @@ mod tests {
         let prompt = build_system_prompt(Some(&p), "project", &[], &[], "테스트 모델", 32768);
         assert!(prompt.contains("[프로젝트 메모리]") && prompt.contains("- 보고서는 존댓말로 쓴다"), "{prompt}");
         assert!(!build_system_prompt(None, "chat", &[], &[], "테스트 모델", 32768).contains("프로젝트 메모리"));
+    }
+
+    #[test]
+    fn project_and_code_prompts_send_dev_servers_to_start_server() {
+        // docs/superpowers/specs/2026-11-24-dev-server-preview-console.md §6의 문장
+        const LINE: &str = "개발 서버처럼 끝나지 않는 명령(npm run dev, python manage.py runserver 등)은 run_command가 아니라 start_server로 실행하세요. 서버가 뜨면 open_preview로 보여 주고, 오류가 나면 server_logs로 출력을 확인하세요.";
+        let dir = tempfile::tempdir().unwrap();
+        let p = test_project(dir.path());
+        for mode in ["project", "code"] {
+            assert!(build_system_prompt(Some(&p), mode, &[], &[], "테스트 모델", 32768).contains(LINE), "{mode}");
+        }
+        assert!(!build_system_prompt(None, "chat", &[], &[], "테스트 모델", 32768).contains("start_server"));
     }
 
     #[test]
