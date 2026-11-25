@@ -1,6 +1,6 @@
 [package]
 name = "any-lm-desktop"
-version = "0.1.0"
+version = "0.1.1"
 description = "Desktop work app for local LLM servers (LM Studio, Ollama, OpenAI-compatible)"
 authors = ["kidarigun"]
 license = "Apache-2.0"
