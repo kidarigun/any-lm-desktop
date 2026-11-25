@@ -12,7 +12,8 @@
 
 - `src-tauri/src/catalog.rs`에 `DEFAULT_CATALOG_URL`과 `resolve_url`을 복구하고, 주소가 비어 있을 때 빈 스텁을 반환하던 분기를 제거해 기본 원격 카탈로그를 불러오도록 복구했다(오프라인 시 `catalog_cache.json` 저장본 폴백 유지).
 - 기본 원격 카탈로그의 `name` 필드에 이전 앱 브랜드명(`EXAONE`/`LG`)이 포함된 경우에만 표시 제목을 `"Any LM Desktop 기본 목록"`으로 정리하고, 모든 Skill(63개)과 MCP(17개) 항목 및 내장 웹 검색 MCP 8개는 원형 그대로 합쳐(`mergeCatalogs`) 보여 준다.
-- `src-tauri/src/lib.rs`(`catalog_default_url` 명령 복구), `src/api.ts`(`BackendAPI.catalogDefaultUrl` 복구), `src/catalog/CatalogViews.tsx`(기본 목록 메모이제이션, 실패 시 기존 목록 보존, 입력 안내 복구)를 복원했다.
+- `src-tauri/src/lib.rs`(`catalog_default_url` 명령 복구), `src/api.ts`(`BackendAPI.catalogDefaultUrl` 복구), `src/catalog/CatalogViews.tsx`(기본 목록 메모이제이션, 실패 시 기존 목록 보존)를 복원했다.
+- 바로잡음(전체 검토): 처음 기록에는 `CatalogViews.tsx`가 `catalogDefaultUrl`로 입력 안내를 복구했다고 적었지만, 화면은 이 명령을 쓰지 않는다. 주소 입력란의 안내는 고정 문구 "비우면 기본 목록 (https://...catalog.json)"뿐이고, 기본 주소 자체는 보여 주지 않는다. `BackendAPI.catalogDefaultUrl`은 지금 `catalog.test.ts`에서만 쓴다.
 
 ## 영구 재발 방지 규칙
 

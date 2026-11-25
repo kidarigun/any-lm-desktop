@@ -62,7 +62,7 @@ Rust (`src-tauri/src/`)
 - 핵심 에이전트 모듈·스트림 심볼(결정 0016): `agent.rs`, `run_agent_turn`, `onAgentStream`, `"anylm-stream"`을 사용한다. 사용자에게 보이는 문자열과 스펙 6.2 표의 충돌 요소에는 "EXAONE"/"K-EXAONE"/"LG"를 쓰지 않는다. (원본 `upstream`에서 `exaone.rs`를 수정하는 커밋을 가져올 때는 `agent.rs`로 매핑해 반영한다.)
 - 화면 문구는 한국어. 사용자에게 보이는 곳에 "EXAONE"/"K-EXAONE"/"LG"를 쓰지 않는다(NOTICE·README의 출처 설명만 예외).
 - 로컬 LLM 서버 주소는 모든 공급자(LM Studio · Ollama · OpenAI 호환)에서 `http://localhost`, `http://127.0.0.1`, `http://[::1]`만 허용. 기본값은 `lmstudio` `http://localhost:1234`, `ollama` `http://localhost:11434`, `openai_compat` `http://localhost:8080`.
-- 기본 원하는 컨텍스트 `16384`(16K, UI 선택 범위 8K~128K). 자동 요약 압축 기준 `0.70`(로드된 컨텍스트 대비). 글자→토큰 추정 `1토큰 = 1.5자`(`chars()` 기준).
+- 기본 원하는 컨텍스트 `16384`(16K, UI 선택지는 8K~128K 프리셋과 모델 최대 컨텍스트). 자동 요약 압축 기준 `0.70`(로드된 컨텍스트 대비). 글자→토큰 추정 `1토큰 = 1.5자`(`chars()` 기준).
 - 모델 로드 요청 시간 제한 5분. 응답 헤더 대기 180초, 스트림 무응답 900초(원본 유지).
 - 앱은 사용자가 [내리고 로드]·[다시 로드]·[언로드]를 누를 때만 모델을 내린다.
 - 기존 Skill·MCP 기본 목록 보호(결정 0014): 사용자의 명시적 지시 없이 기존 Skill·MCP 카탈로그 소스(`DEFAULT_CATALOG_URL`·`builtinCatalog`)나 설치·저장 데이터를 지우거나 빈 목록으로 대체하지 않는다. 메뉴·설정·카탈로그를 손대거나 배포 빌드를 만들기 전후로 Skill/MCP 설치됨·찾아보기 목록이 비어 있지 않은지(회귀 테스트 + 실목록) 반드시 확인한다.

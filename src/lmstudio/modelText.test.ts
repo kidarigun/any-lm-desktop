@@ -67,17 +67,24 @@ describe("modelText", () => {
     expect(withReasoning(prefs, "b", "on")).toEqual({ a: { contextLength: 8192 }, b: { reasoning: "on" } });
     expect(prefs).toEqual({ a: { contextLength: 8192 } });
   });
-  it("formats and builds 8K-128K context preset options safely", () => {
+  it("formats and builds preset options up to the model max safely", () => {
     expect(formatContextSize(16384)).toBe("16K");
     expect(formatContextSize(131072)).toBe("128K");
     expect(formatContextSize(20000)).toBe("20,000");
 
-    expect(contextOptions(262144)).toEqual([8192, 16384, 24576, 32768, 49152, 65536, 98304, 131072]);
-    expect(contextOptions(0)).toEqual([8192, 16384, 24576, 32768, 49152, 65536, 98304, 131072]);
+    const presets = [8192, 16384, 24576, 32768, 49152, 65536, 98304, 131072];
+    // 128K보다 큰 모델은 모델 최대까지 고를 수 있다.
+    expect(contextOptions(262144)).toEqual([...presets, 262144]);
+    expect(contextOptions(0)).toEqual(presets);
     expect(contextOptions(32768)).toEqual([8192, 16384, 24576, 32768]);
+    expect(contextOptions(131072)).toEqual(presets);
     expect(contextOptions(4096)).toEqual([4096]);
-    expect(contextOptions(262144, 4096)).toEqual([4096, 8192, 16384, 24576, 32768, 49152, 65536, 98304, 131072]);
-    expect(contextOptions(262144, 20000)).toEqual([8192, 16384, 20000, 24576, 32768, 49152, 65536, 98304, 131072]);
+    // 프리셋이 아닌 모델 최대(예: Qwen3 40960)도 고를 수 있다.
+    expect(contextOptions(40960)).toEqual([8192, 16384, 24576, 32768, 40960]);
+    expect(contextOptions(262144, 4096)).toEqual([4096, ...presets, 262144]);
+    expect(contextOptions(262144, 20000)).toEqual([8192, 16384, 20000, 24576, 32768, 49152, 65536, 98304, 131072, 262144]);
+    expect(contextOptions(262144, 196608)).toEqual([...presets, 196608, 262144]);
     expect(contextOptions(32768, 131072)).toEqual([8192, 16384, 24576, 32768]);
+    expect(contextOptions(40960, 65536)).toEqual([8192, 16384, 24576, 32768, 40960]);
   });
 });

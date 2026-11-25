@@ -34,7 +34,7 @@ export const PROVIDER_META: Record<LlmProvider, ProviderMeta> = {
     addressHint: "이 PC의 Ollama 주소만 쓸 수 있습니다 (예: http://localhost:11434).",
     tokenPlaceholder: "로컬 프록시 등에서 인증을 켠 경우에만 입력",
     emptyModelsText: "Ollama에 설치된 모델이 없습니다.",
-    contextHint: "모델별 컨텍스트는 Ollama 서버 기본값(OLLAMA_CONTEXT_LENGTH)과 다를 수 있습니다.",
+    contextHint: "고른 컨텍스트는 요청마다 Ollama에 함께 보내므로, 서버 기본값(OLLAMA_CONTEXT_LENGTH)과 달라도 그 값으로 로드됩니다.",
     supportsLoad: true,
     supportsUnload: true,
     supportsStartServer: true,

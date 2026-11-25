@@ -50,15 +50,17 @@ export function formatContextSize(tokens: number): string {
 }
 
 /**
- * 컨텍스트 콤보 선택지(8K~128K).
- * - maxContextLength > 0이면 그 이하 프리셋만 노출한다(8K 미만 모델은 maxContextLength 자체를 포함).
- * - 기존 저장값이나 [4K로 다시 시도]로 설정된 currentValue가 프리셋에 없더라도 유효(>= MIN_CONTEXT)하면 오름차순으로 함께 보여 준다.
+ * 컨텍스트 콤보 선택지: 8K~128K 프리셋 + 모델 최대.
+ * - maxContextLength > 0이면 그 이하 프리셋만 노출하고, 모델 최대가 프리셋에 없으면(예: 40960, 262144)
+ *   그 값도 고를 수 있게 넣는다. 그래서 128K보다 큰 모델은 최대까지 고를 수 있다.
+ * - 기존 저장값이나 [4K로 다시 시도]로 설정된 currentValue가 프리셋에 없더라도 유효(>= MIN_CONTEXT)하면
+ *   (모델 최대를 넘지 않게 잘라) 오름차순으로 함께 보여 준다.
  */
 export function contextOptions(maxContextLength: number, currentValue?: number): number[] {
   const list: number[] = CONTEXT_PRESETS.filter(
     (v) => maxContextLength <= 0 || v <= maxContextLength,
   );
-  if (list.length === 0 && maxContextLength >= MIN_CONTEXT) {
+  if (maxContextLength >= MIN_CONTEXT && !list.includes(maxContextLength)) {
     list.push(maxContextLength);
   }
   if (currentValue !== undefined && Number.isFinite(currentValue)) {

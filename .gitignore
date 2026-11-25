@@ -27,3 +27,7 @@ harness/scenarios*.json
 
 # Files gathered for a release (installer + latest.json)
 release/
+
+# Release signing artifacts (updater private keys, signatures)
+*.key
+*.sig

@@ -97,7 +97,7 @@ python ../harness/report.py ../harness/runs/default   # 결과 요약
 | `ANYLM_PROVIDER` | 공급자 (`lmstudio` \| `ollama` \| `openai_compat`) | `lmstudio` |
 | `ANYLM_MODEL` | 시험할 모델 key (필수) | - |
 | `ANYLM_SERVER` | 로컬 LLM 서버 주소 | 공급자 기본 포트 (`1234` \| `11434` \| `8080`) |
-| `ANYLM_CONTEXT` | 모델이 로드된 컨텍스트 길이 | `32768` |
+| `ANYLM_CONTEXT` | 모델이 로드된 컨텍스트 길이 | `16384` |
 | `ANYLM_TOKEN` | API 토큰 (선택) | 없음 |
 | `ANYLM_SCENARIOS` | 시나리오 JSON | `../harness/scenarios.json` |
 | `ANYLM_OUT` | 결과 폴더 | `../harness/runs/default` |
