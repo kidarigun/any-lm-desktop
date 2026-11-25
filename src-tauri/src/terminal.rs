@@ -707,6 +707,7 @@ impl OutputLog {
         self.ui.next_flush(now)
     }
 
+    #[cfg(test)]
     pub(crate) fn pending_bytes(&self) -> usize {
         self.ui.pending_bytes()
     }
