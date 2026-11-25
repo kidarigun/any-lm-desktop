@@ -1492,10 +1492,18 @@ fn thinking_presence_penalty(reasoning_options: &[String], pref: Option<&str>, m
     }
 }
 
-/// 마크다운 강조(`*`, `_`)와 공백 차이를 무시하고 끝부분에서 긴 문구가 제자리 반복되는지 탐지한다.
-fn detect_repetition_loop(text: &str) -> bool {
+/// 반복 검사에서 보는 끝부분 길이
+const REPETITION_TAIL_CHARS: usize = 2_400;
+/// 코드·표까지 포함한 원문에서 반복으로 볼 최소 길이: 끝 2,000자가 통째로 같은 주기로 되풀이되어야 한다.
+/// 같은 표 줄 20개(약 800자)는 정상이고, 수십·수백 줄을 기계적으로 되풀이하는 퇴화만 잡는다.
+const SATURATED_REPETITION_CHARS: usize = 2_000;
+/// 위 검사에서 원문 끝을 가져오는 길이(들여쓰기 공백을 줄여도 2,000자가 남도록 넉넉히)
+const SATURATED_SOURCE_CHARS: usize = 4_000;
+
+/// 마크다운 강조(`*`, `_`)를 빼고 공백을 하나로 줄인 끝부분 글자들
+fn normalized_tail(text: &str, tail_chars: usize) -> Vec<char> {
     let total = text.chars().count();
-    let tail: String = text.chars().skip(total.saturating_sub(2_400)).collect();
+    let tail: String = text.chars().skip(total.saturating_sub(tail_chars)).collect();
     let mut norm: Vec<char> = Vec::with_capacity(tail.len());
     let mut prev_space = true;
     for ch in tail.chars() {
@@ -1512,6 +1520,82 @@ fn detect_repetition_loop(text: &str) -> bool {
             prev_space = false;
         }
     }
+    norm
+}
+
+/// 코드 블록(``` … ```, 닫히지 않은 블록은 끝까지)과 표 줄(`|`로 시작)을 걷어 내고 글만 남긴다.
+/// `drop_code_like_lines`가 참이면 코드처럼 보이는 줄(`is_code_like_line`)도 뺀다(추론용).
+/// 걷어 낸 자리마다 서로 다른 짧은 표시(⟦n⟧)를 넣어, 코드 앞뒤의 글이 붙어 제자리 반복처럼 보이지 않게 한다.
+fn prose_only(text: &str, drop_code_like_lines: bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_fence = false;
+    let mut in_removed_run = false;
+    let mut removed_runs = 0usize;
+    for line in text.split('\n') {
+        let t = line.trim();
+        let fence = t.starts_with("```") || t.starts_with("~~~");
+        let drop = fence || in_fence || t.starts_with('|') || (drop_code_like_lines && is_code_like_line(line));
+        if fence {
+            in_fence = !in_fence;
+        }
+        if drop {
+            if !in_removed_run {
+                removed_runs += 1;
+                out.push_str(&format!("⟦{}⟧\n", removed_runs));
+                in_removed_run = true;
+            }
+            continue;
+        }
+        in_removed_run = false;
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// 추론 속 코드 초안으로 보이는 줄: 4칸·탭 들여쓰기, 태그·괄호로 시작, `;`·`{`로 끝남, `=>`·`::` 같은 기호 포함 등.
+/// 한국어·영어 문장은 이런 모양이 드물어, 여기서 걸러도 의역 루프 탐지에는 영향이 거의 없다.
+fn is_code_like_line(line: &str) -> bool {
+    if line.starts_with("    ") || line.starts_with('\t') {
+        return true;
+    }
+    let t = line.trim();
+    if t.is_empty() {
+        return false;
+    }
+    const STARTS: &[&str] = &[
+        "<", "{", "}", ")", "]", "//", "/*", "#!", "#[", "#include", "fn ", "pub ", "let ", "const ", "def ", "class ",
+        "import ", "export ", "return ", "if (", "for (", "while (",
+    ];
+    const ENDS: &[&str] = &[";", "{", "}", "(", "[", "=>"];
+    const CONTAINS: &[&str] = &["=>", "::", "</", "/>", "();", "&&", "||", "!=="];
+    STARTS.iter().any(|s| t.starts_with(s)) || ENDS.iter().any(|s| t.ends_with(s)) || CONTAINS.iter().any(|s| t.contains(s))
+}
+
+/// 글만 남긴 쪽은 기존 기준(긴 문구 3~4회 제자리 반복), 코드·표를 포함한 원문은 끝 2,000자 전체가 같은 주기일 때만 반복으로 본다.
+fn detect_repetition_loop(text: &str) -> bool {
+    tail_repeats(&normalized_tail(&prose_only(text, false), REPETITION_TAIL_CHARS))
+        || saturated_repetition(&normalized_tail(text, SATURATED_SOURCE_CHARS))
+}
+
+/// 끝 `SATURATED_REPETITION_CHARS`자가 통째로 한 주기(36~450자)의 되풀이인지
+fn saturated_repetition(norm: &[char]) -> bool {
+    let n = norm.len();
+    if n < SATURATED_REPETITION_CHARS {
+        return false;
+    }
+    let start = n - SATURATED_REPETITION_CHARS;
+    (36..=450).any(|p| {
+        norm[start + p..n] == norm[start..n - p] && {
+            let distinct: std::collections::HashSet<char> =
+                norm[n - p..n].iter().copied().filter(|c| *c != ' ').collect();
+            distinct.len() >= 8
+        }
+    })
+}
+
+/// 정규화한 끝부분에서 긴 문구(36~450자)가 3~4회 제자리 반복되는지
+fn tail_repeats(norm: &[char]) -> bool {
     let n = norm.len();
     if n < 240 {
         return false;
@@ -1615,39 +1699,86 @@ fn normalize_thinking_clause(raw: &str) -> String {
         .to_string()
 }
 
-/// 추론(`<think>`) 내부의 원문 제자리 반복뿐 아니라 말투·추임새를 바꾼 의역 자기검열 무한 루프까지 탐지한다.
-fn detect_thinking_loop(text: &str) -> bool {
-    if detect_repetition_loop(text) {
-        return true;
-    }
-    let total = text.chars().count();
-    if total < 600 {
-        return false;
-    }
-    let tail: String = text.chars().skip(total.saturating_sub(4_500)).collect();
+/// 의역 루프 검사를 시작하는 최소 길이(코드·표를 뺀 글 기준)
+const THINKING_LOOP_MIN_CHARS: usize = 600;
+/// 절·싱글 반복을 보는 끝부분 길이: 넓은 창(최근 사고 전반)과 좁은 창(막 시작된 루프)
+const THINKING_WIDE_WINDOW: usize = 4_500;
+const THINKING_NARROW_WINDOW: usize = 1_500;
+/// 절 반복: 같은 절이 이만큼 나오면 반복 비율이 `CLAUSE_SHARE_LOW` 이상일 때 루프
+const CLAUSE_REPEATS_STRONG: usize = 6;
+const CLAUSE_SHARE_LOW: f64 = 0.25;
+/// 절 반복: 같은 절 4회 이상 또는 3회 이상인 절 2개 이상이면 반복 비율이 `CLAUSE_SHARE_HIGH` 이상일 때 루프
+const CLAUSE_REPEATS_WEAK: usize = 4;
+const CLAUSE_SHARE_HIGH: f64 = 0.4;
+/// 5어절 싱글 반복 기준: 최소 5회, 단어 60개마다 1회씩 늘린다(긴 사고일수록 우연한 반복이 많다).
+const SHINGLE_MIN_REPEATS: usize = 5;
+const SHINGLE_WORDS_PER_REPEAT: usize = 60;
 
-    let mut clause_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for raw in tail.split(|c: char| matches!(c, '\n' | '.' | '!' | '?' | '。' | '→' | ':')) {
+/// 사고를 절로 나눈다. `.`·`:`는 뒤가 공백이거나 끝일 때만 나눈다(`app.js`, `http://`, `src/a.tsx`를 쪼개지 않게).
+fn split_clauses(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut iter = text.char_indices().peekable();
+    while let Some((i, c)) = iter.next() {
+        let next = iter.peek().map(|&(_, n)| n);
+        let boundary = match c {
+            '\n' | '!' | '?' | '。' | '→' => true,
+            '.' | ':' => next.is_none_or(char::is_whitespace),
+            _ => false,
+        };
+        if boundary {
+            out.push(&text[start..i]);
+            start = i + c.len_utf8();
+        }
+    }
+    out.push(&text[start..]);
+    out
+}
+
+/// 같은 절(추임새·강조를 뺀 형태)이 되풀이되고, 그 되풀이가 최근 사고의 큰 몫을 차지할 때만 루프로 본다.
+/// 목록·초안처럼 비슷한 문장이 몇 번 나오는 정상 사고는 반복 몫이 작아 걸리지 않는다.
+fn clause_loop(prose: &str) -> bool {
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut eligible_chars = 0usize;
+    for raw in split_clauses(prose) {
         let norm = normalize_thinking_clause(raw);
-        if norm.chars().count() < 16 {
+        let len = norm.chars().count();
+        if len < 16 {
             continue;
         }
-        let distinct: std::collections::HashSet<char> =
-            norm.chars().filter(|c| !c.is_whitespace()).collect();
+        let distinct: std::collections::HashSet<char> = norm.chars().filter(|c| !c.is_whitespace()).collect();
         if distinct.len() < 7 {
             continue;
         }
-        let count = clause_counts.entry(norm).or_insert(0);
-        *count += 1;
-        if *count >= 4 {
-            return true;
-        }
+        eligible_chars += len;
+        *counts.entry(norm).or_insert(0) += 1;
     }
-    if clause_counts.values().filter(|&&c| c >= 3).count() >= 2 {
+    let repeated_chars: usize = counts
+        .iter()
+        .filter(|(_, &c)| c >= 3)
+        .map(|(k, &c)| (c - 1) * k.chars().count())
+        .sum();
+    let share = repeated_chars as f64 / eligible_chars.max(1) as f64;
+    let max = counts.values().copied().max().unwrap_or(0);
+    let repeated_kinds = counts.values().filter(|&&c| c >= 3).count();
+    (max >= CLAUSE_REPEATS_STRONG && share >= CLAUSE_SHARE_LOW)
+        || ((max >= CLAUSE_REPEATS_WEAK || repeated_kinds >= 2) && share >= CLAUSE_SHARE_HIGH)
+}
+
+/// 목록 항목 줄(`- `, `* `, `1. ` 등). 파일별 점검 목록처럼 같은 틀의 문장이 많아 싱글 반복 검사에서 뺀다.
+fn is_list_item(line: &str) -> bool {
+    let t = line.trim_start();
+    if ["- ", "* ", "• ", "+ ", "· "].iter().any(|p| t.starts_with(p)) {
         return true;
     }
+    let digits = t.chars().take_while(char::is_ascii_digit).count();
+    digits > 0 && (t[digits..].starts_with(". ") || t[digits..].starts_with(") "))
+}
 
-    let lowered = tail.to_lowercase();
+/// 5어절 구문이 사고 길이에 비례한 기준 이상 되풀이되는지(목록 항목 줄은 빼고 본다)
+fn shingle_loop(prose: &str) -> bool {
+    let body: String = prose.lines().filter(|l| !is_list_item(l)).collect::<Vec<_>>().join("\n");
+    let lowered = body.to_lowercase();
     let words: Vec<&str> = lowered
         .split(|c: char| {
             c.is_whitespace()
@@ -1658,26 +1789,45 @@ fn detect_thinking_loop(text: &str) -> bool {
         })
         .filter(|w| !w.is_empty())
         .collect();
-    if words.len() >= 40 {
-        let mut shingle_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        for w in words.windows(5) {
-            let shingle = w.join(" ");
-            if shingle.chars().count() < 18 {
-                continue;
-            }
-            let distinct: std::collections::HashSet<char> =
-                shingle.chars().filter(|c| !c.is_whitespace()).collect();
-            if distinct.len() < 8 {
-                continue;
-            }
-            let count = shingle_counts.entry(shingle).or_insert(0);
-            *count += 1;
-            if *count >= 5 {
-                return true;
-            }
+    if words.len() < 40 {
+        return false;
+    }
+    let need = SHINGLE_MIN_REPEATS.max(words.len() / SHINGLE_WORDS_PER_REPEAT);
+    let mut shingle_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for w in words.windows(5) {
+        let shingle = w.join(" ");
+        if shingle.chars().count() < 18 {
+            continue;
+        }
+        let distinct: std::collections::HashSet<char> = shingle.chars().filter(|c| !c.is_whitespace()).collect();
+        if distinct.len() < 8 {
+            continue;
+        }
+        let count = shingle_counts.entry(shingle).or_insert(0);
+        *count += 1;
+        if *count >= need {
+            return true;
         }
     }
     false
+}
+
+/// 추론(`<think>`) 내부의 원문 제자리 반복뿐 아니라 말투·추임새를 바꾼 의역 자기검열 무한 루프까지 탐지한다.
+/// 코드 블록·코드처럼 보이는 줄·표 줄은 빼고 글만 본다(코드 초안의 같은 속성·태그 줄을 반복으로 오인하지 않게).
+fn detect_thinking_loop(text: &str) -> bool {
+    let prose = prose_only(text, true);
+    if tail_repeats(&normalized_tail(&prose, REPETITION_TAIL_CHARS))
+        || saturated_repetition(&normalized_tail(text, SATURATED_SOURCE_CHARS))
+    {
+        return true;
+    }
+    let total = prose.chars().count();
+    if total < THINKING_LOOP_MIN_CHARS {
+        return false;
+    }
+    let tail_of = |n: usize| -> String { prose.chars().skip(total.saturating_sub(n)).collect() };
+    let wide = tail_of(THINKING_WIDE_WINDOW);
+    clause_loop(&wide) || clause_loop(&tail_of(THINKING_NARROW_WINDOW)) || shingle_loop(&wide)
 }
 
 /// 메시지 배열의 총 문자 수(시스템/압축 요약 제외 대화 원문 분량 참고용)
@@ -5703,6 +5853,103 @@ content-length: {}
         .join("\n");
         assert!(healthy.chars().count() >= 900);
         assert!(!detect_thinking_loop(&healthy));
+    }
+
+    /// 검토에서 재현된 오탐(코드 초안·목록·표)을 사고 탐지기가 루프로 보지 않는다.
+    #[test]
+    fn thinking_loop_ignores_code_drafts_lists_and_tables() {
+        // 1. Tailwind JSX 표 초안: 같은 className의 td 줄 5개 (코드 블록 안과 밖 모두)
+        let td = "            <td className=\"px-4 py-2 border border-stone-300 text-sm text-stone-700\">{r.value}</td>\n";
+        let jsx_body = format!(
+            "export function Schedule({{ rows }}: Props) {{\n  return (\n    <table className=\"min-w-full border-collapse text-sm\">\n      <tbody>\n        {{rows.map((r) => (\n          <tr key={{r.id}}>\n{}          </tr>\n        ))}}\n      </tbody>\n    </table>\n  );\n}}\n",
+            td.repeat(5)
+        );
+        let jsx_fenced = format!(
+            "사용자가 주간 일정 표 컴포넌트를 원한다. 먼저 구조를 생각해 보자. 행마다 요일과 시간, 장소, 담당, 비고를 보여 주면 된다. 각 칸의 스타일은 같게 맞추자. 다음과 같이 작성하자.\n\n```tsx\n{}```\n\n이제 write_file로 src/Schedule.tsx에 저장하면 된다.",
+            jsx_body
+        );
+        assert!(jsx_fenced.chars().count() >= 600);
+        assert!(!detect_thinking_loop(&jsx_fenced), "코드 블록 안 JSX 초안");
+        let jsx_bare = format!("표 컴포넌트를 바로 적어 보자.\n{}\n이 구조면 충분하다. 이제 저장하자.", jsx_body);
+        assert!(!detect_thinking_loop(&jsx_bare), "코드 블록 없이 적은 JSX 초안");
+
+        // 2. HTML 라디오 목록 초안
+        let mut html = String::from("간단한 HTML 폼을 만들자. 지역 선택 목록이 필요하다.\n<form class=\"space-y-4\">\n");
+        for (i, r) in ["서울", "부산", "대구", "인천", "광주", "대전"].iter().enumerate() {
+            html.push_str(&format!(
+                "  <div class=\"flex items-center gap-2 text-sm\"><input type=\"radio\" name=\"region\" value=\"{r}\" id=\"r{i}\"><label for=\"r{i}\">{r}</label></div>\n"
+            ));
+        }
+        html.push_str("</form>\n이 정도면 충분하다. 이제 파일로 저장하자. 스타일은 Tailwind CDN을 쓰면 된다. 그리고 제출 버튼을 추가해야 한다.");
+        assert!(html.chars().count() >= 600);
+        assert!(!detect_thinking_loop(&html), "HTML 라디오 목록 초안");
+
+        // 3. Rust 함수를 초안·수정·최종으로 세 번 적음 (코드 블록 없이, 그리고 코드 블록으로)
+        let draft = "fn parse_line(line: &str) -> Option<(String, u32)> {\n    let mut parts = line.split(',');\n    let name = parts.next()?.trim().to_string();\n    let count = parts.next()?.trim().parse::<u32>().ok()?;\n    Some((name, count))\n}\n";
+        let fixed = "fn parse_line(line: &str) -> Option<(String, u32)> {\n    let line = line.trim();\n    if line.is_empty() {\n        return None;\n    }\n    let mut parts = line.split(',');\n    let name = parts.next()?.trim().to_string();\n    let count = parts.next()?.trim().parse::<u32>().ok()?;\n    Some((name, count))\n}\n";
+        let bare = format!(
+            "먼저 초안을 써 보자.\n{draft}\n음, 빈 줄 처리가 빠졌다. 빈 줄이면 None을 돌려주도록 고치자.\n{fixed}\n테스트에서 공백만 있는 줄도 확인해야 한다. 최종 코드는 다음과 같다.\n{fixed}\n이제 modify_file로 src/parse.rs를 고치면 된다."
+        );
+        assert!(bare.chars().count() >= 600);
+        assert!(!detect_thinking_loop(&bare), "코드 블록 없는 Rust 초안 3회");
+        let fenced = format!(
+            "먼저 초안을 써 보자.\n```rust\n{draft}```\n음, 빈 줄 처리가 빠졌다.\n```rust\n{fixed}```\n최종 코드는 다음과 같다.\n```rust\n{fixed}```\n이제 저장하자."
+        );
+        assert!(!detect_thinking_loop(&fenced), "코드 블록 Rust 초안 3회");
+
+        // 4. 같은 틀의 문장 12줄 (파일 이름만 다름)
+        let mut same_template = String::from("프로젝트 구조를 파악하자. 각 컴포넌트 파일을 순서대로 확인해야 한다.\n");
+        let names = ["Header", "Footer", "Sidebar", "Card", "Modal", "Button", "Input", "Table", "Form", "List", "Tabs", "Menu"];
+        for n in names {
+            same_template.push_str(&format!("- src/components/{n}.tsx 파일은 props 타입을 export 하지 않는다\n"));
+        }
+        same_template.push_str("모두 같은 문제이므로 각 파일에 export type Props를 추가하자.");
+        assert!(same_template.chars().count() >= 600);
+        assert!(!detect_thinking_loop(&same_template), "파일별 같은 틀 목록 12줄");
+
+        // 5. 서로 다른 파일 이름 12개 목록
+        let mut file_list = String::from("수정할 파일 목록을 정리하자. 아래 파일을 차례로 읽고 import 경로를 고쳐야 한다. 경로 별칭 @/ 를 상대 경로로 바꾸는 작업이다.\n");
+        for (i, n) in names.iter().enumerate() {
+            file_list.push_str(&format!("{}. src/components/{}/{}.tsx (import 경로 확인)\n", i + 1, n.to_lowercase(), n));
+        }
+        file_list.push_str("목록이 길지만 한 번에 read_file로 함께 읽으면 된다. 그 다음 modify_file로 고치자.");
+        assert!(file_list.chars().count() >= 600);
+        assert!(!detect_thinking_loop(&file_list), "파일 이름 12개 목록");
+
+        // 6. 사고 속 마크다운 표 초안 (같은 행 반복)
+        let mut table = String::from("보고서 표를 먼저 구상하자. 자료에 수치가 없는 항목은 지어내지 말고 확인 필요로 적는다.\n| 이름 | 상태 | 비고 |\n|---|---|---|\n");
+        for _ in 0..20 {
+            table.push_str("| 미정 | 확인 필요 | 자료에 수치가 없어 확인이 필요합니다 |\n");
+        }
+        table.push_str("이 표를 report.md에 저장하면 된다.");
+        assert!(table.chars().count() >= 600);
+        assert!(!detect_thinking_loop(&table), "사고 속 표 초안");
+    }
+
+    /// 코드 초안 뒤에 이어진 의역 루프, 끝없이 되풀이되는 코드 줄은 여전히 잡는다.
+    #[test]
+    fn thinking_loop_still_catches_loops_around_code() {
+        let after_code = format!(
+            "먼저 수정안을 적어 보자.\n```js\nconst ok = data.ok;\nif (!ok) {{\n  showError();\n}}\n```\n{}",
+            paraphrased_thinking_loop_sample()
+        );
+        assert!(detect_thinking_loop(&after_code));
+        let degenerate = "            <td className=\"px-4 py-2 border border-stone-300\">{r.value}</td>\n".repeat(80);
+        assert!(detect_thinking_loop(&degenerate), "같은 코드 줄을 기계적으로 수십 번 되풀이하면 루프");
+    }
+
+    #[test]
+    fn repetition_loop_ignores_tables_and_code_but_not_endless_rows() {
+        let mut table = String::from("| 이름 | 상태 | 비고 |\n|---|---|---|\n");
+        for _ in 0..20 {
+            table.push_str("| 미정 | 확인 필요 | 자료에 수치가 없어 확인이 필요합니다 |\n");
+        }
+        assert!(!detect_repetition_loop(&table), "같은 행 20개 표는 정상 답변");
+        let code_block = "```python\nprint('결과를 확인합니다: 항목별 합계와 평균을 출력합니다')\n```\n";
+        let answer = format!("세 경우 모두 같은 코드로 확인했습니다.\n{}", code_block.repeat(4));
+        assert!(!detect_repetition_loop(&answer), "같은 코드 블록이 몇 번 나와도 정상");
+        let endless = "| 미정 | 확인 필요 | 자료에 수치가 없어 확인이 필요합니다 |\n".repeat(80);
+        assert!(detect_repetition_loop(&endless), "끝 2,000자 전체가 같은 행이면 퇴화 반복");
     }
 
     #[tokio::test]
