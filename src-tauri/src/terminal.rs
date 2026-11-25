@@ -21,10 +21,17 @@ use std::time::{Duration, Instant};
 pub const TERMINAL_BUFFER_BYTES: usize = 256 * 1024;
 /// 동시에 열 수 있는 터미널 세션 수
 pub const TERMINAL_MAX_SESSIONS: usize = 8;
-/// 출력을 모아 보내는 간격
+/// 화면으로 출력 이벤트를 보내는 최소 간격(모아 보내기)
 pub const OUTPUT_BATCH: Duration = Duration::from_millis(16);
-/// 한 번에 보내는 출력의 최대 크기 (넘으면 기다리지 않고 바로 보낸다)
-const OUTPUT_BATCH_MAX_BYTES: usize = 64 * 1024;
+/// 이벤트 하나에 싣는 출력의 최대 크기 (속도 제한의 한 번 몫 상한이기도 하다)
+pub const OUTPUT_BATCH_MAX_BYTES: usize = 64 * 1024;
+/// 화면으로 보내는 출력 속도 상한(바이트/초). 넘치는 출력은 화면 대기열에 쌓인다.
+pub const UI_MAX_BYTES_PER_SEC: usize = 2 * 1024 * 1024;
+/// 화면으로 아직 보내지 못한 출력의 상한. 넘으면 오래된 것부터 버리고 생략 표시를 한 줄 넣는다
+/// (링 버퍼·`server_logs`에는 그대로 남는다).
+pub const UI_PENDING_MAX_BYTES: usize = 256 * 1024;
+/// 읽기 스레드 → 모아 보내기 스레드 대기열 길이(읽기 한 번 16 KB). 가득 차면 읽기가 멈춰 PTY가 출력을 늦춘다.
+const READ_QUEUE_CHUNKS: usize = 64;
 
 pub const OUTPUT_EVENT: &str = "anylm-terminal-output";
 pub const EXIT_EVENT: &str = "anylm-terminal-exit";
@@ -314,6 +321,111 @@ impl Utf8Decoder {
     }
 }
 
+/// 버린 화면 출력 자리에 넣는 표시 (화면 쪽 `outputFlow.ts`와 같은 문구).
+pub fn dropped_marker(bytes: usize) -> String {
+    format!("\r\n[출력 {bytes}바이트 생략]\r\n")
+}
+
+/// 화면으로 보낼 출력의 대기열과 속도 제한(검토 C-I2). 출력이 아무리 많아도
+/// 이벤트는 `OUTPUT_BATCH`마다 하나, 초당 `UI_MAX_BYTES_PER_SEC`까지만 나가고,
+/// 기다리는 출력은 `UI_PENDING_MAX_BYTES`를 넘지 않는다(넘친 앞부분은 버리고 크기만 센다).
+#[derive(Debug)]
+pub struct OutputThrottle {
+    pending: String,
+    dropped: usize,
+    tokens: f64,
+    refilled_at: Option<Instant>,
+    flushed_at: Option<Instant>,
+    max_pending: usize,
+    rate: f64,
+    burst: f64,
+}
+
+impl Default for OutputThrottle {
+    fn default() -> Self {
+        Self::new(UI_PENDING_MAX_BYTES, UI_MAX_BYTES_PER_SEC, OUTPUT_BATCH_MAX_BYTES)
+    }
+}
+
+impl OutputThrottle {
+    pub fn new(max_pending: usize, bytes_per_sec: usize, burst: usize) -> Self {
+        Self {
+            pending: String::new(),
+            dropped: 0,
+            tokens: burst as f64,
+            refilled_at: None,
+            flushed_at: None,
+            max_pending,
+            rate: bytes_per_sec as f64,
+            burst: burst as f64,
+        }
+    }
+
+    pub fn pending_bytes(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub fn is_idle(&self) -> bool {
+        self.pending.is_empty() && self.dropped == 0
+    }
+
+    pub fn push(&mut self, data: &str) {
+        self.pending.push_str(data);
+        let over = self.pending.len().saturating_sub(self.max_pending);
+        if over == 0 {
+            return;
+        }
+        // 글자 중간에서 자르지 않고, 가까운 줄바꿈이 있으면 그 뒤에서 잘라 색상 순서 조각을 덜 남긴다.
+        let mut cut = over;
+        while !self.pending.is_char_boundary(cut) {
+            cut += 1;
+        }
+        let near = (cut + 4096).min(self.pending.len());
+        if let Some(nl) = self.pending.as_bytes()[cut..near].iter().position(|&b| b == b'\n') {
+            cut += nl + 1;
+        }
+        self.dropped += cut;
+        self.pending.drain(..cut);
+    }
+
+    /// 다음에 `take`를 해 볼 시각. 보낼 것이 없으면 `None`.
+    pub fn next_flush(&self, now: Instant) -> Option<Instant> {
+        if self.is_idle() {
+            return None;
+        }
+        Some(self.flushed_at.map_or(now, |t| (t + OUTPUT_BATCH).max(now)))
+    }
+
+    /// 지금 화면으로 보낼 몫. 간격·속도 제한에 걸리면 `None`. `force`면 제한 없이 남은 것을 모두 낸다
+    /// (세션이 끝날 때·스냅샷 직전).
+    pub fn take(&mut self, now: Instant, force: bool) -> Option<String> {
+        if self.is_idle() {
+            return None;
+        }
+        if !force && self.flushed_at.is_some_and(|t| now < t + OUTPUT_BATCH) {
+            return None;
+        }
+        if let Some(t) = self.refilled_at {
+            self.tokens = (self.tokens + now.saturating_duration_since(t).as_secs_f64() * self.rate).min(self.burst);
+        }
+        self.refilled_at = Some(now);
+        let mut n = if force { self.pending.len() } else { (self.tokens.max(0.0) as usize).min(self.pending.len()) };
+        while !self.pending.is_char_boundary(n) {
+            n -= 1;
+        }
+        if n == 0 && self.dropped == 0 {
+            // 한 글자 몫도 안 모였다: 다음 간격에 다시 본다(바로 다시 깨지 않게).
+            self.flushed_at = Some(now);
+            return None;
+        }
+        let mut out = if self.dropped > 0 { dropped_marker(std::mem::take(&mut self.dropped)) } else { String::new() };
+        out.extend(self.pending.drain(..n));
+        self.tokens -= n as f64;
+        self.flushed_at = Some(now);
+        Some(out)
+    }
+}
+
 /// ANSI 제어 순서(CSI·OSC·그 밖의 ESC 순서)와 제어 문자를 지운다. 줄바꿈과 탭은 남긴다.
 pub fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -564,9 +676,40 @@ fn taskkill_tree(pid: u32) {
 // 세션
 // ---------------------------------------------------------------------------
 
-struct OutputLog {
+/// 세션 출력: 링 버퍼(전부)와 화면 대기열(속도 제한). 둘을 한 잠금 안에서 다뤄 스냅샷과 이벤트 번호가 어긋나지 않게 한다.
+pub(crate) struct OutputLog {
     ring: RingBuffer,
+    /// 화면으로 보낸 출력 이벤트 번호(1부터). 스냅샷의 링 버퍼는 이 번호까지의 출력을 모두 담는다.
     seq: u64,
+    ui: OutputThrottle,
+}
+
+impl OutputLog {
+    pub(crate) fn new(ring_cap: usize, ui: OutputThrottle) -> Self {
+        Self { ring: RingBuffer::new(ring_cap), seq: 0, ui }
+    }
+
+    /// 받은 출력은 링 버퍼에 모두 넣고 화면 대기열에도 넣는다.
+    pub(crate) fn receive(&mut self, data: &str) {
+        self.ring.push(data.as_bytes());
+        self.ui.push(data);
+    }
+
+    /// 보낼 몫이 있으면 이벤트 하나로 보낸다.
+    pub(crate) fn flush(&mut self, id: &str, sink: &EventSink, now: Instant, force: bool) -> bool {
+        let Some(data) = self.ui.take(now, force) else { return false };
+        self.seq += 1;
+        sink(TerminalEvent::Output(OutputPayload { id: id.to_string(), data, seq: self.seq }));
+        true
+    }
+
+    pub(crate) fn next_flush(&self, now: Instant) -> Option<Instant> {
+        self.ui.next_flush(now)
+    }
+
+    pub(crate) fn pending_bytes(&self) -> usize {
+        self.ui.pending_bytes()
+    }
 }
 
 struct Session {
@@ -735,7 +878,7 @@ impl TerminalManager {
             input: Mutex::new(Some(input_tx)),
             master: Mutex::new(Some(pair.master)),
             killer: Mutex::new(killer),
-            output: Mutex::new(OutputLog { ring: RingBuffer::new(TERMINAL_BUFFER_BYTES), seq: 0 }),
+            output: Mutex::new(OutputLog::new(TERMINAL_BUFFER_BYTES, OutputThrottle::default())),
             job,
         });
         // 스레드를 하나라도 못 띄우면 세션을 지도에 넣지 않고 프로세스 트리를 끝낸다.
@@ -748,9 +891,9 @@ impl TerminalManager {
         // 0) 쓰기: 입력을 순서대로 PTY에
         spawn_writer(writer, input_rx).map_err(abort)?;
         // 1) 읽기: 바이트 → UTF-8 글자
-        let (tx, rx) = mpsc::channel::<String>();
+        let (tx, rx) = mpsc::sync_channel::<String>(READ_QUEUE_CHUNKS);
         spawn_reader(reader, tx).map_err(abort)?;
-        // 2) 모아 보내기: 16ms마다 링 버퍼에 넣고 이벤트로
+        // 2) 모아 보내기: 받는 대로 링 버퍼에 넣고, 화면에는 16ms마다·속도 제한 안에서 이벤트로
         let batcher = {
             let session = session.clone();
             let sink = self.sink.clone();
@@ -851,7 +994,10 @@ impl TerminalManager {
     pub fn snapshot(&self, id: &str) -> Result<TerminalSnapshot, String> {
         let s = self.get(id)?;
         let (running, exit_code) = s.info.lock().map(|i| (i.running, i.exit_code)).map_err(|e| e.to_string())?;
-        let out = s.output.lock().map_err(|e| e.to_string())?;
+        let mut out = s.output.lock().map_err(|e| e.to_string())?;
+        // 링 버퍼에는 있지만 아직 화면으로 보내지 않은 출력을 먼저 이벤트로 낸다. 이 화면은 스냅샷 번호
+        // 이하라 버리고(스냅샷에 이미 있다), 같은 세션을 보고 있던 다른 화면은 이어 쓴다.
+        out.flush(id, &self.sink, Instant::now(), true);
         Ok(TerminalSnapshot { data: out.ring.text(), seq: out.seq, running, exit_code })
     }
 
@@ -896,7 +1042,7 @@ fn spawn_writer(mut writer: Box<dyn Write + Send>, rx: mpsc::Receiver<Vec<u8>>) 
     Ok(())
 }
 
-fn spawn_reader(mut reader: Box<dyn Read + Send>, tx: mpsc::Sender<String>) -> std::io::Result<()> {
+fn spawn_reader(mut reader: Box<dyn Read + Send>, tx: mpsc::SyncSender<String>) -> std::io::Result<()> {
     std::thread::Builder::new().name("terminal-read".into()).spawn(move || {
         let mut decoder = Utf8Decoder::default();
         let mut buf = vec![0u8; 16 * 1024];
@@ -922,47 +1068,38 @@ fn spawn_reader(mut reader: Box<dyn Read + Send>, tx: mpsc::Sender<String>) -> s
 fn run_batcher(id: &str, session: &Session, sink: &EventSink, rx: mpsc::Receiver<String>) {
     let mut seen_bytes = 0usize;
     let mut dsr_answered = false;
-    while let Ok(first) = rx.recv() {
-        let mut batch = first;
-        let deadline = Instant::now() + OUTPUT_BATCH;
-        let mut disconnected = false;
-        while batch.len() < OUTPUT_BATCH_MAX_BYTES {
-            let now = Instant::now();
-            if now >= deadline {
-                break;
-            }
-            match rx.recv_timeout(deadline - now) {
-                Ok(more) => batch.push_str(&more),
-                Err(mpsc::RecvTimeoutError::Timeout) => break,
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    disconnected = true;
-                    break;
+    loop {
+        // 화면으로 보낼 것이 남아 있으면 다음 보낼 때까지만 기다린다.
+        let next = session.output.lock().ok().and_then(|o| o.next_flush(Instant::now()));
+        let received = match next {
+            None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+            Some(at) => rx.recv_timeout(at.saturating_duration_since(Instant::now())),
+        };
+        let disconnected = match received {
+            Ok(mut chunk) => {
+                if !dsr_answered && seen_bytes < DSR_WINDOW_BYTES {
+                    if let Some(pos) = chunk.find(DSR_REQUEST) {
+                        chunk.replace_range(pos..pos + DSR_REQUEST.len(), "");
+                        let _ = session.write(DSR_REPLY);
+                        dsr_answered = true;
+                    }
                 }
+                seen_bytes += chunk.len();
+                if let Ok(mut out) = session.output.lock() {
+                    out.receive(&chunk);
+                }
+                false
             }
-        }
-        if !dsr_answered && seen_bytes < DSR_WINDOW_BYTES {
-            if let Some(pos) = batch.find(DSR_REQUEST) {
-                batch.replace_range(pos..pos + DSR_REQUEST.len(), "");
-                let _ = session.write(DSR_REPLY);
-                dsr_answered = true;
-            }
-        }
-        seen_bytes += batch.len();
-        if !batch.is_empty() {
-            emit_output(id, session, sink, batch);
+            Err(mpsc::RecvTimeoutError::Timeout) => false,
+            Err(mpsc::RecvTimeoutError::Disconnected) => true,
+        };
+        if let Ok(mut out) = session.output.lock() {
+            // 끝날 때는 남은 출력(대기열 상한 이하)을 모두 보낸다.
+            out.flush(id, sink, Instant::now(), disconnected);
         }
         if disconnected {
             break;
         }
-    }
-}
-
-/// 링 버퍼에 넣고 이벤트를 보내는 일을 한 잠금 안에서 한다(스냅샷과 이벤트 번호가 어긋나지 않게).
-fn emit_output(id: &str, session: &Session, sink: &EventSink, data: String) {
-    if let Ok(mut out) = session.output.lock() {
-        out.ring.push(data.as_bytes());
-        out.seq += 1;
-        sink(TerminalEvent::Output(OutputPayload { id: id.to_string(), data, seq: out.seq }));
     }
 }
 

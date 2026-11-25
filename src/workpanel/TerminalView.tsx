@@ -6,6 +6,7 @@ import "@xterm/xterm/css/xterm.css";
 import { TerminalAPI, type TerminalOutput } from "./terminalApi";
 import { canTakeFocus, terminalKeyAction } from "./panelState";
 import { terminalTheme } from "./xtermTheme";
+import { OutputFlow } from "./outputFlow";
 
 export const TERMINAL_SCROLLBACK = 5000;
 /** 크기 변경을 모았다가 백엔드에 알리는 간격 */
@@ -96,6 +97,8 @@ export function TerminalView({ sessionId, active, isDark, onLink }: TerminalView
       void TerminalAPI.write(sessionId, data).catch(() => {});
     });
 
+    // 출력이 쏟아져도 xterm 쓰기 버퍼가 끝없이 커지지 않게 쓰기 완료 콜백으로 흐름을 조절한다.
+    const flow = new OutputFlow((data, done) => term.write(data, done));
     // 스냅샷을 받기 전에 온 이벤트는 모아 두었다가 스냅샷 뒤의 것만 쓴다.
     let lastSeq: number | null = null;
     const queued: TerminalOutput[] = [];
@@ -107,7 +110,7 @@ export function TerminalView({ sessionId, active, isDark, onLink }: TerminalView
           queued.push(p);
         } else if (p.seq > lastSeq) {
           lastSeq = p.seq;
-          term.write(p.data);
+          flow.push(p.data);
         }
       });
       if (disposed) {
@@ -131,7 +134,7 @@ export function TerminalView({ sessionId, active, isDark, onLink }: TerminalView
       for (const p of queued) {
         if (p.seq > (lastSeq ?? 0)) {
           lastSeq = p.seq;
-          term.write(p.data);
+          flow.push(p.data);
         }
       }
       queued.length = 0;

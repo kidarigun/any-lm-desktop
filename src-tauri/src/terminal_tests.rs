@@ -181,6 +181,106 @@ fn ninth_session_is_refused_with_a_reason() {
 }
 
 // ---------------------------------------------------------------------------
+// 화면 출력 속도 제한 (검토 C-I2)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dropped_marker_text() {
+    assert_eq!(dropped_marker(1234), "\r\n[출력 1234바이트 생략]\r\n");
+}
+
+#[test]
+fn throttle_drops_oldest_at_a_line_and_char_boundary() {
+    let mut t = OutputThrottle::new(16, 1_000_000, 1024);
+    t.push("가나다라\n0123456789ab\n");
+    // 앞의 "가나다라\n"(13바이트)을 버리고 다음 줄부터 남긴다.
+    assert!(t.pending_bytes() <= 16);
+    let now = Instant::now();
+    let out = t.take(now, false).unwrap();
+    assert_eq!(out, format!("{}0123456789ab\n", dropped_marker(13)));
+    assert!(t.is_idle());
+    assert_eq!(t.take(now + Duration::from_secs(1), false), None);
+}
+
+#[test]
+fn throttle_flushes_at_most_every_batch_interval() {
+    let mut t = OutputThrottle::default();
+    let start = Instant::now();
+    t.push("a");
+    assert_eq!(t.take(start, false).as_deref(), Some("a"), "쉬고 있던 첫 출력은 바로 보낸다");
+    t.push("b");
+    assert_eq!(t.take(start + Duration::from_millis(5), false), None);
+    assert_eq!(t.next_flush(start + Duration::from_millis(5)), Some(start + OUTPUT_BATCH));
+    assert_eq!(t.take(start + OUTPUT_BATCH, false).as_deref(), Some("b"));
+    assert_eq!(t.next_flush(start + OUTPUT_BATCH), None);
+    // 강제(종료·스냅샷)면 간격을 기다리지 않는다.
+    t.push("c");
+    assert_eq!(t.take(start + OUTPUT_BATCH, true).as_deref(), Some("c"));
+}
+
+/// 20 MB를 초당 10 MB 속도로 쏟아부어도 화면 대기열·이벤트 수·보낸 양이 상한 안이고, 링 버퍼는 끝까지 받는다.
+#[test]
+fn flood_through_the_batcher_logic_stays_bounded() {
+    const TOTAL: usize = 20 * 1024 * 1024;
+    const CHUNK: usize = 16 * 1024;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink_events = events.clone();
+    let sink: EventSink = Arc::new(move |e| sink_events.lock().unwrap().push(e));
+    let mut log = OutputLog::new(TERMINAL_BUFFER_BYTES, OutputThrottle::default());
+    let start = Instant::now();
+    let mut now = start;
+    // 10 MB/s: 16 KB마다 1.6 ms
+    let step = Duration::from_micros(1600);
+    let line = "0123456789abcdefghijklmnopqrstuvwxyz가나다라마바사\r\n";
+    let mut chunk = String::new();
+    while chunk.len() + line.len() <= CHUNK {
+        chunk.push_str(line);
+    }
+    let mut sent = 0usize;
+    let mut max_pending = 0usize;
+    let mut i = 0usize;
+    while sent < TOTAL {
+        let mut c = chunk.clone();
+        if sent + c.len() >= TOTAL {
+            c.push_str("anylm-flood-end\r\n");
+        }
+        sent += c.len();
+        log.receive(&c);
+        max_pending = max_pending.max(log.pending_bytes());
+        log.flush("t", &sink, now, false);
+        i += 1;
+        now = start + step * i as u32;
+    }
+    let elapsed = now - start;
+    // 남은 것을 보낸다(세션 종료).
+    log.flush("t", &sink, now, true);
+
+    let ev = events.lock().unwrap();
+    let outputs: Vec<&OutputPayload> = ev
+        .iter()
+        .filter_map(|e| match e {
+            TerminalEvent::Output(p) => Some(p),
+            _ => None,
+        })
+        .collect();
+    assert!(max_pending <= UI_PENDING_MAX_BYTES, "대기열 {max_pending}");
+    // 이벤트는 16 ms마다 하나를 넘지 않는다(+ 마지막 강제 보내기).
+    let max_events = (elapsed.as_millis() / OUTPUT_BATCH.as_millis()) as usize + 2;
+    assert!(outputs.len() <= max_events, "이벤트 {}개 > {max_events}", outputs.len());
+    // 화면으로 간 양은 속도 상한 × 시간 + 한 번 몫 + 마지막 대기열 이하
+    let delivered: usize = outputs.iter().map(|p| p.data.len()).sum();
+    let limit = (UI_MAX_BYTES_PER_SEC as f64 * elapsed.as_secs_f64()) as usize + OUTPUT_BATCH_MAX_BYTES + UI_PENDING_MAX_BYTES + 64 * 1024;
+    assert!(delivered <= limit, "{delivered} > {limit}");
+    assert!(delivered < TOTAL / 2, "넘친 출력은 화면으로 가지 않는다: {delivered}");
+    assert!(outputs.iter().any(|p| p.data.contains("바이트 생략]")), "생략 표시가 있어야 한다");
+    assert!(outputs.last().unwrap().data.contains("anylm-flood-end"), "마지막 출력은 화면에 남는다");
+    assert_eq!(outputs.iter().map(|p| p.seq).collect::<Vec<_>>(), (1..=outputs.len() as u64).collect::<Vec<_>>());
+    // 링 버퍼는 생략 없이 마지막까지 받는다.
+    let ring = log.ring.text();
+    assert!(ring.ends_with("anylm-flood-end\r\n") && !ring.contains("바이트 생략]"));
+}
+
+// ---------------------------------------------------------------------------
 // 실제 ConPTY
 // ---------------------------------------------------------------------------
 
@@ -449,4 +549,25 @@ fn closing_a_session_also_kills_orphaned_grandchildren() {
     let ping = ping.unwrap();
     m.close(&info.id).unwrap();
     assert!(wait_until(Duration::from_secs(10), || !alive(ping)), "orphan survived close");
+}
+
+/// 실제 PTY로 많은 출력을 내도 화면 이벤트가 상한 안이다. 느려서 기본으로는 돌리지 않는다
+/// (`cargo test --lib terminal_flood -- --ignored`).
+#[cfg(windows)]
+#[test]
+#[ignore]
+fn terminal_flood_through_a_real_pty_is_rate_limited() {
+    let (m, ev) = manager();
+    let started = Instant::now();
+    let info = open(&m, Shell::PowerShell, Some("1..200000 | % { $_ }; 'anylm-flood-done'"));
+    assert!(wait_until(Duration::from_secs(300), || ev.exit(&info.id).is_some()), "no exit event");
+    let elapsed = started.elapsed();
+    let seqs = ev.seqs(&info.id);
+    let max_events = (elapsed.as_millis() / OUTPUT_BATCH.as_millis()) as usize + 4;
+    assert!(seqs.len() <= max_events, "{} > {max_events}", seqs.len());
+    let shown = ev.output(&info.id);
+    let limit = (UI_MAX_BYTES_PER_SEC as f64 * elapsed.as_secs_f64()) as usize + OUTPUT_BATCH_MAX_BYTES + UI_PENDING_MAX_BYTES + 64 * 1024;
+    assert!(shown.len() <= limit, "{} > {limit}", shown.len());
+    assert!(m.text(&info.id).unwrap().contains("anylm-flood-done"));
+    m.close(&info.id).unwrap();
 }
