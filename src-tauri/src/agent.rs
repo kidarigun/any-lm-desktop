@@ -1328,17 +1328,21 @@ fn compact_tool_arguments(args: &str, cap: usize) -> Option<String> {
 /// 보낼 메시지를 줄인다 (원본은 그대로 둔다).
 /// `turn_start`는 이번 턴의 실제 사용자 메시지 위치(턴 시작 때 한 번 정한다). 그 뒤에 앱이 넣는 이어 쓰기 요청·빈 답 재요청은
 /// 사용자 역할이지만 턴 경계가 아니다.
-/// - 1단계: 지난 턴(`turn_start` 앞)의 큰 도구 인자를 500자 이하 요약으로, 지난 턴 도구 결과 중 마지막 4개를 뺀 나머지를 3천 자로.
-///   이번 턴의 도구 호출·결과는 건드리지 않는다(방금 읽은 파일이 잘려 다시 읽는 일과 매 라운드 앞부분이 바뀌어 캐시가 깨지는 일을 막는다).
-/// - 2단계(컨텍스트 초과 오류 뒤): 최근 2개를 뺀 도구 호출 인자·결과를 줄이고, 최근 8개를 뺀 대화 글을 2천 자로
-/// - 3단계(긴급 추가 압축): 최근 1개를 뺀 도구 호출 인자·결과를 줄이고, 최근 4개를 뺀 대화 글을 4백 자로
+/// - 1단계(예산 초과 때 자동): 지난 턴(`turn_start` 앞)의 큰 도구 인자를 500자 이하 요약으로, 지난 턴 도구 결과 중 마지막 4개를 뺀
+///   나머지를 3천 자로. 이번 턴의 도구 호출·결과는 건드리지 않는다(방금 읽은 파일이 잘려 다시 읽는 일과 매 라운드 앞부분이 바뀌어
+///   캐시가 깨지는 일을 막는다).
+/// - 2단계(첫 컨텍스트 초과 오류 뒤): 1단계 규칙을 이번 턴 도구 결과까지 넓힌다(턴 전체에서 마지막 4개를 뺀 결과를 3천 자로).
+///   이번 턴 도구 인자와 대화 글은 그대로 둔다.
+/// - 3단계: 최근 2개를 뺀 도구 호출 인자·결과를 줄이고, 최근 8개를 뺀 대화 글을 2천 자로
+/// - 4단계(긴급 추가 압축): 최근 1개를 뺀 도구 호출 인자·결과를 줄이고, 최근 4개를 뺀 대화 글을 4백 자로
+/// 4단계 전까지는 이번 턴의 사용자 메시지(`turn_start`)를 줄이지 않는다(무엇을 하라는지 잃지 않게).
 fn compact_messages(msgs: &[Value], level: u8, turn_start: usize) -> Vec<Value> {
     if level == 0 {
         return msgs.to_vec();
     }
     let (keep_tools, tool_cap, keep_msgs, msg_cap) = match level {
-        1 => (4, 3_000, 0, usize::MAX),
-        2 => (2, 800, 8, 2_000),
+        1 | 2 => (4, 3_000, 0, usize::MAX),
+        3 => (2, 800, 8, 2_000),
         _ => (1, 300, 4, 400),
     };
     // 1단계는 지난 턴 도구 결과만 줄일 대상으로 본다. 그 범위는 턴 동안 바뀌지 않아 요청 앞부분이 라운드마다 같다.
@@ -1365,7 +1369,7 @@ fn compact_messages(msgs: &[Value], level: u8, turn_start: usize) -> Vec<Value> 
                 return m.clone();
             }
             let mut next = m.clone();
-            let shrink_args = i < turn_start || (level >= 2 && i < earliest_recent_tool);
+            let shrink_args = i < turn_start || (level >= 3 && i < earliest_recent_tool);
             if role == "assistant" && shrink_args {
                 if let Some(calls) = next.get_mut("tool_calls").and_then(Value::as_array_mut) {
                     for call in calls {
@@ -1383,7 +1387,7 @@ fn compact_messages(msgs: &[Value], level: u8, turn_start: usize) -> Vec<Value> 
             }
             let cap = match role {
                 "tool" if (level >= 2 || i < turn_start) && !recent_tools.contains(&i) => Some(tool_cap),
-                "user" | "assistant" if i < old_before => Some(msg_cap),
+                "user" | "assistant" if i < old_before && !(i == turn_start && level < COMPACT_MAX_LEVEL) => Some(msg_cap),
                 _ => None,
             };
             if let (Some(cap), Some(text)) = (cap, next.get("content").and_then(|c| c.as_str())) {
@@ -1394,6 +1398,28 @@ fn compact_messages(msgs: &[Value], level: u8, turn_start: usize) -> Vec<Value> 
             next
         })
         .collect()
+}
+
+/// 가장 강한 압축 단계
+const COMPACT_MAX_LEVEL: u8 = 4;
+/// 컨텍스트 초과로 올린 압축 단계를 한 단계 낮춰도 요청이 min(예산, 초과가 났던 요청 크기)의 이 비율 아래면 낮춘다.
+const COMPACT_DROP_BACK_RATIO: f64 = 0.5;
+
+/// 컨텍스트 초과 오류 뒤에 쓸 압축 단계. 처음 초과면 2단계부터, 그 뒤로는 한 단계씩 올리되, 요청이 실제로 줄어드는
+/// 가장 낮은 단계를 고른다(도구 결과가 없어 2단계가 아무것도 줄이지 못하면 3단계로). 더 줄일 수 없으면 `None`.
+fn next_compact_level(msgs: &[Value], sent_level: u8, turn_start: usize, sent_chars: usize) -> Option<u8> {
+    let first = (sent_level + 1).max(2);
+    (first..=COMPACT_MAX_LEVEL).find(|&l| total_chars(&compact_messages(msgs, l, turn_start)) < sent_chars)
+}
+
+/// 컨텍스트 초과로 올려 둔 압축 단계를, 한 단계 낮춘 요청이 `limit`(min(예산, 초과가 났던 요청 크기))의
+/// `COMPACT_DROP_BACK_RATIO` 아래인 동안 낮춘다. `auto_level`(예산 초과 때의 자동 1단계)보다는 낮추지 않는다.
+fn drop_back_compact_level(msgs: &[Value], mut level: u8, auto_level: u8, turn_start: usize, limit: usize) -> u8 {
+    let threshold = (limit as f64 * COMPACT_DROP_BACK_RATIO) as usize;
+    while level > auto_level && total_chars(&compact_messages(msgs, level - 1, turn_start)) < threshold {
+        level -= 1;
+    }
+    level
 }
 
 const MAX_CONSECUTIVE_ERROR_ROUNDS: usize = 4;
@@ -1440,6 +1466,17 @@ struct ToolLoopGuard {
     consecutive_error_rounds: usize,
     error_call_counts: std::collections::HashMap<(String, String), usize>,
     read_call_counts: std::collections::HashMap<(String, String), usize>,
+    /// 마지막 파일 변경 뒤에 이미 성공한 run_command·run_python 호출. 같은 실행이 또 성공해도(`ls` 되풀이 등) 진전으로 보지 않는다.
+    succeeded_runs: std::collections::HashSet<(String, String)>,
+}
+
+/// 프로젝트 파일을 바꾸는 도구. 성공하면 같은 오류·같은 조회도 결과가 달라질 수 있다.
+fn is_file_mutating_tool(name: &str) -> bool {
+    matches!(name, "write_file" | "modify_file" | "delete_path")
+}
+
+fn is_run_tool(name: &str) -> bool {
+    matches!(name, "run_command" | "run_python")
 }
 
 impl ToolLoopGuard {
@@ -1452,15 +1489,38 @@ impl ToolLoopGuard {
         if executed.is_empty() {
             return ToolLoopAction::Continue;
         }
-        // 상태 변경 작업이 성공하면 파일·로그 내용이 달라졌을 수 있으므로 읽기 반복 횟수와 같은 오류 횟수를 초기화한다
-        // (스크립트를 고친 뒤 다시 실행해 또 실패한 것은 같은 오류의 되풀이가 아니다).
-        if executed.iter().any(|r| r.status == "completed" && is_state_changing_tool(&r.tool_name)) {
+        // 진전으로 보는 성공(결정 0017 갱신):
+        // - 파일 변경(write_file·modify_file·delete_path): 읽기 반복 횟수, 같은 오류 횟수, 성공한 실행 목록을 모두 비운다
+        //   (스크립트를 고친 뒤 다시 실행해 또 실패한 것은 같은 오류의 되풀이가 아니다).
+        // - 마지막 파일 변경 뒤 처음 성공한 run_command·run_python(예: 패키지 설치): 읽기 반복과 같은 오류 횟수를 비운다.
+        //   같은 실행이 또 성공한 것(`ls` 되풀이)은 진전이 아니라 아무것도 비우지 않는다.
+        // - 그 밖의 상태 변경 도구(서버 시작·중지, MCP): 읽기 반복 횟수만 비운다.
+        let completed: Vec<&ToolExecutionRecord> = executed.iter().copied().filter(|r| r.status == "completed").collect();
+        let mut progressed = false;
+        if completed.iter().any(|r| is_file_mutating_tool(&r.tool_name)) {
             self.read_call_counts.clear();
             self.error_call_counts.clear();
+            self.succeeded_runs.clear();
+            progressed = true;
+        }
+        let mut new_run = false;
+        for r in completed.iter().filter(|r| is_run_tool(&r.tool_name)) {
+            let key = canonical_tool_key(&r.tool_name, &r.arguments_json);
+            self.error_call_counts.remove(&key);
+            new_run |= self.succeeded_runs.insert(key);
+        }
+        if new_run {
+            self.read_call_counts.clear();
+            self.error_call_counts.clear();
+            progressed = true;
+        }
+        if completed.iter().any(|r| is_state_changing_tool(&r.tool_name) && !is_run_tool(&r.tool_name)) {
+            self.read_call_counts.clear();
         }
         if executed.iter().all(|r| r.status == "error") {
             self.consecutive_error_rounds += 1;
-        } else if executed.iter().any(|r| r.status == "completed") {
+        } else if progressed || completed.iter().any(|r| !is_run_tool(&r.tool_name)) {
+            // 같은 실행의 되풀이 성공만 있는 라운드는 연속 오류 횟수를 되돌리지 않는다.
             self.consecutive_error_rounds = 0;
         }
 
@@ -1538,23 +1598,39 @@ const CHAT_THINKING_PRESENCE_PENALTY: f64 = 0.5;
 const LOOP_RETRY_PRESENCE_PENALTY: f64 = 1.0;
 /// 한 턴에서 사고 반복 때문에 라운드를 다시 시도하는 최대 횟수(라운드마다 최대 2번: 반복 억제 → 추론 끄기)
 const MAX_THINKING_LOOP_RETRIES: usize = 4;
+/// 한 라운드(길이 제한으로 이어 받은 라운드 포함)의 추론이 이 글자 수를 넘으면, 탐지기가 못 잡은 루프로 보고
+/// 반복 억제 → 추론 끄기 → 멈춤 순서를 밟는다. 최소 40,000자, 컨텍스트 3개 분량(토큰 × 1.5자 × 3) 중 큰 쪽.
+const REASONING_HARD_CAP_MIN_CHARS: usize = 40_000;
+const REASONING_HARD_CAP_CONTEXTS: f64 = 3.0;
+
+fn reasoning_hard_cap(context_length: u32) -> usize {
+    REASONING_HARD_CAP_MIN_CHARS
+        .max((context_length as f64 * crate::context_budget::CHARS_PER_TOKEN * REASONING_HARD_CAP_CONTEXTS) as usize)
+}
 
 /// 요청에 넣을 `presence_penalty`를 정한다(결정 0017 갱신).
-/// - 추론 선택지가 없거나 추론을 끈 요청(추론 끄기 재시도·요약 포함)에는 넣지 않는다.
-/// - 사고 반복 직후의 재시도 라운드(`loop_retry`)는 `LOOP_RETRY_PRESENCE_PENALTY`.
-/// - 프로젝트·코딩 화면은 넣지 않는다(도구 JSON 인자, 파일 내용, 표의 `"` `,` `|` 괄호가 벌점을 받아 깨지지 않게).
-/// - 일반 채팅은 `CHAT_THINKING_PRESENCE_PENALTY`.
-fn thinking_presence_penalty(reasoning_options: &[String], pref: Option<&str>, mode: &str, loop_retry: bool) -> Option<f64> {
-    if reasoning_options.is_empty() || pref == Some("off") {
+/// - 추론을 끈 요청(추론 끄기 재시도·요약 포함)에는 넣지 않는다.
+/// - 사고 반복 직후의 재시도 라운드(`loop_retry`)는 `LOOP_RETRY_PRESENCE_PENALTY`(추론 선택지가 없는 모델도).
+/// - 그 밖에는 추론 선택지가 있는 모델의 일반 채팅에만 `CHAT_THINKING_PRESENCE_PENALTY`를 넣는다.
+///   프로젝트에 속한 대화(`in_project`, 화면 값이 없던 예전 대화 포함)와 프로젝트·코딩 화면은 넣지 않는다
+///   (도구 JSON 인자, 파일 내용, 표의 `"` `,` `|` 괄호가 벌점을 받아 깨지지 않게).
+fn thinking_presence_penalty(
+    reasoning_options: &[String],
+    pref: Option<&str>,
+    mode: &str,
+    in_project: bool,
+    loop_retry: bool,
+) -> Option<f64> {
+    if pref == Some("off") {
         return None;
     }
     if loop_retry {
         return Some(LOOP_RETRY_PRESENCE_PENALTY);
     }
-    match mode {
-        "project" | "code" => None,
-        _ => Some(CHAT_THINKING_PRESENCE_PENALTY),
+    if reasoning_options.is_empty() || in_project || matches!(mode, "project" | "code") {
+        return None;
     }
+    Some(CHAT_THINKING_PRESENCE_PENALTY)
 }
 
 /// 사고 반복이 감지된 라운드를 어떻게 다시 보낼지
@@ -1584,13 +1660,15 @@ impl ThinkingLoopRecovery {
     }
 
     /// 사고 반복이 감지되었다. 다음으로 시도할 단계를 돌려주고, 더 시도할 수 없으면 `None`(멈춤).
-    /// 추론 선택지가 있으면 먼저 반복 억제를 올려 보고, 그래도 반복되면 "off"를 지원할 때만 추론을 끈다.
-    fn next_after_loop(&mut self, has_reasoning_options: bool, can_turn_off: bool) -> Option<LoopRetry> {
+    /// 먼저 반복 억제를 올려 보고, 그래도 반복되면 추론을 끈다. 요청이 달라지지 않는 단계는 건너뛴다:
+    /// `penalty_possible`은 반복 억제를 넣을 수 있는지(사용자가 추론을 꺼 두었으면 넣지 않으므로 거짓),
+    /// `can_turn_off`는 추론을 꺼서 요청이 달라지는지("off" 선택지가 있고 아직 꺼져 있지 않음).
+    fn next_after_loop(&mut self, penalty_possible: bool, can_turn_off: bool) -> Option<LoopRetry> {
         if self.turn_retries >= MAX_THINKING_LOOP_RETRIES {
             return None;
         }
         let next = match self.stage {
-            LoopRetry::None if has_reasoning_options => LoopRetry::Penalty,
+            LoopRetry::None if penalty_possible => LoopRetry::Penalty,
             LoopRetry::None | LoopRetry::Penalty if can_turn_off => LoopRetry::ReasoningOff,
             _ => return None,
         };
@@ -1603,6 +1681,14 @@ impl ThinkingLoopRecovery {
     fn round_completed(&mut self) {
         self.stage = LoopRetry::None;
     }
+
+    /// 반복이 감지됐지만 그 라운드의 답·도구 호출은 살렸다: 다음 라운드 한 번만 반복 억제를 올린다(멈추지 않는다).
+    fn penalize_next_round(&mut self, penalty_possible: bool) {
+        if penalty_possible && self.stage == LoopRetry::None && self.turn_retries < MAX_THINKING_LOOP_RETRIES {
+            self.stage = LoopRetry::Penalty;
+            self.turn_retries += 1;
+        }
+    }
 }
 
 /// 반복 검사에서 보는 끝부분 길이
@@ -1610,8 +1696,18 @@ const REPETITION_TAIL_CHARS: usize = 2_400;
 /// 코드·표까지 포함한 원문에서 반복으로 볼 최소 길이: 끝 2,000자가 통째로 같은 주기로 되풀이되어야 한다.
 /// 같은 표 줄 20개(약 800자)는 정상이고, 수십·수백 줄을 기계적으로 되풀이하는 퇴화만 잡는다.
 const SATURATED_REPETITION_CHARS: usize = 2_000;
-/// 위 검사에서 원문 끝을 가져오는 길이(들여쓰기 공백을 줄여도 2,000자가 남도록 넉넉히)
-const SATURATED_SOURCE_CHARS: usize = 4_000;
+/// 긴 주기(451~2,000자, 코드 블록 통째 반복 등)도 본다. 끝 80자가 앞에서 다시 나온 자리만 주기 후보로 삼아 싸게 찾는다.
+/// 긴 주기는 같은 덩어리가 4번 이상(주기의 4배 구간) 되풀이될 때만 반복이다.
+const SATURATED_MAX_PERIOD: usize = 2_000;
+const SATURATED_NEEDLE_CHARS: usize = 80;
+/// 위 검사에서 원문 끝을 가져오는 길이(긴 주기 4번 + 들여쓰기 공백 여유)
+const SATURATED_SOURCE_CHARS: usize = 12_000;
+/// 추론 속 코드 묶음 반복: 최근 12,000자 안에서 40자 이상인 같은 묶음이 4번, 또는 연달아 3번 나오면 루프다.
+/// 초안·수정·최종처럼 같은 코드를 두 번 적는 것은 정상이다.
+const CODE_RUN_WINDOW_CHARS: usize = 12_000;
+const CODE_RUN_MIN_CHARS: usize = 40;
+const CODE_RUN_REPEATS: usize = 4;
+const CODE_RUN_CONSECUTIVE: usize = 3;
 
 /// 마크다운 강조(`*`, `_`)를 빼고 공백을 하나로 줄인 끝부분 글자들
 fn normalized_tail(text: &str, tail_chars: usize) -> Vec<char> {
@@ -1636,74 +1732,184 @@ fn normalized_tail(text: &str, tail_chars: usize) -> Vec<char> {
     norm
 }
 
+/// 걷어 낸 코드·표 묶음 하나(공백을 줄인 내용의 해시)와 그 앞(직전 묶음 뒤)의 글
+struct CodeRun {
+    start_char: usize,
+    hash: u64,
+    chars: usize,
+    gap: String,
+}
+
+struct ProseSplit {
+    prose: String,
+    runs: Vec<CodeRun>,
+}
+
+fn finish_code_run(run: &mut Option<(usize, String, String)>, runs: &mut Vec<CodeRun>) {
+    use std::hash::{Hash, Hasher};
+    if let Some((start_char, body, gap)) = run.take() {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        body.hash(&mut h);
+        runs.push(CodeRun { start_char, hash: h.finish(), chars: body.chars().count(), gap });
+    }
+}
+
 /// 코드 블록(``` … ```, 닫히지 않은 블록은 끝까지)과 표 줄(`|`로 시작)을 걷어 내고 글만 남긴다.
 /// `drop_code_like_lines`가 참이면 코드처럼 보이는 줄(`is_code_like_line`)도 뺀다(추론용).
 /// 걷어 낸 자리마다 서로 다른 짧은 표시(⟦n⟧)를 넣어, 코드 앞뒤의 글이 붙어 제자리 반복처럼 보이지 않게 한다.
-fn prose_only(text: &str, drop_code_like_lines: bool) -> String {
+/// 걷어 낸 묶음(코드 블록은 닫는 줄에서 끊는다)은 따로 모아 같은 코드의 되풀이를 볼 수 있게 한다.
+fn split_prose(text: &str, drop_code_like_lines: bool) -> ProseSplit {
     let mut out = String::with_capacity(text.len());
+    let mut runs = Vec::new();
+    let mut run: Option<(usize, String, String)> = None;
+    let mut gap = String::new();
     let mut in_fence = false;
-    let mut in_removed_run = false;
-    let mut removed_runs = 0usize;
+    let mut pos = 0usize;
     for line in text.split('\n') {
+        let line_start = pos;
+        pos += line.chars().count() + 1;
         let t = line.trim();
         let fence = t.starts_with("```") || t.starts_with("~~~");
+        let closing = fence && in_fence;
         let drop = fence || in_fence || t.starts_with('|') || (drop_code_like_lines && is_code_like_line(line));
         if fence {
             in_fence = !in_fence;
         }
         if drop {
-            if !in_removed_run {
-                removed_runs += 1;
-                out.push_str(&format!("⟦{}⟧\n", removed_runs));
-                in_removed_run = true;
+            if run.is_none() {
+                out.push_str(&format!("⟦{}⟧\n", runs.len() + 1));
+                run = Some((line_start, String::new(), std::mem::take(&mut gap)));
+            }
+            if let Some((_, body, _)) = run.as_mut() {
+                if !body.is_empty() {
+                    body.push(' ');
+                }
+                body.push_str(&t.split_whitespace().collect::<Vec<_>>().join(" "));
+            }
+            if closing {
+                finish_code_run(&mut run, &mut runs);
             }
             continue;
         }
-        in_removed_run = false;
+        finish_code_run(&mut run, &mut runs);
+        gap.push_str(line);
+        gap.push('\n');
         out.push_str(line);
         out.push('\n');
     }
-    out
+    finish_code_run(&mut run, &mut runs);
+    ProseSplit { prose: out, runs }
 }
 
-/// 추론 속 코드 초안으로 보이는 줄: 4칸·탭 들여쓰기, 태그·괄호로 시작, `;`·`{`로 끝남, `=>`·`::` 같은 기호 포함 등.
-/// 한국어·영어 문장은 이런 모양이 드물어, 여기서 걸러도 의역 루프 탐지에는 영향이 거의 없다.
-fn is_code_like_line(line: &str) -> bool {
-    if line.starts_with("    ") || line.starts_with('\t') {
-        return true;
+fn prose_only(text: &str, drop_code_like_lines: bool) -> String {
+    split_prose(text, drop_code_like_lines).prose
+}
+
+/// 줄의 내용 낱말(두 글자 이상, 숫자·추임새 제외, 소문자)
+fn content_words(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 2 && !w.chars().all(|c| c.is_ascii_digit()) && !THINKING_FILLERS.contains(w))
+        .map(str::to_lowercase)
+}
+
+/// 최근 구간에서 같은 코드 묶음이 `CODE_RUN_REPEATS`번, 또는 연달아 `CODE_RUN_CONSECUTIVE`번 되풀이되는지.
+/// 묶음 앞의 글이 새 낱말(다른 파일 이름 등)을 들여오면 내용이 나아가는 중이라(파일마다 같은 diff 줄 등) 되풀이로 세지 않는다.
+fn code_run_loop(runs: &[CodeRun], total_chars: usize) -> bool {
+    let mut seen_words: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut counts: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+    let mut streak: Option<(u64, usize)> = None;
+    for r in runs.iter().filter(|r| r.start_char + CODE_RUN_WINDOW_CHARS >= total_chars) {
+        let mut fresh = false;
+        for w in content_words(&r.gap) {
+            fresh |= seen_words.insert(w);
+        }
+        if r.chars < CODE_RUN_MIN_CHARS {
+            continue;
+        }
+        let count = counts.entry(r.hash).or_insert(0);
+        if *count == 0 || !fresh {
+            *count += 1;
+        }
+        if *count >= CODE_RUN_REPEATS {
+            return true;
+        }
+        streak = match streak {
+            Some((h, n)) if h == r.hash && !fresh => Some((h, n + 1)),
+            _ => Some((r.hash, 1)),
+        };
+        if streak.is_some_and(|(_, n)| n >= CODE_RUN_CONSECUTIVE) {
+            return true;
+        }
     }
+    false
+}
+
+fn is_hangul(c: char) -> bool {
+    matches!(c, '\u{AC00}'..='\u{D7A3}' | '\u{1100}'..='\u{11FF}' | '\u{3130}'..='\u{318F}')
+}
+
+/// 추론 속 코드 초안으로 보이는 줄: 태그·괄호로 시작, `;`·`{`로 끝남, `=>`·`::` 같은 기호 포함, (한글이 없을 때) `fn `·`const ` 같은 키워드로 시작.
+/// 들여쓰기만으로는 코드로 보지 않는다(중첩 목록·들여 쓴 문장). 들여 쓴 목록 항목과 한글이 대부분인 줄은 주석(`//`)·태그(`<`)로
+/// 시작할 때만 코드로 본다. 그래야 들여 쓴 한국어 의역 루프가 코드로 숨지 않는다.
+fn is_code_like_line(line: &str) -> bool {
     let t = line.trim();
     if t.is_empty() {
         return false;
     }
-    const STARTS: &[&str] = &[
-        "<", "{", "}", ")", "]", "//", "/*", "#!", "#[", "#include", "fn ", "pub ", "let ", "const ", "def ", "class ",
-        "import ", "export ", "return ", "if (", "for (", "while (",
+    let hangul = t.chars().filter(|c| is_hangul(*c)).count();
+    let letters = t.chars().filter(|c| c.is_alphabetic()).count();
+    let mostly_hangul = hangul * 2 > letters;
+    let indented = line.starts_with("    ") || line.starts_with('\t');
+    if (indented && is_list_item(t)) || mostly_hangul {
+        return ["//", "/*", "<"].iter().any(|s| t.starts_with(s)) && !is_list_item(t);
+    }
+    const SYMBOL_STARTS: &[&str] = &["<", "{", "}", ")", "]", "//", "/*", "#!", "#[", "#include"];
+    const KEYWORD_STARTS: &[&str] = &[
+        "fn ", "pub ", "let ", "const ", "def ", "class ", "import ", "export ", "return ", "if (", "for (", "while (",
     ];
     const ENDS: &[&str] = &[";", "{", "}", "(", "[", "=>"];
     const CONTAINS: &[&str] = &["=>", "::", "</", "/>", "();", "&&", "||", "!=="];
-    STARTS.iter().any(|s| t.starts_with(s)) || ENDS.iter().any(|s| t.ends_with(s)) || CONTAINS.iter().any(|s| t.contains(s))
+    SYMBOL_STARTS.iter().any(|s| t.starts_with(s))
+        || (hangul == 0 && KEYWORD_STARTS.iter().any(|s| t.starts_with(s)))
+        || ENDS.iter().any(|s| t.ends_with(s))
+        || CONTAINS.iter().any(|s| t.contains(s))
 }
 
-/// 글만 남긴 쪽은 기존 기준(긴 문구 3~4회 제자리 반복), 코드·표를 포함한 원문은 끝 2,000자 전체가 같은 주기일 때만 반복으로 본다.
+/// 글만 남긴 쪽은 기존 기준(긴 문구 3~4회 제자리 반복), 코드·표를 포함한 원문은 끝부분 전체가 같은 주기일 때만 반복으로 본다.
 fn detect_repetition_loop(text: &str) -> bool {
     tail_repeats(&normalized_tail(&prose_only(text, false), REPETITION_TAIL_CHARS))
         || saturated_repetition(&normalized_tail(text, SATURATED_SOURCE_CHARS))
 }
 
-/// 끝 `SATURATED_REPETITION_CHARS`자가 통째로 한 주기(36~450자)의 되풀이인지
+/// 끝 `span`자가 주기 `p`로 되풀이되고, 한 주기 안에 서로 다른 글자가 8개 이상인지
+fn periodic_tail(norm: &[char], p: usize, span: usize) -> bool {
+    let n = norm.len();
+    if span > n || p >= span {
+        return false;
+    }
+    let start = n - span;
+    norm[start + p..n] == norm[start..n - p] && {
+        let distinct: std::collections::HashSet<char> = norm[n - p..n].iter().copied().filter(|c| *c != ' ').collect();
+        distinct.len() >= 8
+    }
+}
+
+/// 끝부분이 통째로 한 주기의 되풀이인지: 짧은 주기(36~450자)는 끝 2,000자, 긴 주기(~2,000자)는 주기의 4배 구간에서 본다.
 fn saturated_repetition(norm: &[char]) -> bool {
     let n = norm.len();
     if n < SATURATED_REPETITION_CHARS {
         return false;
     }
-    let start = n - SATURATED_REPETITION_CHARS;
-    (36..=450).any(|p| {
-        norm[start + p..n] == norm[start..n - p] && {
-            let distinct: std::collections::HashSet<char> =
-                norm[n - p..n].iter().copied().filter(|c| *c != ' ').collect();
-            distinct.len() >= 8
-        }
+    if (36..=450).any(|p| periodic_tail(norm, p, SATURATED_REPETITION_CHARS)) {
+        return true;
+    }
+    let needle = &norm[n - SATURATED_NEEDLE_CHARS..];
+    let max_p = SATURATED_MAX_PERIOD.min(n / 4);
+    (451..=max_p).any(|p| {
+        let end = n - p;
+        end >= SATURATED_NEEDLE_CHARS
+            && norm[end - SATURATED_NEEDLE_CHARS..end] == *needle
+            && periodic_tail(norm, p, SATURATED_REPETITION_CHARS.max(4 * p))
     })
 }
 
@@ -1732,29 +1938,31 @@ fn tail_repeats(norm: &[char]) -> bool {
     false
 }
 
+/// 사고 속 한국어 전환 추임새(절 앞에서 걷어 내고, 새 낱말 판단에서도 뺀다)
+const THINKING_FILLERS: &[&str] = &[
+    "아, 잠깐",
+    "아 잠깐",
+    "잠깐만",
+    "잠깐",
+    "근데",
+    "그런데",
+    "하지만",
+    "그러나",
+    "실은",
+    "사실",
+    "아니면",
+    "아니",
+    "일단",
+    "이제",
+    "그럼",
+    "그러면",
+    "또",
+    "그리고",
+    "즉",
+];
+
 /// 사고(`reasoning`) 속 한 절에서 목록 기호·강조·한국어 전환 추임새를 걷어 내 비교 가능한 형태로 정규화한다.
 fn normalize_thinking_clause(raw: &str) -> String {
-    const FILLERS: &[&str] = &[
-        "아, 잠깐",
-        "아 잠깐",
-        "잠깐만",
-        "잠깐",
-        "근데",
-        "그런데",
-        "하지만",
-        "그러나",
-        "실은",
-        "사실",
-        "아니면",
-        "아니",
-        "일단",
-        "이제",
-        "그럼",
-        "그러면",
-        "또",
-        "그리고",
-        "즉",
-    ];
     let stripped = raw.trim_start_matches(|c: char| {
         c.is_whitespace() || matches!(c, '-' | '*' | '•' | '·' | '.' | ')' | '(') || c.is_ascii_digit()
     });
@@ -1784,7 +1992,7 @@ fn normalize_thinking_clause(raw: &str) -> String {
             })
             .to_string();
         let mut matched = None;
-        for &filler in FILLERS {
+        for &filler in THINKING_FILLERS {
             if let Some(rest) = trimmed.strip_prefix(filler) {
                 let boundary_ok = match rest.chars().next() {
                     None => true,
@@ -1888,59 +2096,113 @@ fn is_list_item(line: &str) -> bool {
     digits > 0 && (t[digits..].starts_with(". ") || t[digits..].starts_with(") "))
 }
 
-/// 5어절 구문이 사고 길이에 비례한 기준 이상 되풀이되는지(목록 항목 줄은 빼고 본다)
+/// 5어절 구문이 사고 길이에 비례한 기준 이상 되풀이되는지(목록 항목 줄은 빼고 본다).
+/// 같은 구문이 절 안의 같은 자리에 거듭 나오는 것은 틀이 같은 문장(파일·화면마다 같은 판정을 적는 목록 등)이라 세지 않고,
+/// 놓인 자리가 바뀌며 되풀이될 때만 센다(말머리를 바꿔 가며 같은 말을 되풀이하는 의역 루프).
 fn shingle_loop(prose: &str) -> bool {
     let body: String = prose.lines().filter(|l| !is_list_item(l)).collect::<Vec<_>>().join("\n");
     let lowered = body.to_lowercase();
-    let words: Vec<&str> = lowered
-        .split(|c: char| {
-            c.is_whitespace()
-                || matches!(
-                    c,
-                    '*' | '_' | '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ':' | '.' | '!' | '?' | '→' | '-'
-                )
+    let units: Vec<Vec<&str>> = split_clauses(&lowered)
+        .into_iter()
+        .map(|u| {
+            u.split(|c: char| {
+                c.is_whitespace()
+                    || matches!(
+                        c,
+                        '*' | '_' | '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ':' | '.' | '!' | '?' | '→' | '-'
+                    )
+            })
+            .filter(|w| !w.is_empty())
+            .collect()
         })
-        .filter(|w| !w.is_empty())
         .collect();
-    if words.len() < 40 {
+    let total_words: usize = units.iter().map(Vec::len).sum();
+    if total_words < 40 {
         return false;
     }
-    let need = SHINGLE_MIN_REPEATS.max(words.len() / SHINGLE_WORDS_PER_REPEAT);
-    let mut shingle_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for w in words.windows(5) {
-        let shingle = w.join(" ");
-        if shingle.chars().count() < 18 {
-            continue;
-        }
-        let distinct: std::collections::HashSet<char> = shingle.chars().filter(|c| !c.is_whitespace()).collect();
-        if distinct.len() < 8 {
-            continue;
-        }
-        let count = shingle_counts.entry(shingle).or_insert(0);
-        *count += 1;
-        if *count >= need {
-            return true;
+    let need = SHINGLE_MIN_REPEATS.max(total_words / SHINGLE_WORDS_PER_REPEAT);
+    // 구문 -> (마지막으로 나온 절 안 위치, 자리를 바꿔 나온 횟수)
+    let mut seen: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
+    for words in &units {
+        for (offset, w) in words.windows(5).enumerate() {
+            let shingle = w.join(" ");
+            if shingle.chars().count() < 18 {
+                continue;
+            }
+            let distinct: std::collections::HashSet<char> = shingle.chars().filter(|c| !c.is_whitespace()).collect();
+            if distinct.len() < 8 {
+                continue;
+            }
+            match seen.get_mut(&shingle) {
+                Some((last_offset, count)) => {
+                    if *last_offset != offset {
+                        *count += 1;
+                        if *count >= need {
+                            return true;
+                        }
+                    }
+                    *last_offset = offset;
+                }
+                None => {
+                    seen.insert(shingle, (offset, 1));
+                }
+            }
         }
     }
     false
 }
 
+/// 새 낱말을 들여오는 줄의 비율을 볼 최소 줄 수
+const NOVELTY_MIN_LINES: usize = 6;
+/// 뒤쪽 절반 줄 가운데 이 비율 이상이 앞에서 안 나온 낱말을 들여오면, 같은 틀이라도 내용이 나아가는 중으로 본다.
+const NOVELTY_PROGRESS: f64 = 0.5;
+
+/// 줄마다 처음 보는 낱말(두 글자 이상, 숫자·추임새 제외)이 있는지 세어, 뒤쪽 절반 줄 중 새 낱말을 들여온 줄의 비율을 돌려준다.
+/// 파일·화면마다 같은 판정을 적는 정상 사고는 줄마다 새 이름이 나와 1에 가깝고, 의역 루프는 낱말이 바닥나 0에 가깝다.
+fn line_novelty(prose: &str) -> Option<f64> {
+    let lines: Vec<&str> = prose
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('⟦'))
+        .collect();
+    if lines.len() < NOVELTY_MIN_LINES {
+        return None;
+    }
+    let half = lines.len() / 2;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut novel = 0usize;
+    for (i, line) in lines.iter().enumerate() {
+        let mut fresh = false;
+        for w in content_words(line) {
+            fresh |= seen.insert(w);
+        }
+        if i >= half && fresh {
+            novel += 1;
+        }
+    }
+    Some(novel as f64 / (lines.len() - half) as f64)
+}
+
 /// 추론(`<think>`) 내부의 원문 제자리 반복뿐 아니라 말투·추임새를 바꾼 의역 자기검열 무한 루프까지 탐지한다.
-/// 코드 블록·코드처럼 보이는 줄·표 줄은 빼고 글만 본다(코드 초안의 같은 속성·태그 줄을 반복으로 오인하지 않게).
+/// 코드 블록·코드처럼 보이는 줄·표 줄은 글 검사에서 빼되, 같은 코드 묶음의 되풀이(`code_run_loop`)와
+/// 코드까지 포함한 원문의 통째 반복(`saturated_repetition`)은 따로 본다.
 fn detect_thinking_loop(text: &str) -> bool {
-    let prose = prose_only(text, true);
-    if tail_repeats(&normalized_tail(&prose, REPETITION_TAIL_CHARS))
+    let split = split_prose(text, true);
+    if tail_repeats(&normalized_tail(&split.prose, REPETITION_TAIL_CHARS))
         || saturated_repetition(&normalized_tail(text, SATURATED_SOURCE_CHARS))
+        || code_run_loop(&split.runs, text.chars().count())
     {
         return true;
     }
+    let prose = &split.prose;
     let total = prose.chars().count();
     if total < THINKING_LOOP_MIN_CHARS {
         return false;
     }
     let tail_of = |n: usize| -> String { prose.chars().skip(total.saturating_sub(n)).collect() };
     let wide = tail_of(THINKING_WIDE_WINDOW);
-    clause_loop(&wide) || clause_loop(&tail_of(THINKING_NARROW_WINDOW)) || shingle_loop(&wide)
+    let progressing = line_novelty(&wide).is_some_and(|v| v >= NOVELTY_PROGRESS);
+    (!progressing && (clause_loop(&wide) || clause_loop(&tail_of(THINKING_NARROW_WINDOW)))) || shingle_loop(&wide)
 }
 
 /// 메시지 배열의 총 문자 수(시스템/압축 요약 제외 대화 원문 분량 참고용)
@@ -2503,12 +2765,17 @@ pub async fn run_agent_turn<R: Runtime>(
     let mut length_cut = false;
     // 보낼 메시지 줄이기 단계 (컨텍스트 초과 오류를 받으면 2단계로 올린다)
     let mut compact_level = 0u8;
+    // 마지막으로 컨텍스트 초과가 났던 요청의 글자 수(압축 단계를 되돌릴 때의 기준)
+    let mut overflow_chars: Option<usize> = None;
     // 자동으로 넣은 Skill을 모델이 다시 load_skill로 부를 때 짧은 답은 한 턴에 한 번만 준다(또 부르면 전문).
     let mut short_reply_used = false;
     // 생각만 하고 보이는 답 없이 끝난 라운드를 한 턴에 한 번만 다시 시킨다(작은 모델에서 잦음).
     let mut empty_nudged = false;
     let mut loop_guard = ToolLoopGuard::default();
     let mut loop_recovery = ThinkingLoopRecovery::default();
+    let reasoning_cap = reasoning_hard_cap(req.context_length);
+    // 보이는 답·도구 호출 없이 길이 제한으로 이어 받은 라운드들의 추론 글자 수(상한 검사에 합친다)
+    let mut reasoning_carry = 0usize;
     let mut clear_notice_on_chunk = false;
 
     loop {
@@ -2518,7 +2785,11 @@ pub async fn run_agent_turn<R: Runtime>(
         }
 
         let budget = crate::context_budget::trim_trigger_chars(req.context_length);
-        let level = compact_level.max(u8::from(total_chars(&api_messages) > budget));
+        let auto_level = u8::from(total_chars(&api_messages) > budget);
+        if let Some(limit) = overflow_chars {
+            compact_level = drop_back_compact_level(&api_messages, compact_level, auto_level, turn_start, limit.min(budget));
+        }
+        let level = compact_level.max(auto_level);
         let messages = compact_messages(&api_messages, level, turn_start);
         if level > 0 {
             loop_guard.forget_reads(&compacted_tool_keys(&api_messages, &messages));
@@ -2540,9 +2811,13 @@ pub async fn run_agent_turn<R: Runtime>(
         for (k, v) in crate::lmstudio::reasoning_fields(req.reasoning_options, effective_pref) {
             body[k] = v;
         }
-        if let Some(penalty) =
-            thinking_presence_penalty(req.reasoning_options, effective_pref, req.mode, loop_retry == LoopRetry::Penalty)
-        {
+        if let Some(penalty) = thinking_presence_penalty(
+            req.reasoning_options,
+            effective_pref,
+            req.mode,
+            req.project.is_some(),
+            loop_retry == LoopRetry::Penalty,
+        ) {
             body["presence_penalty"] = json!(penalty);
         }
         if let Some(tools) = &tools {
@@ -2558,6 +2833,7 @@ pub async fn run_agent_turn<R: Runtime>(
             compact_level: level,
             ..Default::default()
         };
+        let sent_chars = trace.request_chars;
 
         let response = match send_with_retry(&client, settings, &body, &sink, &cancel_flag, &mut trace).await {
             Ok(Some(r)) => r,
@@ -2574,9 +2850,15 @@ pub async fn run_agent_turn<R: Runtime>(
                 trace.total_ms = round_started.elapsed().as_millis() as u64;
                 add_stats(&mut msg, &trace);
                 trace_push(trace);
-                if compact_level < 3 && looks_like_context_overflow(&err.message) {
+                let escalate = if looks_like_context_overflow(&err.message) {
+                    next_compact_level(&api_messages, level, turn_start, sent_chars)
+                } else {
+                    None
+                };
+                if let Some(next_level) = escalate {
                     // 대화가 길어 모델이 받을 수 있는 양을 넘었다: 오래된 내용을 단계별로 크게 줄여 다시 보낸다.
-                    compact_level = if compact_level < 2 { 2 } else { 3 };
+                    compact_level = next_level;
+                    overflow_chars = Some(sent_chars);
                     sink.notice(format!(
                         "대화가 컨텍스트 한도를 넘어 이전 내용을 {}단계로 압축해 다시 보내는 중입니다...",
                         compact_level
@@ -2690,9 +2972,14 @@ pub async fn run_agent_turn<R: Runtime>(
                         trace.first_tool_ms = now;
                     }
                     if !finished && stream_err.is_none() {
-                        if streamer.acc.reasoning.len() >= last_rep_check_r + 256 {
+                        // 답이나 도구 호출이 시작된 뒤에는 스트림을 끊지 않는다(라운드 끝에서 판단해 그 출력은 살린다).
+                        let output_started = !streamer.acc.content.trim().is_empty()
+                            || streamer.acc.tools.iter().any(|t| !t.name.is_empty());
+                        if !output_started && streamer.acc.reasoning.len() >= last_rep_check_r + 256 {
                             last_rep_check_r = streamer.acc.reasoning.len();
-                            if detect_thinking_loop(&streamer.acc.reasoning) {
+                            let over_cap = reasoning_carry + streamer.acc.reasoning.len() > reasoning_cap
+                                && reasoning_carry + streamer.acc.reasoning.chars().count() > reasoning_cap;
+                            if over_cap || detect_thinking_loop(&streamer.acc.reasoning) {
                                 thinking_loop_detected = true;
                                 finished = true;
                             }
@@ -2750,9 +3037,15 @@ pub async fn run_agent_turn<R: Runtime>(
         }
 
         if let Some(err) = stream_err {
-            if compact_level < 3 && looks_like_context_overflow(&err) {
+            let escalate = if looks_like_context_overflow(&err) {
+                next_compact_level(&api_messages, level, turn_start, sent_chars)
+            } else {
+                None
+            };
+            if let Some(next_level) = escalate {
                 // 스트림 안의 컨텍스트 초과 오류(LM Studio는 HTTP 200 + event: error로 보낸다): 비스트리밍과 같이 단계적으로 줄여 다시 보낸다.
-                compact_level = if compact_level < 2 { 2 } else { 3 };
+                compact_level = next_level;
+                overflow_chars = Some(sent_chars);
                 sink.notice(format!(
                     "대화가 컨텍스트 한도를 넘어 이전 내용을 {}단계로 압축해 다시 보내는 중입니다...",
                     compact_level
@@ -2802,25 +3095,28 @@ pub async fn run_agent_turn<R: Runtime>(
         recoveries_used = 0;
         first_failure = None;
 
+        let round_reasoning_chars = acc.reasoning.chars().count();
         if !thinking_loop_detected && !repetition_stopped {
-            if detect_thinking_loop(&acc.reasoning) {
-                thinking_loop_detected = true;
-            } else if detect_repetition_loop(&acc.content) {
-                repetition_stopped = true;
+            thinking_loop_detected =
+                reasoning_carry + round_reasoning_chars > reasoning_cap || detect_thinking_loop(&acc.reasoning);
+            if !thinking_loop_detected {
+                repetition_stopped = detect_repetition_loop(&acc.content);
             }
         }
+        // 사용자가 추론을 꺼 두었으면 반복 억제도 넣지 않고(요청이 같아짐) 더 끌 수도 없다: 그 단계는 건너뛴다.
+        let penalty_possible = pref != Some("off");
+        let can_turn_off = pref != Some("off") && req.reasoning_options.iter().any(|o| o == "off");
+        let has_output = !acc.content.trim().is_empty() || acc.tools.iter().any(|t| !t.name.is_empty());
+        let mut penalize_next = false;
+        if thinking_loop_detected && has_output {
+            // 반복 판정이 답·도구 호출과 함께 왔다: 출력은 버리지 않고 실행하며, 다음 라운드만 반복 억제를 올린다.
+            penalize_next = true;
+            thinking_loop_detected = false;
+            repetition_stopped |= detect_repetition_loop(&acc.content);
+        }
         if thinking_loop_detected {
-            let no_output_yet =
-                acc.content.trim().is_empty() && acc.tools.iter().all(|t| t.name.is_empty());
-            let next = if no_output_yet {
-                loop_recovery.next_after_loop(
-                    !req.reasoning_options.is_empty(),
-                    req.reasoning_options.iter().any(|o| o == "off"),
-                )
-            } else {
-                None
-            };
-            if let Some(stage) = next {
+            reasoning_carry = 0;
+            if let Some(stage) = loop_recovery.next_after_loop(penalty_possible, can_turn_off) {
                 let (marker, notice) = if stage == LoopRetry::Penalty {
                     (
                         "\n\n[생각 반복이 감지되어 반복 억제를 높여 다시 생각합니다]\n\n",
@@ -2848,6 +3144,12 @@ pub async fn run_agent_turn<R: Runtime>(
         }
 
         loop_recovery.round_completed();
+        if penalize_next {
+            loop_recovery.penalize_next_round(penalty_possible);
+        }
+        // 보이는 답도 도구 호출도 없이 길이 제한으로 끊긴 라운드만 추론 글자 수를 이어서 센다.
+        let thinking_only_length_cut = !has_output && acc.finish_reason.as_deref() == Some("length");
+        reasoning_carry = if thinking_only_length_cut { reasoning_carry + round_reasoning_chars } else { 0 };
         if clear_notice_on_chunk {
             clear_notice_on_chunk = false;
             sink.notice(String::new());
@@ -4313,9 +4615,11 @@ mod tests {
             sse(json!({"choices":[{"delta":{},"finish_reason":"length"}]})),
             sse_done(),
         ];
-        let (url, bodies) = mock_server(vec![chunks], 0).await;
+        let (url, bodies) = mock_server(vec![chunks.clone(), chunks], 0).await;
         let out = turn(url, vec![msg("user", "원인을 찾아 줘")]).await.unwrap();
-        assert_eq!(bodies.lock().unwrap().len(), 1, "반복 루프로 끊기면 continue_prompt로 이어 받지 않는다");
+        let b = bodies.lock().unwrap();
+        assert_eq!(b.len(), 2, "추론 선택지가 없는 모델도 반복 억제를 한 번 올려 보고, 또 반복되면 continue_prompt로 이어 받지 않고 멈춘다");
+        assert_eq!(b[1]["presence_penalty"], LOOP_RETRY_PRESENCE_PENALTY);
         assert!(out.content.contains("모델이 같은 내용을 반복해 무한 루프를 막기 위해 생성을 멈췄습니다"));
     }
 
@@ -5075,11 +5379,13 @@ mod tests {
         assert!(tool_lens[2..].iter().all(|&n| n == 10_000), "지난 턴의 마지막 4개는 그대로");
         assert_eq!(len(&l1[1]), 10_000, "1단계는 사용자 글을 줄이지 않는다");
         let l2 = compact_messages(&msgs, 2, turn_start);
-        assert!(len(&l2[1]) < 2_200, "2단계는 오래된 사용자 글도 줄인다");
-        assert!(l2[1]["content"].as_str().unwrap().contains("줄였습니다"));
-        assert_eq!(l2[0]["content"], "sys");
+        assert_eq!(l2, l1, "이번 턴 도구 결과가 없으면 2단계는 1단계와 같다");
         let l3 = compact_messages(&msgs, 3, turn_start);
-        assert!(len(&l3[1]) < 600, "3단계는 더 짧게 줄인다");
+        assert!(len(&l3[1]) < 2_200, "3단계는 오래된 사용자 글도 줄인다");
+        assert!(l3[1]["content"].as_str().unwrap().contains("줄였습니다"));
+        assert_eq!(l3[0]["content"], "sys");
+        let l4 = compact_messages(&msgs, 4, turn_start);
+        assert!(len(&l4[1]) < 600, "4단계는 더 짧게 줄인다");
     }
 
     /// 1단계는 이번 턴(실제 사용자 메시지 뒤)의 도구 결과와 인자를 줄이지 않는다. 2단계부터는 줄인다.
@@ -5096,9 +5402,14 @@ mod tests {
         }
         let l1 = compact_messages(&msgs, 1, 1);
         assert_eq!(l1, msgs, "이번 턴은 1단계에서 그대로");
+        // 2단계(첫 컨텍스트 초과 뒤): 예전 1단계 규칙을 이번 턴에도 적용한다. 마지막 4개를 뺀 결과만 3천 자로, 인자는 그대로.
         let l2 = compact_messages(&msgs, 2, 1);
-        let shortened = l2.iter().filter(|m| m["role"] == "tool" && m["content"].as_str().unwrap().chars().count() < 1_000).count();
-        assert_eq!(shortened, 4, "2단계는 최근 2개를 뺀 이번 턴 결과도 줄인다");
+        let lens: Vec<usize> = l2.iter().filter(|m| m["role"] == "tool").map(|m| m["content"].as_str().unwrap().chars().count()).collect();
+        assert!(lens[..2].iter().all(|&n| n < 3_200) && lens[2..].iter().all(|&n| n == 10_000), "{lens:?}");
+        assert!(l2.iter().all(|m| !m.to_string().contains("_omitted")), "2단계는 이번 턴 도구 인자를 줄이지 않는다");
+        let l3 = compact_messages(&msgs, 3, 1);
+        let shortened = l3.iter().filter(|m| m["role"] == "tool" && m["content"].as_str().unwrap().chars().count() < 1_000).count();
+        assert_eq!(shortened, 4, "3단계는 최근 2개를 뺀 이번 턴 결과도 줄인다");
     }
 
     /// 앱이 넣은 이어 쓰기 요청(사용자 역할) 뒤에도 이번 턴의 write_file 인자는 요약되지 않는다.
@@ -6006,7 +6317,7 @@ content-length: {}
         assert_eq!(out[3]["content"], "지금 할 새 질문");
 
         // 긴급 압축 단계에서도 요약 쌍(인덱스 1·2)은 보존된다.
-        let compacted = compact_messages(&out, 3, 3);
+        let compacted = compact_messages(&out, COMPACT_MAX_LEVEL, 3);
         assert!(compacted[1]["content"].as_str().unwrap().contains("API 설계 완료"));
     }
 
@@ -6075,16 +6386,20 @@ content-length: {}
     #[test]
     fn thinking_presence_penalty_scales_by_mode_and_reasoning_pref() {
         let opts = vec!["off".to_string(), "on".to_string()];
-        assert_eq!(thinking_presence_penalty(&[], None, "chat", false), None);
-        assert_eq!(thinking_presence_penalty(&[], Some("on"), "code", true), None, "추론 선택지가 없으면 넣지 않는다");
-        assert_eq!(thinking_presence_penalty(&opts, Some("off"), "chat", false), None);
-        assert_eq!(thinking_presence_penalty(&opts, Some("off"), "code", true), None, "추론 끄기 재시도·요약에는 넣지 않는다");
-        assert_eq!(thinking_presence_penalty(&opts, None, "code", false), None, "코딩 화면 기본은 0");
-        assert_eq!(thinking_presence_penalty(&opts, Some("on"), "project", false), None, "프로젝트 화면 기본은 0");
-        assert_eq!(thinking_presence_penalty(&opts, None, "chat", false), Some(CHAT_THINKING_PRESENCE_PENALTY));
-        assert_eq!(thinking_presence_penalty(&opts, None, "", false), Some(0.5));
-        assert_eq!(thinking_presence_penalty(&opts, None, "code", true), Some(LOOP_RETRY_PRESENCE_PENALTY));
-        assert_eq!(thinking_presence_penalty(&opts, Some("on"), "chat", true), Some(1.0));
+        assert_eq!(thinking_presence_penalty(&[], None, "chat", false, false), None);
+        assert_eq!(thinking_presence_penalty(&[], Some("on"), "code", false, false), None, "추론 선택지가 없으면 기본값은 넣지 않는다");
+        assert_eq!(thinking_presence_penalty(&opts, Some("off"), "chat", false, false), None);
+        assert_eq!(thinking_presence_penalty(&opts, Some("off"), "code", false, true), None, "추론 끄기 재시도·요약에는 넣지 않는다");
+        assert_eq!(thinking_presence_penalty(&opts, None, "code", false, false), None, "코딩 화면 기본은 0");
+        assert_eq!(thinking_presence_penalty(&opts, Some("on"), "project", false, false), None, "프로젝트 화면 기본은 0");
+        assert_eq!(thinking_presence_penalty(&opts, None, "chat", false, false), Some(CHAT_THINKING_PRESENCE_PENALTY));
+        assert_eq!(thinking_presence_penalty(&opts, None, "", false, false), Some(0.5));
+        assert_eq!(thinking_presence_penalty(&opts, None, "code", false, true), Some(LOOP_RETRY_PRESENCE_PENALTY));
+        assert_eq!(thinking_presence_penalty(&opts, Some("on"), "chat", false, true), Some(1.0));
+        assert_eq!(thinking_presence_penalty(&opts, None, "", true, false), None, "화면 값이 없는 예전 프로젝트 대화도 0");
+        assert_eq!(thinking_presence_penalty(&opts, None, "chat", true, false), None, "프로젝트에 속한 대화는 0");
+        assert_eq!(thinking_presence_penalty(&opts, None, "", true, true), Some(1.0), "반복 재시도는 프로젝트에서도 올린다");
+        assert_eq!(thinking_presence_penalty(&[], None, "chat", false, true), Some(1.0), "추론 선택지가 없는 모델도 재시도 단계는 있다");
     }
 
     #[test]
@@ -6104,8 +6419,17 @@ content-length: {}
         let mut r = ThinkingLoopRecovery::default();
         assert_eq!(r.next_after_loop(true, false), Some(LoopRetry::Penalty));
         assert_eq!(r.next_after_loop(true, false), None);
-        // 추론 선택지가 없는 모델: 조절할 방법이 없어 멈춘다.
+        // 사용자가 추론을 꺼 둔 모델: 반복 억제도 넣지 않으므로(요청이 같아짐) 다시 보내지 않고 멈춘다.
         assert_eq!(ThinkingLoopRecovery::default().next_after_loop(false, false), None);
+        // 답·도구 호출과 함께 온 반복 판정: 다음 라운드 한 번만 반복 억제를 올린다.
+        let mut r = ThinkingLoopRecovery::default();
+        r.penalize_next_round(true);
+        assert_eq!(r.stage(), LoopRetry::Penalty);
+        r.round_completed();
+        assert_eq!(r.stage(), LoopRetry::None);
+        let mut r = ThinkingLoopRecovery::default();
+        r.penalize_next_round(false);
+        assert_eq!(r.stage(), LoopRetry::None, "추론을 꺼 두었으면 올리지 않는다");
 
         // 한 턴 전체 상한
         let mut r = ThinkingLoopRecovery::default();
@@ -6412,5 +6736,362 @@ content-length: {}
         assert_eq!(b[3]["reasoning_effort"], "none", "연결 복구로 다시 보낸 재시도 라운드도 추론을 끈 채");
         assert!(b[3].get("presence_penalty").is_none());
         assert!(out.content.ends_with("app.js의 필드 이름입니다."), "{}", out.content);
+    }
+
+    // ---- 리뷰 수정 1차: 탐지기 놓침(I1)·오탐(M1) 회귀 입력(검토자가 탐지기만 떼어 돌린 하네스의 입력) ----
+
+    const REVIEW_FILES: [&str; 30] = [
+        "Header", "Footer", "Sidebar", "Card", "Modal", "Button", "Input", "Table", "Form", "List", "Tabs", "Menu", "Toast",
+        "Badge", "Avatar", "Tooltip", "Popover", "Drawer", "Select", "Checkbox", "Radio", "Switch", "Slider", "Progress",
+        "Spinner", "Alert", "Dialog", "Accordion", "Breadcrumb", "Pagination",
+    ];
+
+    const REVIEW_TSX_BLOCK: &str = "export function Schedule({ rows }: Props) {\n  const sorted = [...rows].sort((a, b) => a.day - b.day);\n  return (\n    <table className=\"min-w-full border-collapse text-sm\">\n      <thead>\n        <tr><th className=\"px-4 py-2\">요일</th><th className=\"px-4 py-2\">시간</th><th className=\"px-4 py-2\">장소</th></tr>\n      </thead>\n      <tbody>\n        {sorted.map((r) => (\n          <tr key={r.id}><td className=\"px-4 py-2\">{r.day}</td><td className=\"px-4 py-2\">{r.time}</td><td className=\"px-4 py-2\">{r.place}</td></tr>\n        ))}\n      </tbody>\n    </table>\n  );\n}\n";
+
+    fn sample_lines_times(times: usize, prefix: &str) -> String {
+        let sample = paraphrased_thinking_loop_sample();
+        let lines: Vec<&str> = sample.lines().collect();
+        lines.iter().cycle().take(lines.len() * times).map(|l| format!("{prefix}{l}")).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn indented_list_and_keyword_led_loops_are_still_caught() {
+        assert!(detect_thinking_loop(&sample_lines_times(1, "    - ")), "4칸 들여 쓴 하위 목록");
+        assert!(detect_thinking_loop(&sample_lines_times(8, "    - ")), "4칸 들여 쓴 하위 목록 ×8");
+        assert!(detect_thinking_loop(&sample_lines_times(1, "  - ")), "2칸 들여 쓴 하위 목록");
+        assert!(detect_thinking_loop(&sample_lines_times(8, "\t")), "탭 들여쓰기 ×8");
+        assert!(detect_thinking_loop(&sample_lines_times(4, "export 문제: ")), "코드 낱말로 시작하는 한글 줄");
+
+        let s = ["index.php에 PHP 코드가 전혀 없고 순수 HTML 정적 파일입니다.", "php -S 실행 시 PHP 코드가 없으니 index.php가 그대로 내려옵니다.", "index.php가 이미 순수 HTML이라 별도 템플릿 치환도 없는 상태입니다."];
+        let fill = ["근데", "아 잠깐,", "실은", "하지만", "일단", "그럼", "또"];
+        let mut f = String::from("먼저 index.php와 js/home.js, js/auth.js 구조를 순서대로 살펴보겠습니다. 초기 HTML에는 Vue 마운트 대상이 있고 정적 리소스를 읽어 들입니다.\n");
+        for i in 0..15 {
+            f.push_str(&format!("- {} {}\n", fill[i % 7], s[i % 3]));
+        }
+        assert!(detect_thinking_loop(&f), "'- ' 목록 의역 루프");
+        let indented = f.lines().map(|l| format!("    {l}")).collect::<Vec<_>>().join("\n");
+        assert!(detect_thinking_loop(&indented), "4칸 들여 쓴 목록 의역 루프");
+    }
+
+    #[test]
+    fn repeated_code_blocks_and_long_periods_are_caught() {
+        let block = REVIEW_TSX_BLOCK;
+        assert!(detect_thinking_loop(&format!("표 컴포넌트를 작성하자.\n```tsx\n{}", block.repeat(20))), "닫히지 않은 코드 블록 안의 긴 주기");
+        assert!(detect_thinking_loop(&format!("표 컴포넌트를 작성하자.\n{}", format!("```tsx\n{block}```\n").repeat(20))), "같은 코드 블록 연달아");
+        assert!(detect_thinking_loop(&format!("표 컴포넌트를 작성하자.\n{}", format!("최종 코드는 다음과 같다.\n```tsx\n{block}```\n").repeat(20))));
+        assert!(detect_thinking_loop(&format!("표 컴포넌트를 작성하자.\n{}", format!("다시 확인하자.\n```tsx\n{block}```\n").repeat(20))));
+        let small = "const total = items.reduce((sum, item) => sum + item.price * item.qty, 0);\nconsole.log('합계', total);\n";
+        assert!(detect_thinking_loop(&format!("합계를 계산하자.\n```js\n{}", small.repeat(40))));
+        let draft = "fn parse_line(line: &str) -> Option<(String, u32)> {\n    let mut parts = line.split(',');\n    let name = parts.next()?.trim().to_string();\n    let count = parts.next()?.trim().parse::<u32>().ok()?;\n    Some((name, count))\n}\n";
+        let mut m = String::from("함수를 쓰자.\n");
+        for _ in 0..10 {
+            m.push_str(&format!("```rust\n{draft}```\n잠깐, 빈 줄 처리가 빠졌나? 다시 확인하자. 아니다, 빈 줄은 split에서 처리된다. 다시 써 보자.\n"));
+        }
+        assert!(detect_thinking_loop(&m), "같은 초안을 10번 다시 쓰기");
+
+        // 450자보다 긴 주기(약 1,500자)의 산문 반복도 원문 주기 검사가 잡는다.
+        let period: String = (0..60).map(|i| format!("단계 {i}에서는 값 {}을 확인한다. ", i * 7)).collect();
+        assert!(period.chars().count() > 1_000);
+        let norm: Vec<char> = period.repeat(5).chars().collect();
+        assert!(saturated_repetition(&norm), "긴 주기 포화 반복");
+        assert!(!saturated_repetition(&period.chars().collect::<Vec<_>>()), "한 번만 나온 글은 반복이 아니다");
+    }
+
+    #[test]
+    fn same_template_prose_and_per_file_diffs_are_not_loops() {
+        let names = &REVIEW_FILES[..12];
+        let mut a = String::from("프로젝트 구조를 파악하자. 각 컴포넌트 파일을 순서대로 확인해야 한다.\n");
+        for n in names {
+            a.push_str(&format!("src/components/{n}.tsx 파일은 props 타입을 export 하지 않는다\n"));
+        }
+        a.push_str("모두 같은 문제이므로 각 파일에 export type Props를 추가하자.");
+        assert!(!detect_thinking_loop(&a), "목록 기호 없는 같은 틀 12줄");
+
+        let mut d = String::from("읽은 파일을 하나씩 검토하자.\n");
+        for n in names {
+            d.push_str(&format!("{n}.tsx는 useState와 useEffect만 쓰고 있고 외부 상태 관리 라이브러리를 쓰지 않는다. 그래서 이 파일은 수정할 필요가 없다.\n"));
+        }
+        assert!(!detect_thinking_loop(&d), "끝 문장이 같은 파일별 판정 12개");
+
+        let mut e = String::new();
+        for t in ["로그인 폼", "회원가입 폼", "비밀번호 찾기", "프로필 수정", "게시판 목록", "게시글 상세", "댓글 작성", "검색 결과", "알림 목록", "설정 화면"] {
+            e.push_str(&format!("{t} 화면을 보면, 사용자가 입력한 값을 검증한 뒤 서버에 보내는 흐름이다. 이 화면에서는 오류 메시지를 화면 위쪽에 보여 주고, 성공하면 다음 화면으로 이동한다. 그런데 {t}에서는 로딩 상태를 따로 표시하지 않는다. 그래서 버튼을 여러 번 누르면 요청이 겹칠 수 있다.\n"));
+        }
+        assert!(!detect_thinking_loop(&e), "같은 틀로 화면 10개 분석");
+
+        let mut prose_plan = String::from("작업 계획을 세우자.\n");
+        for f in REVIEW_FILES {
+            prose_plan.push_str(&format!("{f} 컴포넌트 파일을 읽고 props 타입을 export 하도록 고친 다음 테스트를 실행한다. "));
+        }
+        assert!(!detect_thinking_loop(&prose_plan), "같은 틀 문장 30개");
+
+        let mut plan = String::from("작업 계획을 세우자. 각 단계마다 파일을 읽고 고친 뒤 테스트를 돌린다.\n");
+        for (i, f) in REVIEW_FILES.iter().enumerate() {
+            plan.push_str(&format!("{}. src/components/{f}.tsx 파일을 읽고 props 타입을 export 하도록 고친 다음 테스트를 실행한다.\n", i + 1));
+        }
+        assert!(!detect_thinking_loop(&plan), "같은 틀 번호 목록 30개");
+
+        let mut diff = String::from("변경 사항을 diff로 정리해 보자.\n");
+        for f in names {
+            diff.push_str(&format!("--- a/src/components/{f}.tsx\n+++ b/src/components/{f}.tsx\n-type Props = {{ title: string }}\n+export type Props = {{ title: string }}\n 컴포넌트 본문은 바꾸지 않는다\n"));
+        }
+        assert!(!detect_thinking_loop(&diff), "파일마다 같은 diff 줄");
+
+        let mut verify = String::from("각 파일을 확인해 보자.\n");
+        for f in &REVIEW_FILES[..15] {
+            verify.push_str(&format!("{f}.tsx를 확인해 보니 문제가 없는 것 같다. 다음 파일로 넘어가자.\n"));
+        }
+        assert!(!detect_thinking_loop(&verify));
+
+        let mut js = String::from("도구 인자를 다음처럼 구성하자. 각 항목은 이름과 설명, 필수 여부를 가진다.\n[\n");
+        for f in &REVIEW_FILES[..15] {
+            js.push_str(&format!("  {{\"name\": \"{f}\", \"description\": \"사용자 화면에서 쓰는 공통 컴포넌트입니다\", \"required\": true}},\n"));
+        }
+        js.push_str("]\n이렇게 하면 된다.");
+        assert!(!detect_thinking_loop(&js), "코드 블록 밖 JSON 배열");
+    }
+
+    // ---- 추론 길이 상한(I1 d) ----
+
+    /// 되풀이가 없는 한글 낱말 글(탐지기가 반복으로 보지 않는 긴 추론)
+    fn unique_reasoning(chars: usize, seed: u32) -> String {
+        let mut x = seed.wrapping_mul(2_654_435_761).wrapping_add(12_345);
+        let mut out = String::new();
+        let (mut count, mut words) = (0usize, 0usize);
+        while count < chars {
+            for _ in 0..3 {
+                x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                out.push(char::from_u32(0xAC00 + (x >> 8) % 11_172).unwrap());
+            }
+            words += 1;
+            out.push(if words % 12 == 0 { '\n' } else { ' ' });
+            count += 4;
+        }
+        out
+    }
+
+    fn reasoning_chunks(text: &str, finish: &str) -> Vec<Vec<u8>> {
+        let chars: Vec<char> = text.chars().collect();
+        let mut out: Vec<Vec<u8>> = chars
+            .chunks(2_000)
+            .map(|c| sse(json!({"choices":[{"delta":{"reasoning_content": c.iter().collect::<String>()}}]})))
+            .collect();
+        out.push(sse(json!({"choices":[{"delta":{},"finish_reason": finish}]})));
+        out.push(sse_done());
+        out
+    }
+
+    async fn small_context_turn(responses: Vec<Vec<Vec<u8>>>, opts: &[String], pref_off: bool) -> (ChatMessage, Vec<Value>) {
+        let (url, bodies) = mock_server(responses, 0).await;
+        let app = tauri::test::mock_app();
+        let mut settings = test_settings(url);
+        if pref_off {
+            settings.model_prefs.insert(
+                "qwen3.6-35b-a3b".into(),
+                crate::store::ModelPref { context_length: None, reasoning: Some("off".into()) },
+            );
+        }
+        let history = vec![msg("user", "버그 원인을 고쳐 줘")];
+        let (out, _) = run_agent_turn(
+            app.handle(),
+            TurnRequest {
+                settings: &settings, model_key: "qwen3.6-35b-a3b", model_display_name: "", reasoning_options: opts,
+                context_length: 4096, project: None, conversation_id: "c-cap", history: &history,
+                compaction: None, continue_from: None, mode: "code", checkpoint: None, knowledge: "", auto_skill: None,
+            },
+            Arc::new(AtomicBool::new(false)),
+        ).await.unwrap();
+        let b = bodies.lock().unwrap().clone();
+        (out, b)
+    }
+
+    #[test]
+    fn reasoning_hard_cap_is_at_least_forty_thousand_chars_or_three_contexts() {
+        assert_eq!(reasoning_hard_cap(4096), REASONING_HARD_CAP_MIN_CHARS);
+        assert_eq!(reasoning_hard_cap(32_768), 147_456);
+        assert!(!detect_thinking_loop(&unique_reasoning(42_000, 1)), "상한 시험 글은 탐지기에 걸리지 않는다");
+    }
+
+    #[tokio::test]
+    async fn endless_reasoning_without_repetition_hits_the_hard_cap() {
+        let opts = vec!["off".to_string(), "on".to_string()];
+        let long = reasoning_chunks(&unique_reasoning(42_000, 1), "length");
+        let (out, b) = small_context_turn(vec![long, done_round("고쳤습니다.")], &opts, false).await;
+        assert_eq!(b.len(), 2);
+        assert_eq!(b[1]["presence_penalty"], LOOP_RETRY_PRESENCE_PENALTY, "상한을 넘으면 반복으로 보고 반복 억제부터");
+        assert_eq!(out.content, "고쳤습니다.");
+
+        // 답 없이 길이 제한으로 이어 받은 라운드들의 추론은 합쳐서 센다.
+        let part = |seed| reasoning_chunks(&unique_reasoning(24_000, seed), "length");
+        let (_, b) = small_context_turn(vec![part(2), part(3), done_round("고쳤습니다.")], &opts, false).await;
+        assert_eq!(b.len(), 3);
+        assert!(b[1].get("presence_penalty").is_none(), "첫 이어 받기는 보통 요청");
+        assert_eq!(b[2]["presence_penalty"], LOOP_RETRY_PRESENCE_PENALTY);
+    }
+
+    // ---- 재시도 단계 건너뛰기(M3) ----
+
+    #[tokio::test]
+    async fn reasoning_already_off_skips_the_identical_penalty_retry() {
+        let opts = vec!["off".to_string(), "on".to_string()];
+        let (out, b) = small_context_turn(vec![looping_round(), done_round("안 와야 함")], &opts, true).await;
+        assert_eq!(b.len(), 1, "추론을 꺼 두었으면 같은 요청을 다시 보내지 않고 멈춘다");
+        assert!(out.content.contains("무한 루프를 막기 위해 생성을 멈췄습니다"));
+    }
+
+    #[tokio::test]
+    async fn model_without_reasoning_options_still_gets_a_penalty_retry() {
+        let (out, b) = small_context_turn(vec![looping_round(), done_round("고쳤습니다.")], &[], false).await;
+        assert_eq!(b.len(), 2);
+        assert_eq!(b[1]["presence_penalty"], LOOP_RETRY_PRESENCE_PENALTY);
+        assert_eq!(out.content, "고쳤습니다.");
+    }
+
+    // ---- 출력과 함께 온 반복 판정(M8) ----
+
+    #[tokio::test]
+    async fn loop_verdict_with_tool_calls_keeps_the_calls_and_penalizes_the_next_round() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "내용").unwrap();
+        let looped = paraphrased_thinking_loop_sample();
+        assert!(detect_thinking_loop(&looped));
+        let call = json!([{"index":0,"id":"r1","function":{"name":"read_file","arguments":json!({"relative_path":"a.txt"}).to_string()}}]);
+        let round1 = vec![
+            sse(json!({"choices":[{"delta":{"reasoning_content": looped, "tool_calls": call},"finish_reason":"tool_calls"}]})),
+            sse_done(),
+        ];
+        let (url, bodies) = mock_server(vec![round1, done_round("a.txt를 확인했습니다.")], 0).await;
+        let app = tauri::test::mock_app();
+        let settings = test_settings(url);
+        let project = test_project(dir.path());
+        let history = vec![msg("user", "a.txt를 확인해 줘")];
+        let opts = vec!["off".to_string(), "on".to_string()];
+        let (out, _) = run_agent_turn(
+            app.handle(),
+            TurnRequest { reasoning_options: &opts, ..turn_req(&settings, Some(&project), &history) },
+            Arc::new(AtomicBool::new(false)),
+        ).await.unwrap();
+        let b = bodies.lock().unwrap();
+        assert_eq!(b.len(), 2);
+        let sent = b[1]["messages"].as_array().unwrap();
+        assert!(sent.iter().any(|m| m["role"] == "tool" && m["content"].as_str().unwrap_or("").contains("내용")), "도구 호출은 실행된다");
+        assert_eq!(b[1]["presence_penalty"], LOOP_RETRY_PRESENCE_PENALTY, "다음 라운드만 반복 억제를 올린다");
+        assert_eq!(out.content, "a.txt를 확인했습니다.");
+        assert!(!out.content.contains("멈췄습니다"));
+    }
+
+    // ---- 같은 오류 횟수 초기화(M5) ----
+
+    fn observe_all(guard: &mut ToolLoopGuard, records: &[ToolExecutionRecord]) -> &'static str {
+        let refs: Vec<&ToolExecutionRecord> = records.iter().collect();
+        match guard.observe_round(&refs) {
+            ToolLoopAction::Continue => "continue",
+            ToolLoopAction::Warn(_) => "warn",
+            ToolLoopAction::Stop(_) => "stop",
+        }
+    }
+
+    #[test]
+    fn a_repeated_successful_ls_does_not_reset_a_failing_run() {
+        let round = || [
+            call_rec("run_python", json!({"path": "x.py"}), "error"),
+            call_rec("run_command", json!({"command": "ls"}), "completed"),
+        ];
+        let mut g = ToolLoopGuard::default();
+        let seq = [observe_all(&mut g, &round()), observe_all(&mut g, &round()), observe_all(&mut g, &round())];
+        assert_eq!(seq, ["continue", "warn", "stop"], "같은 ls가 성공해도 같은 실행 실패는 쌓인다");
+
+        // 처음 성공한 다른 실행(패키지 설치 등)은 진전이다.
+        let run = || call_rec("run_python", json!({"path": "x.py"}), "error");
+        let mut g = ToolLoopGuard::default();
+        assert_eq!(observe(&mut g, run()), "continue");
+        assert_eq!(observe(&mut g, run()), "warn");
+        assert_eq!(observe(&mut g, call_rec("run_command", json!({"command": "pip install requests"}), "completed")), "continue");
+        assert_eq!(observe(&mut g, run()), "continue", "새 실행이 성공한 뒤의 실패는 처음부터 센다");
+        // 같은 설치를 또 해도 다시 비우지 않는다.
+        assert_eq!(observe(&mut g, call_rec("run_command", json!({"command": "pip install requests"}), "completed")), "continue");
+        assert_eq!(observe(&mut g, run()), "warn");
+        assert_eq!(observe(&mut g, run()), "stop");
+
+        // 파일을 고치면 성공한 실행 목록도 비워, 같은 확인 실행이 다시 진전으로 인정된다.
+        let mut g = ToolLoopGuard::default();
+        let fix = || call_rec("modify_file", json!({"relative_path": "x.py", "target": "a", "replacement": "b"}), "completed");
+        for _ in 0..4 {
+            assert_eq!(observe_all(&mut g, &[run(), call_rec("run_command", json!({"command": "ls"}), "completed")]), "continue");
+            assert_eq!(observe(&mut g, fix()), "continue");
+        }
+    }
+
+    #[test]
+    fn repeated_ls_does_not_hide_a_read_loop_but_mcp_does_reset_reads() {
+        let read = || call_rec("read_file", json!({"relative_path": "a.txt"}), "completed");
+        let ls = || call_rec("run_command", json!({"command": "ls"}), "completed");
+        let mut g = ToolLoopGuard::default();
+        let seq: Vec<&str> = (0..4).map(|_| observe_all(&mut g, &[read(), ls()])).collect();
+        assert_eq!(seq, ["continue", "continue", "warn", "stop"], "첫 ls만 읽기 횟수를 비운다");
+
+        let mut g = ToolLoopGuard::default();
+        for _ in 0..3 {
+            observe(&mut g, read());
+        }
+        assert_eq!(observe(&mut g, call_rec("mcp__srv__tool", json!({}), "completed")), "continue");
+        assert_eq!(observe(&mut g, read()), "continue", "MCP 도구는 여전히 읽기 횟수를 비운다");
+    }
+
+    // ---- 압축 단계(I2) ----
+
+    #[test]
+    fn current_turn_user_message_survives_compaction_below_the_top_level() {
+        let question = "이".repeat(5_000);
+        let mut msgs = vec![json!({"role": "system", "content": "sys"})];
+        for i in 0..6 {
+            msgs.push(json!({"role": "user", "content": format!("옛 질문 {i} {}", "가".repeat(3_000))}));
+            msgs.push(json!({"role": "assistant", "content": "가".repeat(3_000)}));
+        }
+        let turn_start = msgs.len();
+        msgs.push(json!({"role": "user", "content": question.clone()}));
+        for i in 0..10 {
+            msgs.push(json!({"role": "assistant", "content": format!("진행 {i} {}", "나".repeat(3_000))}));
+        }
+        let len = |v: &Value| v["content"].as_str().map_or(0, |s| s.chars().count());
+        let l3 = compact_messages(&msgs, 3, turn_start);
+        assert_eq!(l3[turn_start]["content"], question.as_str(), "3단계까지는 이번 턴 질문을 줄이지 않는다");
+        assert!(len(&l3[1]) < 2_200, "옛 대화는 줄인다");
+        let l4 = compact_messages(&msgs, COMPACT_MAX_LEVEL, turn_start);
+        assert!(len(&l4[turn_start]) < 600, "가장 강한 단계에서만 이번 턴 질문도 줄인다");
+    }
+
+    #[test]
+    fn overflow_escalation_skips_levels_that_shrink_nothing_and_drops_back_when_small() {
+        let big = "다".repeat(10_000);
+        let mut msgs = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "파일 6개를 읽어 줘"})];
+        for i in 0..6 {
+            msgs.push(json!({"role": "assistant", "content": null, "tool_calls": [
+                {"id": format!("c{i}"), "type": "function", "function": {"name": "read_file", "arguments": json!({"relative_path": format!("f{i}.txt")}).to_string()}}
+            ]}));
+            msgs.push(json!({"role": "tool", "tool_call_id": format!("c{i}"), "content": big.clone()}));
+        }
+        let sent0 = total_chars(&compact_messages(&msgs, 0, 1));
+        assert_eq!(next_compact_level(&msgs, 0, 1, sent0), Some(2), "첫 초과는 이번 턴까지 넓힌 예전 1단계 규칙부터");
+        let sent2 = total_chars(&compact_messages(&msgs, 2, 1));
+        assert_eq!(next_compact_level(&msgs, 2, 1, sent2), Some(3));
+        let sent4 = total_chars(&compact_messages(&msgs, 4, 1));
+        assert_eq!(next_compact_level(&msgs, 4, 1, sent4), None, "더 줄일 단계가 없으면 오류로 넘긴다");
+
+        // 도구 결과가 없는 대화: 2단계는 줄이는 것이 없어 바로 3단계로.
+        let mut chat = vec![json!({"role": "system", "content": "sys"})];
+        for i in 0..12 {
+            chat.push(json!({"role": if i % 2 == 0 { "user" } else { "assistant" }, "content": "라".repeat(5_000)}));
+        }
+        chat.push(json!({"role": "user", "content": "다음 질문"}));
+        let ts = chat.len() - 1;
+        let sent = total_chars(&chat);
+        assert_eq!(next_compact_level(&chat, 0, ts, sent), Some(3));
+
+        // 초과가 났던 크기보다 한참 작아지면 한 단계씩 되돌린다(자동 1단계 아래로는 내리지 않는다).
+        let small = vec![json!({"role": "system", "content": "sys"}), json!({"role": "user", "content": "짧은 질문"})];
+        assert_eq!(drop_back_compact_level(&small, 3, 0, 1, 100_000), 0);
+        assert_eq!(drop_back_compact_level(&small, 3, 1, 1, 100_000), 1);
+        assert_eq!(drop_back_compact_level(&msgs, 3, 0, 1, sent2 + 1), 3, "한 단계 낮추면 다시 넘칠 크기면 그대로");
     }
 }

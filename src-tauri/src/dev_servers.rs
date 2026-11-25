@@ -609,7 +609,9 @@ pub(crate) fn logs<R: Runtime>(
     }
     let servers = list(app, project_id)?;
     let running: Vec<_> = servers.iter().filter(|s| s.terminal.running).collect();
-    let each = cap / running.len().max(1);
+    // 배열 괄호와 항목 사이 쉼표(n + 1자)를 빼고 나눈다: 합친 출력이 도구 출력 상한을 넘지 않게.
+    let n = running.len().max(1);
+    let each = cap.saturating_sub(n + 1) / n;
     let output: Vec<_> = running.into_iter().map(|s| server_output(app, s, 10, each)).collect();
     Ok(serde_json::json!(output).to_string())
 }
