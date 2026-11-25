@@ -48,6 +48,12 @@
 - 핵심 에이전트 모듈(`exaone.rs` → `agent.rs`) 및 스트림 심볼 정리(결정 0016): 완료. `src-tauri/src/exaone.rs` → `src-tauri/src/agent.rs`, `run_exaone_turn` → `run_agent_turn`, `"exaone-stream"` → `"anylm-stream"`, `onExaoneStream` → `onAgentStream`으로 변경하고 `noBrandText.test.ts` 예외를 제거했다. `lib.rs`·`harness.rs`·`mcp.rs`·`dev_servers.rs`·`api.ts`·`App.tsx`·`AGENTS.md`를 함께 갱신했고, 레거시 마이그레이션 상수·`DEFAULT_CATALOG_URL`은 유지했다. 서명된 NSIS 설치 파일(17.72 MiB) 및 `release/latest.json` 재생성.
 - 추론 반복 억제(`presence_penalty`) 및 의역 사고 루프 탐지·자동 복구(결정 0017): 완료. 실행 중인 앱(`PID 3520`, `qwen3.6-35b-a3b` 32K) 모니터링에서 확인한 `<think>` 내부 한국어 의역 자기검열 루프를 막기 위해, `src-tauri/src/agent.rs`에 `thinking_presence_penalty`(추론 ON·미지원/OFF 제외 시 코딩 모드 `0.8`, 일반·프로젝트 등 `1.2`)를 추가해 요청에 자동 반영한다. 또한 `acc.reasoning` 전용 `detect_thinking_loop`(절 단위 한국어 전환 추임새/강조 제거 정규화 + 5어절 슬라이딩 싱글 검사; `acc.content`는 기존 엄격한 `detect_repetition_loop` 유지)를 구현하고, 본문·도구 출력 전 `<think>` 루프 감지 시 모델 문맥에 망가진 사고를 넣지 않고 `reasoning_effort: "none"`(지원 시)으로 라운드당 최대 1회(턴당 최대 2회) 자동 재시도한 뒤 여전히 반복되면 즉시 멈추도록 했다. 서명된 NSIS 설치 파일(17.77 MiB) 및 `release/latest.json` 재생성.
 - 기본 컨텍스트 16K 전환 및 8K~128K 콤보 선택 UI(결정 0018): 완료. `src-tauri/src/lmstudio.rs`(`DEFAULT_CONTEXT = 16384`), `src-tauri/src/harness.rs`(`ANYLM_CONTEXT` 기본 `DEFAULT_CONTEXT`), `src/lmstudio/sendFlow.ts`(`DEFAULT_CONTEXT = 16384`), `AGENTS.md`의 기본 원하는 컨텍스트를 `16384`(16K)로 바꿨다. 또한 `src/lmstudio/modelText.ts`(`CONTEXT_PRESETS`, `formatContextSize`, `contextOptions`)와 `src/lmstudio/ConnectionDialog.tsx`를 수정해 숫자 직접 입력란 대신 `8K`~`128K`(`8K · 16K (기본) · 24K · 32K · 48K · 64K · 96K · 128K`) 콤보 선택(`<select>`)을 제공하며, 모델 `maxContextLength` 이하만 표시하되 기존 저장값·`[N K로 다시 시도]` 값도 함께 보존한다. 서명된 NSIS 설치 파일(17.76 MiB) 및 `release/latest.json` 재생성.
+- 전체 검토 수정 1차(보안·개발 서버 시작, 결정 0019): 완료. 커밋 `75fdcdb`·`648dc93`·`17b2d75`·`b35003f`.
+  - C1: 미리보기 iframe이 `http://tauri.localhost:<포트>`로 앱 IPC를 로컬로 쓰던 경로를 막았다. `ipc_guard.rs`의 `guard_invoke`는 Origin이 앱 출처와 정확히 같을 때만 앱 명령을 실행한다. WebView2 프레임 이벤트로 하위 프레임이 예약 호스트로 이동하는 것을 취소한다. CSP `frame-src`는 `*.localhost`를 빼고 `anylm-preview.localhost`만 남겼다. `is_app_url`은 포트가 붙은 주소를 거부한다.
+  - C2: 개발 서버와 터미널의 작업 폴더에서 `\\?\` 접두사를 뗀다(`fs_ops::process_path`).
+  - C-I1: 서버 준비 확인을 127.0.0.1과 ::1에 동시에 시도한다.
+  - B-I1: 로컬 LLM 클라이언트는 프록시와 리디렉션을 쓰지 않는다(`providers::local_http_builder`).
+  - 남은 것: 플러그인 명령(`core:event:default`)은 프레임 차단에만 기대고, 실제 창에서 하는 확인은 아래 수동 확인 목록에 있다.
 
 ## 다음 할 일
 1. **남은 화면 QA**: 아래 수동 확인 목록의 기존 기능과 공급자 로그인·계정 확인을 이어서 점검한다. Windows 개발 앱에서 이번 변경의 터미널·로컬 미리보기·연결 창은 확인했다.
@@ -64,6 +70,8 @@
    - 그 밖에 검토의 "Can stay" 목록(서버 상태는 아무 HTTP 응답이면 켜짐으로 봄 등).
 
 ## 마지막 확인
+2026-11-25, 전체 검토 수정 1차(결정 0019) 뒤: `npm test` 통과(32 파일, 192 통과·1 건너뜀), `npx tsc --noEmit` 오류 없음, `cd src-tauri && cargo test --lib` 313 통과·0 실패·11 무시(`ipc_guard::tests::`, `dev_servers::tests::server_commands_run_in_the_project_folder_not_windows`·`ipv6_only_server_is_seen_through_localhost`, `fs_ops::tests::process_path_drops_the_verbatim_prefix_only`, `providers::tests::local_client_returns_redirects_as_is` 포함), `cargo check --all-targets` 경고·오류 없음, `npm run build` 성공. 프레임 차단의 실제 창 확인은 수동 확인 목록에 남겼다.
+
 2026-11-25, 기본 컨텍스트 16K 전환 및 8K~128K 콤보 선택 UI(결정 0018) 뒤: `npm test` 통과(32 파일, 192 통과·1 건너뜀, `noBrandText.test.ts`·`modelText.test.ts`·`sendFlow.test.ts` 포함), `npx tsc --noEmit` 오류 없음, `cd src-tauri && cargo test --lib` 305 통과·0 실패·11 무시(`lmstudio::tests::`·`harness::tests::` 포함), `cargo check --all-targets` 경고·오류 없음, `npm run build` 성공, `npm run tauri build`로 `Any LM Desktop_0.1.0_x64-setup.exe`(17.76 MiB)·`.sig` 및 `release/latest.json` 재생성.
 
 2026-11-24, 추론 ON `presence_penalty`·의역 사고 루프 탐지 및 자동 복구(결정 0017) 뒤: `npm test` 통과(32 파일, 191 통과·1 건너뜀, `noBrandText.test.ts` 포함), `npx tsc --noEmit` 오류 없음, `cd src-tauri && cargo test --lib` 305 통과·0 실패·11 무시(`agent::tests::` 92 통과, 실행 중 개발 앱 잠금 회피를 위해 분리 타깃 폴더에서 실행), `cargo check --all-targets` 경고·오류 없음, `npm run build` 성공, `npm run tauri build`로 `Any LM Desktop_0.1.0_x64-setup.exe`(17.77 MiB)·`.sig` 및 `release/latest.json` 재생성.
@@ -168,9 +176,9 @@
 - 에이전트 작업 도중 컨텍스트가 넘칠 때 긴급 압축으로 이어 가는지(필요하면 9B를 8192로 로드해 확인)
 
 ## 마지막 작업자
-- 도구: antigravity
-- 모델: Gemini 4 Neon (High)
-- 시각: 2026-11-24
+- 도구: claude-code
+- 모델: Claude Opus 5.5
+- 시각: 2026-11-25
 
 ### 프로젝트 화면 · 메모리
 - 모델이 `remember`로 저장하면(예: "이 프로젝트 보고서는 항상 존댓말로 쓴다고 기억해") 대화 중 도구 카드가 뜨고 프로젝트 화면 "프로젝트 메모리" 카드에 [모델] 표시로 바로 보이는지, [추가]로 직접 쓴 항목은 [직접]으로 보이는지, 편집·삭제(삭제 전 확인)가 되는지, 새 대화에서 모델이 그 내용을 아는지 확인.
@@ -221,3 +229,14 @@
 - 긴 프로젝트 작업 시 모델이 최근 읽은 파일을 잊고 되풀이하지 않으며, 동일 오류/읽기 반복 또는 생각 반복 시 안내 후 멈추는지, 실시간 생각 창이 스트리밍에 맞춰 자동 스크롤되고 위로 올리면 멈추는지 확인
 - `환경 · 업데이트` 탭에서 현재 버전 `0.1.0`, [업데이트 확인], 자동 확인 체크가 정상 동작하는지(GitHub 릴리스가 올라간 이후 실제 업데이트 알림·설치 확인)
 - 빌드된 `Any LM Desktop_0.1.0_x64-setup.exe` 설치 및 실행 확인
+
+### 미리보기 IPC 격리 (결정 0019)
+- `npm run tauri dev`로 띄운 창에서 확인한다. 임시 폴더에 `index.html`을 만들고 아래 내용을 넣는다: `<iframe src="http://tauri.localhost:5173/x.html"></iframe>`. 같은 폴더의 `x.html`에는 `<pre id=o>…</pre><script>__TAURI_INTERNALS__.invoke('terminal_list').then(r=>o.textContent='열림 '+JSON.stringify(r),e=>o.textContent='거절 '+e)</script>`를 넣는다. 그 폴더에서 `python -m http.server 5173 --bind 127.0.0.1`을 실행하고, 작업 패널 미리보기에 `http://localhost:5173/`을 연다.
+- 기대 결과: 안쪽 프레임이 열리지 않아야 한다. 개발 콘솔(stderr)에 "차단한 iframe 이동: http://tauri.localhost:5173/x.html"이 찍힌다. 프레임 차단을 끄고 시험했다면 화면에 "거절 허용되지 않은 출처의 요청입니다."가 떠야 한다. "열림 [...]"이 보이면 실패다.
+- `x.html`을 미리보기 주소창에 직접 `http://tauri.localhost:5173/x.html`로 넣으면 "올바른 HTTP 또는 HTTPS 주소" 안내가 떠야 한다. `http://test.localhost:5173/`은 "외부 사이트는 브라우저에서 엽니다." 안내와 함께 브라우저로 열려야 한다.
+- 개발 콘솔에 "중첩 iframe 이동은 감시하지 못합니다"가 찍히면 WebView2 런타임이 오래된 것이다(1.0.2420 미만). 런타임을 갱신한다.
+- 끝나면 5173 서버를 끈다.
+
+### 개발 서버 작업 폴더·준비 확인 (전체 검토 수정 1차)
+- 설정에서 터미널 셸을 명령 프롬프트로 바꾼 뒤 Vite 프로젝트의 `npm run dev`를 시작한다. 로그에 "UNC 경로는 지원되지 않습니다"가 없어야 한다. 서버는 프로젝트 폴더에서 돌아야 한다.
+- 로그에 `http://localhost:5173/`(::1에만 열림)이 찍힌 뒤 1~2초 안에 상태가 "실행 중"으로 바뀌는지 확인한다.
