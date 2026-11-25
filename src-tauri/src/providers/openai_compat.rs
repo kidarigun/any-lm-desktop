@@ -46,10 +46,7 @@ const QUICK_TIMEOUT: Duration = Duration::from_secs(10);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 fn client(timeout: Duration) -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .timeout(timeout)
-        .build()
-        .map_err(|e| e.to_string())
+    super::local_http_client(timeout)
 }
 
 /// `GET /v1/models` 응답에서 모델 목록을 읽는다 (`data` 또는 일부 서버의 `models` 배열 지원).

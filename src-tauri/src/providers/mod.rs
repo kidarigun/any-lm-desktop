@@ -35,6 +35,18 @@ pub fn capabilities(provider: LlmProvider) -> ProviderCapabilities {
     }
 }
 
+/// 로컬 LLM 서버용 HTTP 클라이언트 설정. 대화·파일 내용이 PC 밖으로 나가지 않게
+/// HTTP_PROXY·ALL_PROXY 같은 프록시 환경 변수를 무시하고(루프백도 프록시로 보낼 수 있다),
+/// 리디렉션을 따르지 않는다(로컬 서버가 다른 주소로 돌려보내도 그대로 응답으로 본다).
+pub fn local_http_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
+}
+
+/// 전체 요청 시간 제한이 있는 로컬 LLM 클라이언트.
+pub fn local_http_client(timeout: std::time::Duration) -> Result<reqwest::Client, String> {
+    local_http_builder().timeout(timeout).build().map_err(|e| e.to_string())
+}
+
 /// 이 PC의 로컬 서버(`http://localhost`, `127.0.0.1`, `[::1]`)만 허용한다.
 pub fn validate_local_url(server_url: &str, provider: LlmProvider) -> Result<reqwest::Url, String> {
     let raw = server_url.trim();
@@ -209,6 +221,34 @@ pub async fn turn_model_info(settings: &AppSettings, key: &str) -> TurnModelInfo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn local_client_returns_redirects_as_is() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // 돌려보낼 곳: 연결이 오면 표시한다.
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let followed = tokio::spawn(async move { target.accept().await.is_ok() });
+        let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = server.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = server.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+            let reply = format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{target_addr}/v1/models\r\n\
+                 Content-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            socket.write_all(reply.as_bytes()).await.unwrap();
+        });
+        let client = local_http_client(std::time::Duration::from_secs(5)).unwrap();
+        let resp = client.get(format!("http://{addr}/v1/models")).send().await.unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(resp.headers()["location"], format!("http://{target_addr}/v1/models"));
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(!followed.is_finished(), "리디렉션을 따라가면 안 된다");
+        followed.abort();
+    }
 
     #[test]
     fn local_url_security_applies_to_all_providers() {

@@ -262,7 +262,7 @@ pub fn parse_load_response(v: &Value, requested: u32) -> Result<LoadedInstance, 
 }
 
 fn client(timeout: Duration) -> Result<reqwest::Client, String> {
-    reqwest::Client::builder().timeout(timeout).build().map_err(|e| e.to_string())
+    crate::providers::local_http_client(timeout)
 }
 
 pub async fn list_models(settings: &AppSettings) -> Result<Vec<LmModel>, String> {

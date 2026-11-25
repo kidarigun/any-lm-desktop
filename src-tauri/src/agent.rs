@@ -1881,7 +1881,7 @@ pub async fn summarize_for_compaction(
         obj.extend(lmstudio::reasoning_fields(reasoning_options, pref));
     }
 
-    let client = reqwest::Client::builder()
+    let client = crate::providers::local_http_builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .build()
         .map_err(|e| format!("HTTP 클라이언트 생성 실패: {}", e))?;
@@ -2208,7 +2208,7 @@ pub async fn run_agent_turn<R: Runtime>(
         msg.tool_records.push(record);
     }
 
-    let client = reqwest::Client::builder()
+    let client = crate::providers::local_http_builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .build()
         .map_err(|e| format!("HTTP 클라이언트 생성 실패: {}", e))?;

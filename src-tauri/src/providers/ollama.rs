@@ -47,10 +47,7 @@ const UNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 const START_POLL_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn client(timeout: Duration) -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .timeout(timeout)
-        .build()
-        .map_err(|e| e.to_string())
+    super::local_http_client(timeout)
 }
 
 fn fallback_show(name: &str, families: &[String]) -> OllamaShowInfo {
