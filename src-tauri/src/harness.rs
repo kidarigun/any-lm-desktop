@@ -12,7 +12,7 @@
 //!   ANYLM_PROVIDER   공급자 (lmstudio | ollama | openai_compat, 기본: lmstudio)
 //!   ANYLM_MODEL      시험할 모델 key (필수)
 //!   ANYLM_SERVER     로컬 LLM 서버 주소 (기본: 공급자 기본 포트)
-//!   ANYLM_CONTEXT    모델이 로드된 컨텍스트 길이 (기본: 32768) — 줄이기 기준 계산에 쓴다
+//!   ANYLM_CONTEXT    모델이 로드된 컨텍스트 길이 (기본: 16384) — 줄이기 기준 계산에 쓴다
 //!   ANYLM_TOKEN      API 토큰 (선택)
 //!   ANYLM_SCENARIOS  시나리오 JSON 파일 (기본: ../harness/scenarios.json)
 //!   ANYLM_OUT        결과 폴더 (기본: ../harness/runs/default)
@@ -200,7 +200,7 @@ pub fn config_from_env(get: impl Fn(&str) -> Option<String>) -> Result<HarnessCo
         .ok_or_else(|| "ANYLM_MODEL 환경 변수에 시험할 모델 key를 넣어 주세요. (예: qwen3.5-9b)".to_string())?;
     let context_length = match val("ANYLM_CONTEXT") {
         Some(v) => v.parse::<u32>().map_err(|_| format!("ANYLM_CONTEXT는 숫자여야 합니다: {}", v))?,
-        None => 32768,
+        None => crate::lmstudio::DEFAULT_CONTEXT,
     };
     Ok(HarnessConfig {
         provider,
@@ -855,7 +855,7 @@ fn config_defaults() {
     let c = config_from_env(|k| (k == "ANYLM_MODEL").then(|| "qwen3.5-9b".to_string())).unwrap();
     assert_eq!(c.provider, LlmProvider::Lmstudio);
     assert_eq!(c.server_url, "http://localhost:1234");
-    assert_eq!(c.context_length, 32768);
+    assert_eq!(c.context_length, 16384);
     assert_eq!(c.model, "qwen3.5-9b");
     assert_eq!(c.out_dir, PathBuf::from("../harness/runs/default"));
 }

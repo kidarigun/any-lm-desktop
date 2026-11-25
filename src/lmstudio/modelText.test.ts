@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { LmModel } from "../types";
-import { capabilityBadges, describeModel, loadedLabel, normalizeContext, reasoningEnabled, withReasoning } from "./modelText";
+import { capabilityBadges, contextOptions, describeModel, formatContextSize, loadedLabel, normalizeContext, reasoningEnabled, withReasoning } from "./modelText";
 
 // src-tauri/src/testdata/lmstudio_models.json 과 같은 값
 const qwen9b: LmModel = {
@@ -66,5 +66,18 @@ describe("modelText", () => {
     expect(withReasoning(prefs, "a", "off")).toEqual({ a: { contextLength: 8192, reasoning: "off" } });
     expect(withReasoning(prefs, "b", "on")).toEqual({ a: { contextLength: 8192 }, b: { reasoning: "on" } });
     expect(prefs).toEqual({ a: { contextLength: 8192 } });
+  });
+  it("formats and builds 8K-128K context preset options safely", () => {
+    expect(formatContextSize(16384)).toBe("16K");
+    expect(formatContextSize(131072)).toBe("128K");
+    expect(formatContextSize(20000)).toBe("20,000");
+
+    expect(contextOptions(262144)).toEqual([8192, 16384, 24576, 32768, 49152, 65536, 98304, 131072]);
+    expect(contextOptions(0)).toEqual([8192, 16384, 24576, 32768, 49152, 65536, 98304, 131072]);
+    expect(contextOptions(32768)).toEqual([8192, 16384, 24576, 32768]);
+    expect(contextOptions(4096)).toEqual([4096]);
+    expect(contextOptions(262144, 4096)).toEqual([4096, 8192, 16384, 24576, 32768, 49152, 65536, 98304, 131072]);
+    expect(contextOptions(262144, 20000)).toEqual([8192, 16384, 20000, 24576, 32768, 49152, 65536, 98304, 131072]);
+    expect(contextOptions(32768, 131072)).toEqual([8192, 16384, 24576, 32768]);
   });
 });

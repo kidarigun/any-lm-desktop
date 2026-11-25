@@ -3,7 +3,14 @@ import { X } from "lucide-react";
 import { BackendAPI } from "../api";
 import { RuntimePanel } from "../runtime/RuntimePanel";
 import type { AppSettings, LlmProvider, LmModel } from "../types";
-import { capabilityBadges, describeModel, loadedLabel, normalizeContext } from "./modelText";
+import {
+  capabilityBadges,
+  contextOptions,
+  describeModel,
+  formatContextSize,
+  loadedLabel,
+  normalizeContext,
+} from "./modelText";
 import {
   PROVIDERS,
   PROVIDER_META,
@@ -11,9 +18,14 @@ import {
   switchDraftProvider,
   syncDraftActiveProfile,
 } from "./providerMeta";
-import { isServerOffMessage, smallerContext, smallerContextLabel } from "./sendFlow";
+import {
+  DEFAULT_CONTEXT,
+  isServerOffMessage,
+  smallerContext,
+  smallerContextLabel,
+  wantedContext,
+} from "./sendFlow";
 
-const DEFAULT_CONTEXT = 32768;
 const BADGE_TEXT = { vision: "비전", tools: "도구", reasoning: "추론" } as const;
 
 const inputCls =
@@ -39,8 +51,6 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged,
   const [error, setError] = useState<string | null>(null);
   /** 로드에 실패한 모델과 시도한 컨텍스트 (오류 옆에 [N K로 다시 시도]) */
   const [loadFailed, setLoadFailed] = useState<{ key: string; context: number } | null>(null);
-  /** 입력 중인 글자(모델 key별). 없으면 저장된 값을 보여 준다. */
-  const [ctxText, setCtxText] = useState<Record<string, string>>({});
 
   const savedProvider = activeProvider(settings);
   const draftProvider = activeProvider(draft);
@@ -76,13 +86,9 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged,
     void refresh();
   }, [refresh]);
 
-  const contextOf = (m: LmModel) => {
-    const saved = draft.modelPrefs?.[m.key]?.contextLength;
-    const v = saved !== undefined ? normalizeContext(String(saved), m.maxContextLength) : null;
-    return v ?? Math.min(DEFAULT_CONTEXT, m.maxContextLength || DEFAULT_CONTEXT);
-  };
+  const contextOf = (m: LmModel) => wantedContext(draft, m);
 
-  /** 입력을 확정한다: 올바른 값이면 저장, 아니면 설정을 지워 기본값으로 돌린다. */
+  /** 선택한 컨텍스트를 모델별 설정에 반영한다(유효하지 않으면 기본값으로 되돌린다). */
   function commitContext(d: AppSettings, m: LmModel, raw: string): AppSettings {
     const v = normalizeContext(raw, m.maxContextLength);
     const prefs = { ...d.modelPrefs };
@@ -94,26 +100,9 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged,
     return { ...d, modelPrefs: prefs };
   }
 
-  function blurContext(m: LmModel) {
-    const raw = ctxText[m.key];
-    if (raw === undefined) return;
-    setDraft((d) => commitContext(d, m, raw));
-    setCtxText(({ [m.key]: _drop, ...rest }) => rest);
-  }
-
   function selectProvider(next: LlmProvider) {
     if (next === draftProvider) return;
-    setDraft((d) => {
-      let committed = d;
-      if (!switchingProvider) {
-        for (const m of models) {
-          const raw = ctxText[m.key];
-          if (raw !== undefined) committed = commitContext(committed, m, raw);
-        }
-      }
-      return switchDraftProvider(committed, next);
-    });
-    setCtxText({});
+    setDraft((d) => switchDraftProvider(d, next));
     setLoadFailed(null);
     setError(null);
   }
@@ -133,9 +122,7 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged,
   }
 
   async function load(m: LmModel, reload: boolean, context?: number) {
-    const raw = ctxText[m.key];
-    const ctx =
-      context ?? (raw !== undefined ? (normalizeContext(raw, m.maxContextLength) ?? contextOf(m)) : contextOf(m));
+    const ctx = context ?? contextOf(m);
     setBusyKey(m.key);
     setError(null);
     setLoadFailed(null);
@@ -153,14 +140,13 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged,
     }
   }
 
-  /** [N K로 다시 시도]: 절반 컨텍스트(바닥 4K)를 이 모델의 컨텍스트 칸에 넣고 로드한다([저장]하면 유지된다). */
+  /** [N K로 다시 시도]: 절반 컨텍스트(바닥 4K)를 이 모델의 컨텍스트 설정에 넣고 로드한다([저장]하면 유지된다). */
   async function retrySmaller() {
     if (!loadFailed) return;
     const n = smallerContext(loadFailed.context);
     const m = models.find((x) => x.key === loadFailed.key);
     if (n === null || !m) return;
     setDraft((d) => commitContext(d, m, String(n)));
-    setCtxText(({ [m.key]: _drop, ...rest }) => rest);
     await load(m, m.loaded.length > 0, n);
   }
 
@@ -179,14 +165,7 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged,
   }
 
   async function save() {
-    let next = draft;
-    if (!switchingProvider) {
-      for (const m of models) {
-        const raw = ctxText[m.key];
-        if (raw !== undefined) next = commitContext(next, m, raw);
-      }
-    }
-    next = syncDraftActiveProfile(next);
+    const next = syncDraftActiveProfile(draft);
     try {
       await onSave(next);
     } catch (err) {
@@ -363,6 +342,8 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged,
                   const isLoaded = m.loaded.length > 0;
                   const busy = busyKey === m.key;
                   const subtitle = describeModel(m);
+                  const currentCtx = contextOf(m);
+                  const ctxChoices = contextOptions(m.maxContextLength, currentCtx);
                   return (
                     <div
                       key={m.key}
@@ -413,19 +394,25 @@ export function ConnectionDialog({ settings, onSave, onClose, onSettingsChanged,
                       </div>
                       <div className="flex items-center gap-2">
                         <label className="text-stone-600 dark:text-stone-300">컨텍스트</label>
-                        <input
-                          type="number"
-                          min={1024}
-                          max={m.maxContextLength > 0 ? m.maxContextLength : undefined}
-                          step={1024}
-                          value={ctxText[m.key] ?? String(contextOf(m))}
-                          onChange={(e) => setCtxText({ ...ctxText, [m.key]: e.target.value })}
-                          onBlur={() => blurContext(m)}
-                          className="w-28 bg-white dark:bg-[#1E1E1C] border border-stone-300 dark:border-[#3A3A36] rounded-lg px-2 py-1 font-mono text-stone-900 dark:text-stone-100 focus:outline-none focus:border-[#A50034]"
-                        />
+                        <select
+                          aria-label={`${m.displayName} 컨텍스트`}
+                          value={String(currentCtx)}
+                          disabled={busy}
+                          onChange={(e) => setDraft((d) => commitContext(d, m, e.target.value))}
+                          className="w-32 bg-white dark:bg-[#1E1E1C] border border-stone-300 dark:border-[#3A3A36] rounded-lg px-2 py-1 font-mono text-stone-900 dark:text-stone-100 cursor-pointer focus:outline-none focus:border-[#A50034] disabled:opacity-50"
+                        >
+                          {ctxChoices.map((v) => (
+                            <option key={v} value={String(v)}>
+                              {v === DEFAULT_CONTEXT ? `${formatContextSize(v)} (기본)` : formatContextSize(v)}
+                            </option>
+                          ))}
+                        </select>
                         {m.maxContextLength > 0 && (
-                          <span className="text-[11px] text-stone-500 dark:text-stone-400">
-                            최대 {m.maxContextLength.toLocaleString()}
+                          <span
+                            title={`${m.maxContextLength.toLocaleString()} 토큰`}
+                            className="text-[11px] text-stone-500 dark:text-stone-400"
+                          >
+                            최대 {formatContextSize(m.maxContextLength)}
                           </span>
                         )}
                         <span className="flex-1" />

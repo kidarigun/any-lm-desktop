@@ -32,6 +32,45 @@ export function capabilityBadges(m: LmModel): ("vision" | "tools" | "reasoning")
 
 export const MIN_CONTEXT = 1024;
 
+export const CONTEXT_PRESETS = [
+  8192,
+  16384,
+  24576,
+  32768,
+  49152,
+  65536,
+  98304,
+  131072,
+] as const;
+
+/** 토큰 수를 "16K"처럼 읽기 쉽게 표시(1024 배수가 아니면 쉼표 숫자). */
+export function formatContextSize(tokens: number): string {
+  if (tokens > 0 && tokens % 1024 === 0) return `${tokens / 1024}K`;
+  return tokens.toLocaleString();
+}
+
+/**
+ * 컨텍스트 콤보 선택지(8K~128K).
+ * - maxContextLength > 0이면 그 이하 프리셋만 노출한다(8K 미만 모델은 maxContextLength 자체를 포함).
+ * - 기존 저장값이나 [4K로 다시 시도]로 설정된 currentValue가 프리셋에 없더라도 유효(>= MIN_CONTEXT)하면 오름차순으로 함께 보여 준다.
+ */
+export function contextOptions(maxContextLength: number, currentValue?: number): number[] {
+  const list: number[] = CONTEXT_PRESETS.filter(
+    (v) => maxContextLength <= 0 || v <= maxContextLength,
+  );
+  if (list.length === 0 && maxContextLength >= MIN_CONTEXT) {
+    list.push(maxContextLength);
+  }
+  if (currentValue !== undefined && Number.isFinite(currentValue)) {
+    const normalized =
+      maxContextLength > 0 ? Math.min(Math.floor(currentValue), maxContextLength) : Math.floor(currentValue);
+    if (normalized >= MIN_CONTEXT && !list.includes(normalized)) {
+      list.push(normalized);
+    }
+  }
+  return list.sort((a, b) => a - b);
+}
+
 /** 입력한 컨텍스트 글자를 숫자로. 비었거나 숫자가 아니거나 1024 미만이면 null(미설정), 최대를 넘으면 최대로. */
 export function normalizeContext(raw: string, max: number): number | null {
   const n = Math.floor(Number(raw.trim()));

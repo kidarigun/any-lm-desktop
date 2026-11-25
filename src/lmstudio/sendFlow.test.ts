@@ -12,13 +12,15 @@ describe("sendFlow", () => {
   });
 
   it("picks the wanted context like the backend", () => {
-    const model = { key: "m", maxContextLength: 16384 } as LmModel;
+    const model = { key: "m", maxContextLength: 32768 } as LmModel;
+    const smallModel = { key: "s", maxContextLength: 8192 } as LmModel;
     const settings = (prefs: AppSettings["modelPrefs"]) => ({ modelPrefs: prefs }) as AppSettings;
     expect(wantedContext(settings({}), model)).toBe(16384);
+    expect(wantedContext(settings({}), smallModel)).toBe(8192);
     expect(wantedContext(settings({ m: { contextLength: 8192 } }), model)).toBe(8192);
     expect(wantedContext(settings({ m: { contextLength: 500 } }), model)).toBe(16384);
-    expect(wantedContext(settings({ m: { contextLength: 999999 } }), model)).toBe(16384);
-    expect(wantedContext(settings({}), { ...model, maxContextLength: 0 })).toBe(32768);
+    expect(wantedContext(settings({ m: { contextLength: 999999 } }), model)).toBe(32768);
+    expect(wantedContext(settings({}), { ...model, maxContextLength: 0 })).toBe(16384);
   });
 
   it("suggests half the attempted context with a 4K floor", () => {

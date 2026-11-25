@@ -70,7 +70,7 @@ pub fn friendly_error(err: &reqwest::Error) -> String {
 }
 
 /// 기본 원하는 컨텍스트.
-pub const DEFAULT_CONTEXT: u32 = 32768;
+pub const DEFAULT_CONTEXT: u32 = 16384;
 /// 모델 로드 요청 시간 제한(35B는 1분 가까이 걸릴 수 있다).
 const LOAD_TIMEOUT: Duration = Duration::from_secs(300);
 const QUICK_TIMEOUT: Duration = Duration::from_secs(10);
@@ -228,7 +228,7 @@ pub fn plan_load(models: &[LmModel], key: &str, wanted: u32) -> LoadPlan {
 /// 저장된 컨텍스트가 이 값보다 작으면 없는 것으로 본다.
 pub const MIN_CONTEXT: u32 = 1024;
 
-/// 모델별 설정이 있으면 그 값(1024 미만은 무시), 없으면 32768. 모델 최대 컨텍스트를 넘지 않는다.
+/// 모델별 설정이 있으면 그 값(1024 미만은 무시), 없으면 16384. 모델 최대 컨텍스트를 넘지 않는다.
 pub fn wanted_context(settings: &AppSettings, model: &LmModel) -> u32 {
     let want = settings
         .model_prefs
@@ -571,14 +571,17 @@ mod tests {
         let m = fixture();
         let q = m.iter().find(|x| x.key == "qwen3.5-9b").unwrap();
         let mut s = AppSettings::default();
-        assert_eq!(wanted_context(&s, q), 32768);
+        assert_eq!(wanted_context(&s, q), 16384);
+        let mut small_model = q.clone();
+        small_model.max_context_length = 8192;
+        assert_eq!(wanted_context(&s, &small_model), 8192);
         s.model_prefs.insert("qwen3.5-9b".into(), crate::store::ModelPref { context_length: Some(8192), reasoning: None });
         assert_eq!(wanted_context(&s, q), 8192);
         s.model_prefs.insert("qwen3.5-9b".into(), crate::store::ModelPref { context_length: Some(999_999), reasoning: None });
         assert_eq!(wanted_context(&s, q), 262144);
         for bad in [0u32, 1, 1023] {
             s.model_prefs.insert("qwen3.5-9b".into(), crate::store::ModelPref { context_length: Some(bad), reasoning: None });
-            assert_eq!(wanted_context(&s, q), 32768, "saved {bad} must fall back to the default");
+            assert_eq!(wanted_context(&s, q), 16384, "saved {bad} must fall back to the default");
         }
     }
 
