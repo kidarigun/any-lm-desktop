@@ -28,6 +28,20 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn ipv6_only_server_is_seen_through_localhost() {
+        // Vite처럼 ::1에만 열린 서버. 127.0.0.1 쪽 연결은 Windows에서 약 2초 뒤에야 거절된다.
+        let Ok(listener) = std::net::TcpListener::bind("[::1]:0") else { return };
+        let url = local_url(&format!("http://localhost:{}/", listener.local_addr().unwrap().port())).unwrap();
+        let started = Instant::now();
+        assert!(is_listening(&url).await);
+        assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+        drop(listener);
+        let started = Instant::now();
+        assert!(!is_listening(&url).await);
+        assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+    }
+
     #[cfg(windows)]
     #[tokio::test]
     async fn server_commands_run_in_the_project_folder_not_windows() {
@@ -148,6 +162,8 @@ use crate::terminal::{self, OpenRequest, TerminalInfo, TerminalKind, TerminalMan
 
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// 주소 하나에 연결해 보는 시간 (후보 주소마다 따로 센다).
+const PROBE_TIMEOUT: Duration = Duration::from_millis(300);
 pub(crate) const SERVER_EVENT: &str = "anylm-dev-server";
 const PREVIEW_EVENT: &str = "anylm-open-preview";
 
@@ -388,15 +404,17 @@ fn probe_addrs(url: &Url) -> Vec<SocketAddr> {
     }
 }
 
+/// 후보 주소에 동시에 연결해 본다. Windows는 거절된 127.0.0.1 연결이 약 2초 걸리고,
+/// Node 17+의 `listen('localhost')`(Vite·Astro)는 ::1에만 열리므로 차례로 시도하면 ::1을 못 본다.
 async fn is_listening(url: &Url) -> bool {
-    tokio::time::timeout(Duration::from_millis(300), async {
-        for addr in probe_addrs(url) {
-            if tokio::net::TcpStream::connect(addr).await.is_ok() {
-                return true;
-            }
+    let attempts: Vec<_> = probe_addrs(url).into_iter().map(|addr| Box::pin(async move {
+        match tokio::time::timeout(PROBE_TIMEOUT, tokio::net::TcpStream::connect(addr)).await {
+            Ok(Ok(_)) => Ok(()),
+            _ => Err(()),
         }
-        false
-    }).await.unwrap_or(false)
+    })).collect();
+    // select_ok는 빈 목록이면 패닉하므로 먼저 거른다.
+    !attempts.is_empty() && futures_util::future::select_ok(attempts).await.is_ok()
 }
 
 async fn watch<R: Runtime>(app: AppHandle<R>, id: String) {
